@@ -1138,7 +1138,7 @@ def _build_ytdlp_runtime_diagnostics(
     cookies_info: Optional[Dict[str, Any]] = None,
     profile_labels: Optional[List[str]] = None,
 ) -> str:
-    api_url, auth_token = _resolve_cobalt_api_settings()
+    api_url, auth_scheme, auth_token = _resolve_cobalt_api_settings()
     proxy = _first_env("YTDLP_PROXY")
     proxy_status = "off" if not proxy else f"on:{_proxy_scheme_label(proxy)}"
     po_token = _first_env("YOUTUBE_PO_TOKEN")
@@ -1160,6 +1160,7 @@ def _build_ytdlp_runtime_diagnostics(
         f"impersonate={impersonate}",
         f"po_token={'present' if po_token else 'missing'}",
         f"cobalt_auth={'present' if auth_token else 'missing'}",
+        f"cobalt_auth_scheme={(auth_scheme.lower() if auth_scheme else 'none')}",
         f"cobalt_host={_safe_url_host(api_url)}",
     ]
     if profile_labels:
@@ -1171,7 +1172,7 @@ def _build_youtube_botcheck_hint(cookies_info: Optional[Dict[str, Any]] = None) 
     info = cookies_info or _resolve_cookiefile_details()
     has_proxy = bool(_first_env("YTDLP_PROXY"))
     has_po_token = bool(_first_env("YOUTUBE_PO_TOKEN"))
-    _, cobalt_auth = _resolve_cobalt_api_settings()
+    _, _, cobalt_auth = _resolve_cobalt_api_settings()
 
     if not info.get("available"):
         base = (
@@ -1196,10 +1197,17 @@ def _build_youtube_botcheck_hint(cookies_info: Optional[Dict[str, Any]] = None) 
     return base
 
 
-def _resolve_cobalt_api_settings() -> Tuple[str, str]:
+def _resolve_cobalt_api_settings() -> Tuple[str, str, str]:
     api_url = _first_env("COBALT_API_URL", "COBALT_URL") or "https://api.cobalt.tools/"
-    auth_token = _first_env("COBALT_API_JWT", "COBALT_API_TOKEN", "COBALT_AUTH_TOKEN")
-    return api_url.strip(), auth_token.strip()
+    jwt_token = _first_env("COBALT_API_JWT")
+    if jwt_token:
+        return api_url.strip(), "Bearer", jwt_token.strip()
+
+    api_key = _first_env("COBALT_API_KEY", "COBALT_API_TOKEN", "COBALT_AUTH_TOKEN")
+    if api_key:
+        return api_url.strip(), "Api-Key", api_key.strip()
+
+    return api_url.strip(), "", ""
 
 
 def _disable_cobalt_fallback(reason: str):
@@ -2607,7 +2615,7 @@ class AutoModFetcher:
             if _COBALT_FALLBACK_DISABLED:
                 return None
             output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
-            api_url, auth_token = _resolve_cobalt_api_settings()
+            api_url, auth_scheme, auth_token = _resolve_cobalt_api_settings()
             
             if not auth_token and not _COBALT_MISSING_AUTH_HINT_SHOWN:
                 _COBALT_MISSING_AUTH_HINT_SHOWN = True
@@ -2633,7 +2641,7 @@ class AutoModFetcher:
                 "User-Agent": _MODERN_USER_AGENT
             }
             if auth_token:
-                headers["Authorization"] = f"Bearer {auth_token}"
+                headers["Authorization"] = f"{auth_scheme} {auth_token}"
             payload = {
                 "url": video_url,
                 "videoQuality": "1080",
@@ -2652,14 +2660,22 @@ class AutoModFetcher:
             if resp.status_code != 200:
                 response_text = (resp.text or "").strip()
                 lowered = response_text.lower()
-                if (
-                    "error.api.auth.jwt.missing" in lowered
-                    or ("jwt" in lowered and "missing" in lowered)
-                    or resp.status_code in (401, 403)
-                ):
+                if "error.api.auth.api-key.missing" in lowered or ("api-key" in lowered and "missing" in lowered):
                     _disable_cobalt_fallback(
-                        "configured/default Cobalt server requires JWT auth. "
-                        "Set COBALT_API_JWT or COBALT_API_TOKEN to enable it."
+                        "configured Cobalt server requires Api-Key auth. "
+                        "Set COBALT_API_TOKEN / COBALT_AUTH_TOKEN (or COBALT_API_KEY) with a valid instance-specific key."
+                    )
+                    return None
+                if "error.api.auth.jwt.missing" in lowered or ("jwt" in lowered and "missing" in lowered):
+                    _disable_cobalt_fallback(
+                        "configured/default Cobalt server requires Bearer JWT auth. "
+                        "Set COBALT_API_JWT or use an instance that accepts Api-Key auth."
+                    )
+                    return None
+                if resp.status_code in (401, 403):
+                    _disable_cobalt_fallback(
+                        "configured/default Cobalt server rejected the provided auth or requires an interactive challenge. "
+                        "Use a valid instance-specific token or a self-hosted Cobalt server."
                     )
                     return None
                 logger.warning(f"Cobalt API error: {resp.status_code} - {resp.text}")
