@@ -77,6 +77,7 @@ _YT_BOTCHECK_HINT_SHOWN = False
 _FB_HINT_SHOWN = False
 _COBALT_FALLBACK_DISABLED = False
 _COBALT_DISABLE_HINT_SHOWN = False
+_COBALT_MISSING_AUTH_HINT_SHOWN = False
 _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 _RUN_CYCLE_LOCK = threading.Lock()
 
@@ -828,7 +829,7 @@ def _parse_datetime_utc(value: Any) -> Optional[datetime]:
         return None
 
 
-def _build_yt_opts(extra_opts: dict = None, cookies_path: Optional[str] = None) -> dict:
+def _build_yt_opts(extra_opts: Optional[Dict[str, Any]] = None, cookies_path: Optional[Any] = None) -> Dict[str, Any]:
     """
     بناء إعدادات yt-dlp الموحدة مع دعم:
     - Proxy (عبر YTDLP_PROXY)
@@ -839,8 +840,13 @@ def _build_yt_opts(extra_opts: dict = None, cookies_path: Optional[str] = None) 
     """
     from src.agent.config import load_config
     cfg = load_config()
+    cookies_info = None
+    if isinstance(cookies_path, dict):
+        cookies_info = dict(cookies_path)
+        cookies_path = cookies_info.get("path") or ""
     if cookies_path is None:
-        cookies_path = _resolve_any_cookiefile()
+        cookies_info = _resolve_cookiefile_details()
+        cookies_path = cookies_info.get("path") or ""
 
     youtube_extractor_args = {}
     if not cookies_path:
@@ -849,7 +855,7 @@ def _build_yt_opts(extra_opts: dict = None, cookies_path: Optional[str] = None) 
             "player_client": ["ios", "android", "mweb"],
         }
 
-    opts = {
+    opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "no_check_certificate": True,
@@ -875,14 +881,14 @@ def _build_yt_opts(extra_opts: dict = None, cookies_path: Optional[str] = None) 
     }
 
     impersonate = (os.environ.get("YTDLP_IMPERSONATE") or "").strip()
-    if impersonate:
+    if impersonate and os.environ.get("YTDLP_SKIP_IMPERSONATE") != "1":
         opts["impersonate"] = impersonate
 
     # === Proxy (الأهم لتجاوز bot-check على سيرفرات datacenter) ===
     proxy = (os.environ.get("YTDLP_PROXY") or "").strip()
     if proxy:
         opts["proxy"] = proxy
-        logger.debug(f"Using proxy for yt-dlp: {proxy[:30]}...")
+        logger.debug("Using proxy for yt-dlp (scheme=%s)", _proxy_scheme_label(proxy))
 
     # === PO Token (Proof of Origin) ===
     po_token = (os.environ.get("YOUTUBE_PO_TOKEN") or "").strip()
@@ -897,9 +903,10 @@ def _build_yt_opts(extra_opts: dict = None, cookies_path: Optional[str] = None) 
     # === Cookies ===
     if cookies_path:
         opts["cookiefile"] = cookies_path
-        logger.info(
-            "🍪 Using yt-dlp cookies file: %s (allowing yt-dlp authenticated client defaults)",
-            os.path.basename(cookies_path),
+        logger.debug(
+            "🍪 Using yt-dlp cookies file: %s | source=%s",
+            _safe_path_label(cookies_path),
+            (cookies_info or {}).get("source") or "resolved",
         )
 
     # دمج الإعدادات الإضافية
@@ -995,6 +1002,200 @@ def _first_env(*names: str) -> str:
     return ""
 
 
+def _first_env_named(*names: str) -> Tuple[str, str]:
+    for name in names:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return name, value
+    return "", ""
+
+
+def _runtime_environment_name() -> str:
+    markers = (
+        "RENDER",
+        "RENDER_SERVICE_ID",
+        "RENDER_SERVICE_NAME",
+        "RENDER_EXTERNAL_URL",
+        "RENDER_INSTANCE_ID",
+    )
+    return "render" if any((os.environ.get(name) or "").strip() for name in markers) else "local_or_other"
+
+
+def _yt_dlp_version_label() -> str:
+    try:
+        import yt_dlp
+
+        version_obj = getattr(yt_dlp, "version", None)
+        if hasattr(version_obj, "__version__"):
+            return str(getattr(version_obj, "__version__", "unknown"))
+        return str(version_obj or getattr(yt_dlp, "__version__", "unknown"))
+    except Exception as exc:
+        return f"unavailable:{exc.__class__.__name__}"
+
+
+def _safe_path_label(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return "none"
+    norm = os.path.normpath(raw)
+    base = os.path.basename(norm)
+    parent = os.path.basename(os.path.dirname(norm))
+    if parent == ".data":
+        return os.path.join(parent, base)
+    return base or norm
+
+
+def _proxy_scheme_label(proxy: str) -> str:
+    raw = str(proxy or "").strip()
+    if not raw:
+        return "off"
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    return (parsed.scheme or "set").lower()
+
+
+def _safe_url_host(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return "unknown"
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    return parsed.hostname or parsed.netloc or parsed.path or "unknown"
+
+
+def _cookie_resolution_result(path: str = "", source: str = "none", issues: Optional[List[str]] = None) -> Dict[str, Any]:
+    normalized = os.path.normpath(path) if path else ""
+    return {
+        "path": normalized,
+        "source": source,
+        "available": bool(normalized),
+        "path_label": _safe_path_label(normalized),
+        "issues": [str(item) for item in (issues or []) if str(item).strip()],
+    }
+
+
+def _resolve_cookiefile_details() -> Dict[str, Any]:
+    issues: List[str] = []
+    data_dir = os.path.abspath(os.path.join(project_root, ".data"))
+
+    path_env_name, raw_path = _first_env_named("YTDLP_COOKIES_PATH", "YT_COOKIES_PATH", "COOKIES_PATH")
+    if raw_path:
+        try:
+            resolved_path = _resolve_project_runtime_path(raw_path)
+            if os.path.exists(resolved_path):
+                return _cookie_resolution_result(resolved_path, f"env_path:{path_env_name}", issues)
+            issues.append(f"{path_env_name}=missing:{_safe_path_label(resolved_path)}")
+        except Exception as exc:
+            issues.append(f"{path_env_name}=invalid:{exc.__class__.__name__}")
+
+    b64_env_name, raw_b64 = _first_env_named("YTDLP_COOKIES_B64", "YT_COOKIES_B64")
+    txt_env_name, raw_txt = _first_env_named("YTDLP_COOKIES_TEXT", "YT_COOKIES_TEXT")
+    inline_env_name = b64_env_name or txt_env_name
+    if raw_b64 or raw_txt:
+        try:
+            ResilientFS.makedirs(data_dir, exist_ok=True)
+            out_path = os.path.join(data_dir, "yt_dlp_cookies.txt")
+            if raw_b64:
+                content = base64.b64decode(raw_b64.encode("utf-8")).decode("utf-8", errors="replace")
+                source = f"env_b64:{inline_env_name}"
+            else:
+                content = raw_txt
+                source = f"env_text:{inline_env_name}"
+
+            normalized_content = content.strip()
+            if not normalized_content:
+                issues.append(f"{inline_env_name}=empty")
+            else:
+                ResilientFS.write_text(out_path, normalized_content, encoding="utf-8")
+                if os.path.exists(out_path):
+                    return _cookie_resolution_result(out_path, source, issues)
+                issues.append(f"{inline_env_name}=write_failed")
+        except Exception as exc:
+            issues.append(f"{inline_env_name}=error:{exc.__class__.__name__}")
+
+    default_candidates = [
+        (os.path.join(data_dir, "yt_dlp_cookies.txt"), "runtime_file:.data/yt_dlp_cookies.txt"),
+        (os.path.join(data_dir, "yt_cookies.txt"), "runtime_file:.data/yt_cookies.txt"),
+    ]
+    for candidate_path, source in default_candidates:
+        if os.path.exists(candidate_path):
+            return _cookie_resolution_result(candidate_path, source, issues)
+
+    common_cookie_files = [
+        "www.youtube.com_cookies.txt",
+        "youtube_cookies.txt",
+        "cookies.txt",
+        "youtube.com_cookies.txt",
+    ]
+    for filename in common_cookie_files:
+        candidate_path = os.path.join(project_root, filename)
+        if os.path.exists(candidate_path):
+            return _cookie_resolution_result(candidate_path, f"project_file:{filename}", issues)
+
+    return _cookie_resolution_result("", "none", issues)
+
+
+def _build_ytdlp_runtime_diagnostics(
+    context: str,
+    cookies_info: Optional[Dict[str, Any]] = None,
+    profile_labels: Optional[List[str]] = None,
+) -> str:
+    api_url, auth_token = _resolve_cobalt_api_settings()
+    proxy = _first_env("YTDLP_PROXY")
+    proxy_status = "off" if not proxy else f"on:{_proxy_scheme_label(proxy)}"
+    po_token = _first_env("YOUTUBE_PO_TOKEN")
+    impersonate = "skipped" if os.environ.get("YTDLP_SKIP_IMPERSONATE") == "1" else (_first_env("YTDLP_IMPERSONATE") or "off")
+    cookie_summary = "cookies=none"
+    if cookies_info:
+        if cookies_info.get("available"):
+            cookie_summary = f"cookies={cookies_info.get('source')}:{cookies_info.get('path_label')}"
+        if cookies_info.get("issues"):
+            cookie_summary += f" issues={';'.join(cookies_info['issues'][:2])}"
+
+    parts = [
+        f"ctx={context}",
+        f"runtime={_runtime_environment_name()}",
+        f"python={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        f"yt_dlp={_yt_dlp_version_label()}",
+        cookie_summary,
+        f"proxy={proxy_status}",
+        f"impersonate={impersonate}",
+        f"po_token={'present' if po_token else 'missing'}",
+        f"cobalt_auth={'present' if auth_token else 'missing'}",
+        f"cobalt_host={_safe_url_host(api_url)}",
+    ]
+    if profile_labels:
+        parts.append(f"profiles={','.join(profile_labels)}")
+    return " | ".join(parts)
+
+
+def _build_youtube_botcheck_hint(cookies_info: Optional[Dict[str, Any]] = None) -> str:
+    info = cookies_info or _resolve_cookiefile_details()
+    has_proxy = bool(_first_env("YTDLP_PROXY"))
+    has_po_token = bool(_first_env("YOUTUBE_PO_TOKEN"))
+    _, cobalt_auth = _resolve_cobalt_api_settings()
+
+    if not info.get("available"):
+        base = (
+            "No valid cookies were resolved. Configure YTDLP_COOKIES_PATH or "
+            "YTDLP_COOKIES_B64 / YTDLP_COOKIES_TEXT (legacy YT_COOKIES_* aliases still work)."
+        )
+    else:
+        base = f"Cookies were loaded from {info.get('source')} ({info.get('path_label')}) but YouTube still returned bot-check"
+        if _runtime_environment_name() == "render":
+            base += "; this usually points to datacenter/IP reputation or cookie/IP mismatch on Render"
+        base += "."
+
+    missing_steps = []
+    if not has_proxy:
+        missing_steps.append("YTDLP_PROXY")
+    if not has_po_token:
+        missing_steps.append("YOUTUBE_PO_TOKEN")
+    if missing_steps:
+        base += f" Consider {', '.join(missing_steps)} to reduce Render bot-check failures."
+    if not cobalt_auth:
+        base += " Cobalt auth token is missing, so fallback may fail on default/public Cobalt servers."
+    return base
+
+
 def _resolve_cobalt_api_settings() -> Tuple[str, str]:
     api_url = _first_env("COBALT_API_URL", "COBALT_URL") or "https://api.cobalt.tools/"
     auth_token = _first_env("COBALT_API_JWT", "COBALT_API_TOKEN", "COBALT_AUTH_TOKEN")
@@ -1010,86 +1211,11 @@ def _disable_cobalt_fallback(reason: str):
 
 
 def _resolve_yt_cookiefile() -> str:
-    # 1. Check environment variable
-    raw_path = _first_env("YT_COOKIES_PATH", "YTDLP_COOKIES_PATH", "COOKIES_PATH")
-    if raw_path:
-        path = _resolve_project_runtime_path(raw_path)
-        if os.path.exists(path):
-            return path
-
-    # 2. Check default local path in .data
-    data_dir = os.path.abspath(os.path.join(project_root, ".data"))
-    default_path = os.path.join(data_dir, "yt_cookies.txt")
-    if os.path.exists(default_path):
-        return default_path
-
-    # 3. Check for common cookie file names in the project root
-    common_cookie_files = [
-        "www.youtube.com_cookies.txt",
-        "youtube_cookies.txt",
-        "cookies.txt",
-        "youtube.com_cookies.txt"
-    ]
-    for filename in common_cookie_files:
-        path = os.path.join(project_root, filename)
-        if os.path.exists(path):
-            logger.info(f"🍪 Found YouTube cookies file in project root: {filename}")
-            return path
-
-    # 4. Check Base64/Text env vars
-    raw_b64 = _first_env("YT_COOKIES_B64", "YTDLP_COOKIES_B64")
-    raw_txt = _first_env("YT_COOKIES_TEXT", "YTDLP_COOKIES_TEXT")
-    if not raw_b64 and not raw_txt:
-        return ""
-
-    try:
-        ResilientFS.makedirs(data_dir, exist_ok=True)
-        out_path = os.path.join(data_dir, "yt_cookies.txt")
-
-        if raw_b64:
-            content = base64.b64decode(raw_b64.encode("utf-8")).decode("utf-8", errors="replace")
-        else:
-            content = raw_txt
-
-        if not content.strip():
-            return ""
-
-        with ResilientFS.open(out_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return out_path
-    except Exception as e:
-        logger.warning(f"Failed to prepare YT cookies file: {e}")
-        return ""
+    return _resolve_cookiefile_details().get("path") or ""
 
 
 def _resolve_any_cookiefile() -> str:
-    raw_path = _first_env("YTDLP_COOKIES_PATH", "YT_COOKIES_PATH", "COOKIES_PATH")
-    if raw_path:
-        try:
-            path = _resolve_project_runtime_path(raw_path)
-            if os.path.exists(path):
-                return path
-        except Exception:
-            pass
-
-    raw_b64 = _first_env("YTDLP_COOKIES_B64", "YT_COOKIES_B64")
-    raw_txt = _first_env("YTDLP_COOKIES_TEXT", "YT_COOKIES_TEXT")
-    if raw_b64 or raw_txt:
-        try:
-            data_dir = os.path.abspath(os.path.join(project_root, ".data"))
-            ResilientFS.makedirs(data_dir, exist_ok=True)
-            out_path = os.path.join(data_dir, "yt_dlp_cookies.txt")
-            if raw_b64:
-                content = base64.b64decode(raw_b64.encode("utf-8")).decode("utf-8", errors="replace")
-            else:
-                content = raw_txt
-            ResilientFS.write_text(out_path, content, encoding="utf-8")
-            if os.path.exists(out_path):
-                return out_path
-        except Exception as e:
-            logger.warning(f"Failed to prepare YTDLP cookies file: {e}")
-
-    return _resolve_yt_cookiefile()
+    return _resolve_cookiefile_details().get("path") or ""
 
 
 def _is_youtube_botcheck_error(err: Exception) -> bool:
@@ -2151,6 +2277,7 @@ class AutoModFetcher:
         """جلب الفيديوهات بشكل متزامن عبر yt-dlp مع retry وتخطي القيود بذكاء"""
 
         source_url = _normalize_facebook_source_url(source_url, platform)
+        cookies_info = _resolve_cookiefile_details()
 
         # تحسين رابط المصدر لليوتيوب شورتس
         if platform == "youtube_shorts" and ("youtube.com" in source_url or "youtu.be" in source_url):
@@ -2175,7 +2302,7 @@ class AutoModFetcher:
             "playlist_items": items_range,
             "ignoreerrors": True,
             "http_headers": header_overrides,
-        })
+        }, cookies_path=cookies_info)
 
         # === Retry مع backoff ذكي ===
         max_retries = 3
@@ -2213,14 +2340,14 @@ class AutoModFetcher:
                     error_type = "403_forbidden"
 
                 if not is_retryable or attempt >= max_retries:
-                    if _is_youtube_botcheck_error(e) and not _resolve_yt_cookiefile():
+                    if _is_youtube_botcheck_error(e):
                         global _YT_BOTCHECK_HINT_SHOWN
                         if not _YT_BOTCHECK_HINT_SHOWN:
                             _YT_BOTCHECK_HINT_SHOWN = True
                             logger.error(
-                                "🚫 YouTube bot-check detected! Configure cookies via "
-                                "YTDLP_COOKIES_PATH / YTDLP_COOKIES_B64 / YTDLP_COOKIES_TEXT "
-                                "(legacy YT_COOKIES_* aliases also work), and optionally set YTDLP_PROXY or YOUTUBE_PO_TOKEN."
+                                "🚫 YouTube bot-check detected! %s | %s",
+                                _build_youtube_botcheck_hint(cookies_info),
+                                _build_ytdlp_runtime_diagnostics("fetch_botcheck", cookies_info=cookies_info),
                             )
                     logger.error(f"yt-dlp fetch error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
                     break
@@ -2397,6 +2524,7 @@ class AutoModFetcher:
     def _download_sync(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
         """تنزيل بشكل متزامن — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة وretry"""
         output_dir = _ensure_runtime_dir(output_dir)
+        cookies_info = _resolve_cookiefile_details()
         normalized_video_url = _normalize_youtube_watch_url(video_url)
         if normalized_video_url and normalized_video_url != video_url:
             logger.info(
@@ -2427,21 +2555,23 @@ class AutoModFetcher:
                     # Bot-check — محاولة التجاوز عبر واجهة برمجية خارجية (Cobalt API)
                     if not _COBALT_FALLBACK_DISABLED:
                         logger.warning(
-                            f"🚫 YouTube bot-check detected ({error_code}): {error_reason}. Attempting fallback via Cobalt API..."
+                            "🚫 YouTube bot-check detected (%s): %s. Attempting fallback via Cobalt API... | %s",
+                            error_code,
+                            error_reason,
+                            _build_ytdlp_runtime_diagnostics("download_botcheck", cookies_info=cookies_info),
                         )
                         cobalt_result = self._download_via_cobalt(video_url, output_dir)
                         if cobalt_result:
                             return cobalt_result
                     
-                    if not _resolve_yt_cookiefile():
-                        global _YT_BOTCHECK_HINT_SHOWN
-                        if not _YT_BOTCHECK_HINT_SHOWN:
-                            _YT_BOTCHECK_HINT_SHOWN = True
-                            logger.error(
-                                "🚫 Cobalt API fallback also failed. Configure cookies via "
-                                "YTDLP_COOKIES_PATH / YTDLP_COOKIES_B64 / YTDLP_COOKIES_TEXT "
-                                "(legacy YT_COOKIES_* aliases also work)."
-                            )
+                    global _YT_BOTCHECK_HINT_SHOWN
+                    if not _YT_BOTCHECK_HINT_SHOWN:
+                        _YT_BOTCHECK_HINT_SHOWN = True
+                        logger.error(
+                            "🚫 Cobalt API fallback also failed. %s | %s",
+                            _build_youtube_botcheck_hint(cookies_info),
+                            _build_ytdlp_runtime_diagnostics("download_botcheck_fallback_failed", cookies_info=cookies_info),
+                        )
                     logger.error(f"yt-dlp download error ({error_code}): {error_reason} | raw={e}")
                     return None
 
@@ -2473,12 +2603,20 @@ class AutoModFetcher:
         try:
             import httpx
             import urllib.parse
+            global _COBALT_MISSING_AUTH_HINT_SHOWN
             if _COBALT_FALLBACK_DISABLED:
                 return None
             output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
             api_url, auth_token = _resolve_cobalt_api_settings()
             
-            logger.info(f"🔄 Cobalt API Fallback started for {video_url}")
+            if not auth_token and not _COBALT_MISSING_AUTH_HINT_SHOWN:
+                _COBALT_MISSING_AUTH_HINT_SHOWN = True
+                logger.warning(
+                    "⚠️ Cobalt fallback is running without auth token. Public/default servers may reject the request. | host=%s",
+                    _safe_url_host(api_url),
+                )
+
+            logger.info("🔄 Cobalt API Fallback started for %s | host=%s", video_url, _safe_url_host(api_url))
             
             # استخراج معرف الفيديو للإسم
             vid_id = "unknown_cobalt_vid"
@@ -2574,7 +2712,8 @@ class AutoModFetcher:
         video_url = _normalize_youtube_watch_url(video_url)
         output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
         output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
-        cookies_path = _resolve_any_cookiefile()
+        cookies_info = _resolve_cookiefile_details()
+        cookies_path = cookies_info.get("path") or ""
 
         # الحصول على مسار FFmpeg للدمج
         try:
@@ -2630,15 +2769,14 @@ class AutoModFetcher:
         ]
         if cookies_path:
             logger.info(
-                "🍪 yt-dlp cookie resolution active before download: %s | profiles=%s",
-                os.path.basename(cookies_path),
-                ", ".join(profile_labels),
+                "🍪 yt-dlp cookie resolution active before download: %s | %s",
+                cookies_info.get("source") or cookies_info.get("path_label"),
+                _build_ytdlp_runtime_diagnostics("download_attempt", cookies_info=cookies_info, profile_labels=profile_labels),
             )
         else:
             logger.warning(
-                "🍪 No yt-dlp cookies resolved before download. project_root=%s | profiles=%s",
-                project_root,
-                ", ".join(profile_labels),
+                "🍪 No yt-dlp cookies resolved before download. %s",
+                _build_ytdlp_runtime_diagnostics("download_attempt", cookies_info=cookies_info, profile_labels=profile_labels),
             )
         last_profile_error = None
 
@@ -2650,7 +2788,7 @@ class AutoModFetcher:
                     if key != "label":
                         dl_extra[key] = value
 
-                ydl_opts = _build_yt_opts(dl_extra, cookies_path=cookies_path)
+                ydl_opts = _build_yt_opts(dl_extra, cookies_path=cookies_info)
                 if os.environ.get("YTDLP_SKIP_IMPERSONATE") == "1":
                     ydl_opts.pop("impersonate", None)
 
