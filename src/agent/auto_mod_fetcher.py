@@ -60,6 +60,7 @@ import threading
 from contextlib import suppress
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
+from urllib.parse import parse_qs, urlparse
 
 from src.utils.resilient_fs import ResilientFS
 from src.agent.config import load_config
@@ -618,6 +619,49 @@ def _looks_like_shorts_url(url: Any) -> bool:
     if not raw:
         return False
     return any(marker in raw for marker in ("/shorts/", "/reel/", "/reels/"))
+
+
+def _clean_youtube_video_id(candidate: Any) -> str:
+    raw = str(candidate or "").strip()
+    if not raw:
+        return ""
+    if any(token in raw for token in ("://", "/", "?", "&", "=")):
+        return ""
+    return raw
+
+
+def _extract_youtube_video_id(url: Any, fallback_id: Any = None) -> str:
+    video_id = _clean_youtube_video_id(fallback_id)
+    raw = str(url or "").strip()
+    if not raw:
+        return video_id
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return video_id
+
+    host = (parsed.netloc or "").lower()
+    if not any(domain in host for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com")):
+        return video_id
+
+    path_parts = [part for part in (parsed.path or "").split("/") if part]
+    if "youtu.be" in host and path_parts:
+        return _clean_youtube_video_id(path_parts[0]) or video_id
+    if "shorts" in [part.lower() for part in path_parts]:
+        for idx, part in enumerate(path_parts):
+            if part.lower() == "shorts" and idx + 1 < len(path_parts):
+                return _clean_youtube_video_id(path_parts[idx + 1]) or video_id
+
+    query_video_id = parse_qs(parsed.query or "").get("v", [""])[0]
+    return _clean_youtube_video_id(query_video_id) or video_id
+
+
+def _normalize_youtube_watch_url(url: Any, fallback_id: Any = None) -> str:
+    raw = str(url or "").strip()
+    video_id = _extract_youtube_video_id(raw, fallback_id=fallback_id)
+    if not video_id:
+        return raw
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, source_url: Any = None) -> str:
@@ -2353,6 +2397,14 @@ class AutoModFetcher:
     def _download_sync(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
         """تنزيل بشكل متزامن — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة وretry"""
         output_dir = _ensure_runtime_dir(output_dir)
+        normalized_video_url = _normalize_youtube_watch_url(video_url)
+        if normalized_video_url and normalized_video_url != video_url:
+            logger.info(
+                "🔁 Normalized YouTube download URL for yt-dlp: %s -> %s",
+                video_url,
+                normalized_video_url,
+            )
+            video_url = normalized_video_url
         max_retries = 3
         last_error = None
 
@@ -2519,6 +2571,7 @@ class AutoModFetcher:
     def _download_sync_attempt(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
         """محاولة واحدة للتنزيل — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة"""
         import yt_dlp
+        video_url = _normalize_youtube_watch_url(video_url)
         output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
         output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
         cookies_path = _resolve_any_cookiefile()
