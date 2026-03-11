@@ -2635,10 +2635,20 @@ class AutoModFetcher:
             elif "shorts/" in video_url:
                 vid_id = video_url.split("shorts/")[-1].split("?")[0]
             
+            # محاكاة لمتصفح حقيقي لتجاوز حماية Cloudflare (التي تحظر curl/httpx)
             headers = {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": _MODERN_USER_AGENT
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Origin": "https://cobalt.tools",
+                "Referer": "https://cobalt.tools/",
+                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
+                "Accept-Language": "en-US,en;q=0.9"
             }
             if auth_token:
                 headers["Authorization"] = f"{auth_scheme} {auth_token}"
