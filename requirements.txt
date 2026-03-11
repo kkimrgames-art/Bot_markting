@@ -1,0 +1,15 @@
+python-telegram-bot[job-queue]>=21,<22
+python-dotenv>=1.0,<2
+supabase>=2.0,<3
+yt-dlp[default]>=2025.1.15
+requests>=2.31,<3
+google-api-python-client>=2.145.0
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.1
+arabic-reshaper>=3.0.0
+python-bidi==0.4.2
+Pillow>=10.0.0
+fonttools>=4.0
+psutil>=5.9.0
+aiohttp>=3.8.0
+httpx>=0.24.0

@@ -1,0 +1,72 @@
+{
+  "min_hashtags": 4,
+  "max_hashtags": 7,
+  "title_templates": {
+    "default": ["{hook} | {topic}", "{topic} - {focus}", "{focus} in {topic}"],
+    "ar": ["{hook} | {topic}", "{focus} في {topic}", "{topic} - {hook}", "{topic} | {focus}"],
+    "en": ["{hook} | {topic}", "{focus} in {topic}", "{topic} - {focus}", "{hook}: {topic}"]
+  },
+  "intro_lines": {
+    "default": ["A quick clip about {topic}.", "A short look at {topic}."],
+    "ar": ["فيديو سريع عن {topic}.", "لقطة مختصرة حول {topic}.", "اليوم معنا {topic} بشكل سريع."],
+    "en": ["A quick clip about {topic}.", "Here is a short look at {topic}."]
+  },
+  "body_templates": {
+    "default": ["This video focuses on {focus} with a clear and direct presentation.", "Watch for {keyword} and the details around it."],
+    "ar": ["هذا المقطع يركز على {focus} بطريقة سريعة وواضحة.", "ستلاحظ {keyword} وبعض التفاصيل التي تهم المتابعين.", "المحتوى مناسب لمن يهتم بـ {topic_alt}."],
+    "en": ["This clip focuses on {focus} in a simple and direct way.", "Watch for {keyword} and the details around it."]
+  },
+  "outro_lines": {
+    "default": ["Share your opinion in the comments.", "Follow for more clips like this."],
+    "ar": ["إذا أعجبك المحتوى شارك رأيك في التعليقات.", "للمزيد من المقاطع المشابهة تابع القناة.", "أخبرنا في التعليقات بما تريد رؤيته لاحقًا."],
+    "en": ["Share your opinion in the comments.", "Follow for more clips like this."]
+  },
+  "hooks": {
+    "default": ["Watch now", "Quick highlight"],
+    "ar": ["شاهد الآن", "لا يفوتك", "لقطة اليوم", "مختصر مفيد"],
+    "en": ["Watch now", "Worth a look", "Quick highlight"]
+  },
+  "focus_words": {
+    "default": ["best moments", "key details"],
+    "ar": ["أبرز اللقطات", "تفاصيل مهمة", "أفضل اللحظات", "نقطة تستحق الانتباه"],
+    "en": ["best moments", "key details", "quick breakdown"]
+  },
+  "keywords": {
+    "default": ["shorts", "gaming", "video"],
+    "ar": ["ماين كرافت", "مودات", "شورتس", "العاب", "مقطع قصير"],
+    "en": ["minecraft", "mods", "gaming", "shorts", "video"]
+  },
+  "hashtags": {
+    "default": ["#shorts", "#video", "#gaming"],
+    "ar": ["#shorts", "#ماين_كرافت", "#مودات", "#العاب", "#شورتس"],
+    "en": ["#shorts", "#minecraft", "#mods", "#gaming"]
+  },
+  "synonyms": {
+    "ar": {
+      "مود": ["إضافة", "تعديل"],
+      "مودات": ["إضافات", "تعديلات"],
+      "ماينكرافت": ["ماين كرافت", "Minecraft"],
+      "شورت": ["مقطع سريع", "فيديو قصير"]
+    },
+    "en": {
+      "mods": ["addons", "modded gameplay"],
+      "short": ["quick clip", "short video"]
+    }
+  },
+  "topic_profiles": [
+    {
+      "match_any": ["minecraft", "ماين", "كرافت"],
+      "hooks": {"ar": ["عشاق ماين كرافت", "للمتابعين في ماين كرافت"], "en": ["Minecraft fans", "Minecraft moment"]},
+      "focus_words": {"ar": ["تفصيل داخل اللعبة", "لقطة ماين كرافت"], "en": ["minecraft moment", "in-game detail"]},
+      "keywords": {"ar": ["ماين كرافت", "بيدروك", "سيرفايفل"], "en": ["minecraft", "bedrock", "survival"]},
+      "hashtags": {"ar": ["#minecraft", "#ماين_كرافت"], "en": ["#minecraft", "#mcpe"]}
+    },
+    {
+      "match_any": ["mod", "mods", "مود", "مودات", "addon", "إضافة"],
+      "focus_words": {"ar": ["مود مميز", "إضافة مختلفة"], "en": ["mod showcase", "addon detail"]},
+      "keywords": {"ar": ["مود", "مودات", "إضافة"], "en": ["mods", "addon", "modded"]},
+      "hashtags": {"ar": ["#مودات", "#اضافات"], "en": ["#mods", "#addon"]}
+    }
+  ],
+  "channel_overrides": {}
+}

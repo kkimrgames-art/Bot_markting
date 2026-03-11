@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: auto-mod-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt && python install_ffmpeg.py
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_USER_IDS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: INSTANCE_ID
+        value: render_web_1
+      - key: USE_SUPABASE
+        value: "true"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: YTDLP_COOKIES_B64
+        sync: false
+      - key: YTDLP_COOKIES_PATH
+        sync: false
+      - key: YTDLP_PROXY
+        sync: false
+      - key: YTDLP_IMPERSONATE
+        sync: false
