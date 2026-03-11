@@ -76,6 +76,10 @@ logger = logging.getLogger(__name__)
 _YT_BOTCHECK_HINT_SHOWN = False
 _FB_HINT_SHOWN = False
 _COBALT_FALLBACK_DISABLED = False
+_COBALT_FALLBACK_DISABLED_HOSTS: Dict[str, str] = {}
+_COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST: Dict[str, float] = {}
+_COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST: Dict[str, str] = {}
+_COBALT_FALLBACK_COOLDOWN_SECONDS = 900
 _COBALT_DISABLE_HINT_SHOWN = False
 _COBALT_MISSING_AUTH_HINT_SHOWN = False
 _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -1210,12 +1214,70 @@ def _resolve_cobalt_api_settings() -> Tuple[str, str, str]:
     return api_url.strip(), "", ""
 
 
-def _disable_cobalt_fallback(reason: str):
+def _get_cobalt_fallback_disable_state(api_url: str = "") -> Tuple[bool, str]:
+    if _COBALT_FALLBACK_DISABLED:
+        return True, "fallback disabled globally for this process"
+
+    resolved_api_url = api_url or _resolve_cobalt_api_settings()[0]
+    host = _safe_url_host(resolved_api_url)
+    permanent_reason = _COBALT_FALLBACK_DISABLED_HOSTS.get(host)
+    if permanent_reason:
+        return True, permanent_reason
+
+    cooldown_until = _COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST.get(host, 0.0)
+    if cooldown_until and cooldown_until <= time.time():
+        _COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST.pop(host, None)
+        _COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST.pop(host, None)
+        return False, ""
+
+    if cooldown_until:
+        reason = _COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST.get(host) or "fallback temporarily disabled for this host"
+        remaining_seconds = max(1, int(cooldown_until - time.time()))
+        return True, f"{reason} Retry after about {remaining_seconds}s."
+
+    return False, ""
+
+
+def _disable_cobalt_fallback(reason: str, api_url: str = ""):
     global _COBALT_FALLBACK_DISABLED, _COBALT_DISABLE_HINT_SHOWN
-    _COBALT_FALLBACK_DISABLED = True
+    if _COBALT_FALLBACK_DISABLED:
+        if reason and not _COBALT_DISABLE_HINT_SHOWN:
+            _COBALT_DISABLE_HINT_SHOWN = True
+            logger.warning(f"⚠️ Cobalt API fallback disabled for this process: {reason}")
+        return
+
+    resolved_api_url = api_url or _resolve_cobalt_api_settings()[0]
+    host = _safe_url_host(resolved_api_url)
+    if host:
+        _COBALT_FALLBACK_DISABLED_HOSTS[host] = reason or "fallback disabled for this host in this process"
+
     if reason and not _COBALT_DISABLE_HINT_SHOWN:
         _COBALT_DISABLE_HINT_SHOWN = True
-        logger.warning(f"⚠️ Cobalt API fallback disabled for this process: {reason}")
+        logger.warning("⚠️ Cobalt API fallback disabled for host=%s for this process: %s", host, reason)
+
+
+def _temporarily_disable_cobalt_fallback(
+    reason: str,
+    api_url: str = "",
+    cooldown_seconds: int = _COBALT_FALLBACK_COOLDOWN_SECONDS,
+):
+    resolved_api_url = api_url or _resolve_cobalt_api_settings()[0]
+    host = _safe_url_host(resolved_api_url)
+    if not host:
+        host = "unknown"
+
+    cooldown_until = time.time() + max(1, int(cooldown_seconds))
+    _COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST[host] = max(
+        _COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST.get(host, 0.0),
+        cooldown_until,
+    )
+    _COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST[host] = reason or "fallback temporarily disabled for this host"
+    logger.warning(
+        "⚠️ Cobalt API fallback temporarily disabled for host=%s for %ss: %s",
+        host,
+        max(1, int(cooldown_seconds)),
+        reason,
+    )
 
 
 def _resolve_yt_cookiefile() -> str:
@@ -2561,7 +2623,9 @@ class AutoModFetcher:
                 error_code, error_reason = _classify_download_error(e)
                 if _is_youtube_botcheck_error(e):
                     # Bot-check — محاولة التجاوز عبر واجهة برمجية خارجية (Cobalt API)
-                    if not _COBALT_FALLBACK_DISABLED:
+                    cobalt_api_url, _, _ = _resolve_cobalt_api_settings()
+                    cobalt_disabled, cobalt_disable_reason = _get_cobalt_fallback_disable_state(cobalt_api_url)
+                    if not cobalt_disabled:
                         logger.warning(
                             "🚫 YouTube bot-check detected (%s): %s. Attempting fallback via Cobalt API... | %s",
                             error_code,
@@ -2571,6 +2635,12 @@ class AutoModFetcher:
                         cobalt_result = self._download_via_cobalt(video_url, output_dir)
                         if cobalt_result:
                             return cobalt_result
+                    elif cobalt_disable_reason:
+                        logger.warning(
+                            "⏭️ Skipping Cobalt API fallback for host=%s: %s",
+                            _safe_url_host(cobalt_api_url),
+                            cobalt_disable_reason,
+                        )
                     
                     global _YT_BOTCHECK_HINT_SHOWN
                     if not _YT_BOTCHECK_HINT_SHOWN:
@@ -2608,14 +2678,22 @@ class AutoModFetcher:
 
     def _download_via_cobalt(self, video_url: str, output_dir: str) -> Optional[str]:
         """تنزيل الفيديو كـ Fallback باستخدام Cobalt API لتجاوز bot-check"""
+        api_url = ""
         try:
             import httpx
             import urllib.parse
             global _COBALT_MISSING_AUTH_HINT_SHOWN
-            if _COBALT_FALLBACK_DISABLED:
-                return None
-            output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
             api_url, auth_scheme, auth_token = _resolve_cobalt_api_settings()
+            cobalt_disabled, cobalt_disable_reason = _get_cobalt_fallback_disable_state(api_url)
+            if cobalt_disabled:
+                logger.warning(
+                    "⏭️ Skipping Cobalt API fallback request for host=%s: %s",
+                    _safe_url_host(api_url),
+                    cobalt_disable_reason,
+                )
+                return None
+
+            output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
             
             if not auth_token and not _COBALT_MISSING_AUTH_HINT_SHOWN:
                 _COBALT_MISSING_AUTH_HINT_SHOWN = True
@@ -2673,19 +2751,22 @@ class AutoModFetcher:
                 if "error.api.auth.api-key.missing" in lowered or ("api-key" in lowered and "missing" in lowered):
                     _disable_cobalt_fallback(
                         "configured Cobalt server requires Api-Key auth. "
-                        "Set COBALT_API_TOKEN / COBALT_AUTH_TOKEN (or COBALT_API_KEY) with a valid instance-specific key."
+                        "Set COBALT_API_TOKEN / COBALT_AUTH_TOKEN (or COBALT_API_KEY) with a valid instance-specific key.",
+                        api_url=api_url,
                     )
                     return None
                 if "error.api.auth.jwt.missing" in lowered or ("jwt" in lowered and "missing" in lowered):
                     _disable_cobalt_fallback(
                         "configured/default Cobalt server requires Bearer JWT auth. "
-                        "Set COBALT_API_JWT or use an instance that accepts Api-Key auth."
+                        "Set COBALT_API_JWT or use an instance that accepts Api-Key auth.",
+                        api_url=api_url,
                     )
                     return None
                 if resp.status_code in (401, 403):
-                    _disable_cobalt_fallback(
+                    _temporarily_disable_cobalt_fallback(
                         "configured/default Cobalt server rejected the provided auth or requires an interactive challenge. "
-                        "Use a valid instance-specific token or a self-hosted Cobalt server."
+                        "Use a valid instance-specific token or a self-hosted Cobalt server.",
+                        api_url=api_url,
                     )
                     return None
                 logger.warning(f"Cobalt API error: {resp.status_code} - {resp.text}")
@@ -2729,6 +2810,21 @@ class AutoModFetcher:
             return output_file
             
         except Exception as e:
+            lowered = str(e).lower()
+            if any(token in lowered for token in [
+                "name resolution",
+                "no address associated",
+                "temporary failure",
+                "network is unreachable",
+                "connection refused",
+                "timed out",
+                "timeout",
+            ]):
+                _temporarily_disable_cobalt_fallback(
+                    "configured Cobalt host could not be reached from this runtime.",
+                    api_url=api_url,
+                    cooldown_seconds=600,
+                )
             logger.error(f"Cobalt API Fallback failed: {e}")
             return None
 
