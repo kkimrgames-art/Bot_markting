@@ -1,0 +1,4047 @@
+"""
+محرك الجلب التلقائي لفيديوهات المودات
+نظام مستقل يعمل على Render مع دعم نسخ متعددة عبر Supabase
+"""
+import os
+import sys
+
+# إضافة مسار المشروع للجذر للسماح بالتشغيل المباشر
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+
+def _project_local_path(*parts: str) -> str:
+    return os.path.abspath(os.path.join(project_root, *parts))
+
+
+def _resolve_project_runtime_path(raw_path: str) -> str:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    return _project_local_path(raw)
+
+
+def _ensure_runtime_dir(path: str) -> str:
+    resolved = os.path.abspath(str(path or ""))
+    if resolved:
+        ResilientFS.makedirs(resolved, exist_ok=True)
+    return resolved
+
+
+def _create_runtime_dir_keepalive(path: str, marker_name: str = ".automod_active") -> tuple[str, str]:
+    resolved = _ensure_runtime_dir(path)
+    marker_path = os.path.join(resolved, marker_name)
+    if resolved:
+        with suppress(Exception):
+            with ResilientFS.open(marker_path, "w", encoding="utf-8") as fh:
+                fh.write(str(time.time()))
+    return resolved, marker_path
+
+
+def _release_runtime_dir_keepalive(marker_path: str) -> None:
+    if marker_path:
+        with suppress(Exception):
+            ResilientFS.remove(marker_path)
+
+import logging
+import asyncio
+import time
+import uuid
+import subprocess
+import json
+import re
+import random
+import shutil
+import base64
+import threading
+from contextlib import suppress
+from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timezone, timedelta
+
+from src.utils.resilient_fs import ResilientFS
+from src.agent.config import load_config
+from src.bot.persistence import (
+    has_pending_raw_reviews,
+    get_pending_raw_review,
+    is_raw_review_approved,
+    is_raw_review_blocked,
+    is_raw_review_skip_active,
+)
+
+logger = logging.getLogger(__name__)
+_YT_BOTCHECK_HINT_SHOWN = False
+_FB_HINT_SHOWN = False
+_COBALT_FALLBACK_DISABLED = False
+_COBALT_DISABLE_HINT_SHOWN = False
+_MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+_RUN_CYCLE_LOCK = threading.Lock()
+
+_OVERLAY_POSITIONS = {
+    "top": "top",
+    "top_center": "top",
+    "top-center": "top",
+    "center": "center",
+    "middle": "center",
+    "bottom": "bottom",
+    "bottom_center": "bottom",
+    "bottom-center": "bottom",
+}
+
+_VIDEO_EFFECT_TYPES = {
+    "none": "none",
+    "off": "none",
+    "disabled": "none",
+    "no": "none",
+    "blur": "blur",
+    "normal_blur": "blur",
+    "black_blur": "black_blur",
+    "blur_black": "black_blur",
+    "black": "black_blur",
+}
+
+_FACECAM_SHAPES = {
+    "circle": "circle",
+    "round": "circle",
+    "rounded": "circle",
+    "square": "square",
+    "rect": "square",
+    "rectangle": "square",
+}
+
+_FACECAM_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
+_FACECAM_LAYOUT_PRESETS = {
+    "top_center": {"layout": "top_center", "position": "top_center", "shape": "circle", "scale": 0.28},
+    "bottom_center": {"layout": "bottom_center", "position": "bottom_center", "shape": "circle", "scale": 0.28},
+    "small_circle_top_left": {"layout": "small_circle_top_left", "position": "top_left", "shape": "circle", "scale": 0.18},
+    "small_circle_top_right": {"layout": "small_circle_top_right", "position": "top_right", "shape": "circle", "scale": 0.18},
+    "small_circle_bottom_right": {"layout": "small_circle_bottom_right", "position": "bottom_right", "shape": "circle", "scale": 0.18},
+    "small_circle_bottom_left": {"layout": "small_circle_bottom_left", "position": "bottom_left", "shape": "circle", "scale": 0.18},
+}
+
+_FACECAM_LAYOUT_ALIASES = {
+    "top": "top_center",
+    "top-center": "top_center",
+    "top_center": "top_center",
+    "bottom": "bottom_center",
+    "bottom-center": "bottom_center",
+    "bottom_center": "bottom_center",
+    "small_circle_top_left": "small_circle_top_left",
+    "small-circle-top-left": "small_circle_top_left",
+    "top_left_small_circle": "small_circle_top_left",
+    "small_top_left": "small_circle_top_left",
+    "circle_small_top_left": "small_circle_top_left",
+    "small_circle_top_right": "small_circle_top_right",
+    "small-circle-top-right": "small_circle_top_right",
+    "top_right_small_circle": "small_circle_top_right",
+    "small_top_right": "small_circle_top_right",
+    "circle_small_top_right": "small_circle_top_right",
+    "small_circle_bottom_right": "small_circle_bottom_right",
+    "small-circle-bottom-right": "small_circle_bottom_right",
+    "bottom_right_small_circle": "small_circle_bottom_right",
+    "small_bottom_right": "small_circle_bottom_right",
+    "circle_small_bottom_right": "small_circle_bottom_right",
+    "small_circle_bottom_left": "small_circle_bottom_left",
+    "small-circle-bottom-left": "small_circle_bottom_left",
+    "bottom_left_small_circle": "small_circle_bottom_left",
+    "small_bottom_left": "small_circle_bottom_left",
+    "circle_small_bottom_left": "small_circle_bottom_left",
+    "custom": "custom",
+}
+
+_FACECAM_POSITION_ALIASES = {
+    "top": "top_center",
+    "top-center": "top_center",
+    "top_center": "top_center",
+    "bottom": "bottom_center",
+    "bottom-center": "bottom_center",
+    "bottom_center": "bottom_center",
+    "top-right": "top_right",
+    "top_right": "top_right",
+    "top-left": "top_left",
+    "top_left": "top_left",
+    "bottom-right": "bottom_right",
+    "bottom_right": "bottom_right",
+    "bottom-left": "bottom_left",
+    "bottom_left": "bottom_left",
+    "center": "center",
+}
+
+
+def _normalize_facecam_position(value: Any) -> str:
+    return _FACECAM_POSITION_ALIASES.get(str(value or "top_center").strip().lower(), "top_center")
+
+
+def _normalize_facecam_scale_value(value: Any, default: float = 0.28) -> float:
+    try:
+        scale = float(value if value is not None else default)
+    except Exception:
+        scale = default
+    return min(max(scale, 0.1), 0.8)
+
+
+def _infer_facecam_layout(position: str, shape: str, scale: float) -> str:
+    if position == "top_left" and shape == "circle" and scale <= 0.24:
+        return "small_circle_top_left"
+    if position == "top_right" and shape == "circle" and scale <= 0.24:
+        return "small_circle_top_right"
+    if position == "bottom_right" and shape == "circle" and scale <= 0.24:
+        return "small_circle_bottom_right"
+    if position == "bottom_left" and shape == "circle" and scale <= 0.24:
+        return "small_circle_bottom_left"
+    if position == "bottom_center" and shape == "circle" and 0.24 <= scale <= 0.32:
+        return "bottom_center"
+    if position == "top_center" and shape == "circle" and 0.24 <= scale <= 0.32:
+        return "top_center"
+    return "custom"
+
+
+def resolve_facecam_layout_config(
+    layout: Any = None,
+    *,
+    position: Any = None,
+    shape: Any = None,
+    scale: Any = None,
+) -> Dict[str, Any]:
+    layout_key = _FACECAM_LAYOUT_ALIASES.get(str(layout or "").strip().lower(), str(layout or "").strip().lower())
+    if layout_key in _FACECAM_LAYOUT_PRESETS:
+        return dict(_FACECAM_LAYOUT_PRESETS[layout_key])
+
+    normalized_position = _normalize_facecam_position(position)
+    normalized_shape = _FACECAM_SHAPES.get(str(shape or "circle").strip().lower(), "circle")
+    normalized_scale = _normalize_facecam_scale_value(scale, 0.28)
+    return {
+        "layout": _infer_facecam_layout(normalized_position, normalized_shape, normalized_scale),
+        "position": normalized_position,
+        "shape": normalized_shape,
+        "scale": normalized_scale,
+    }
+
+
+def parse_source_settings(raw_settings: Any) -> Dict[str, Any]:
+    if isinstance(raw_settings, dict):
+        return dict(raw_settings)
+    if isinstance(raw_settings, str):
+        raw_text = raw_settings.strip()
+        if not raw_text:
+            return {}
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _split_configured_texts(value: Any, *, allow_blocks: bool = False) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        return []
+
+    raw = value.strip()
+    if not raw:
+        return []
+
+    if allow_blocks:
+        parts = []
+        current = []
+        for line in raw.splitlines():
+            if line.strip() == "---":
+                block = "\n".join(current).strip()
+                if block:
+                    parts.append(block)
+                current = []
+                continue
+            current.append(line.rstrip())
+        block = "\n".join(current).strip()
+        if block:
+            parts.append(block)
+        if parts:
+            return parts
+
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
+    settings = parse_source_settings(raw_settings)
+    normalized = dict(settings)
+
+    def _normalize_overlay_animation_config(raw_animation: Any) -> Dict[str, Any]:
+        animation_type = "none"
+        duration = 0.0
+        enabled = False
+
+        if isinstance(raw_animation, dict):
+            animation_type = str(raw_animation.get("type") or raw_animation.get("animation") or "none").strip().lower()
+            enabled = _to_bool(raw_animation.get("enabled"), animation_type not in {"none", "off", "disabled", "no"})
+            duration = raw_animation.get("duration", 0.6)
+        elif isinstance(raw_animation, str):
+            animation_type = raw_animation.strip().lower()
+            enabled = animation_type not in {"none", "off", "disabled", "no"}
+            duration = 0.6
+
+        animation_aliases = {
+            "none": "none",
+            "off": "none",
+            "disabled": "none",
+            "no": "none",
+            "fade": "fade",
+            "blur": "blur",
+        }
+        animation_type = animation_aliases.get(animation_type, "none")
+        try:
+            duration = max(0.0, float(duration or 0.0))
+        except Exception:
+            duration = 0.0
+
+        if animation_type == "none" or not enabled:
+            return {"enabled": False, "type": "none", "duration": 0.0}
+
+        duration = min(max(duration, 0.2), 2.0)
+        return {"enabled": True, "type": animation_type, "duration": duration}
+
+    def _normalize_video_effect_config(raw_effect: Any) -> Dict[str, Any]:
+        effect_type = "none"
+        duration = 0.0
+        enabled = False
+
+        if isinstance(raw_effect, dict):
+            effect_type = str(raw_effect.get("type") or raw_effect.get("effect") or "none").strip().lower()
+            enabled = _to_bool(raw_effect.get("enabled"), effect_type not in {"none", "off", "disabled", "no"})
+            duration = raw_effect.get("duration", 1.0)
+        elif isinstance(raw_effect, str):
+            effect_type = raw_effect.strip().lower()
+            enabled = effect_type not in {"none", "off", "disabled", "no"}
+            duration = 1.0
+
+        effect_type = _VIDEO_EFFECT_TYPES.get(effect_type, "none")
+        try:
+            duration = max(0.0, float(duration or 0.0))
+        except Exception:
+            duration = 0.0
+
+        if effect_type == "none" or not enabled:
+            return {"enabled": False, "type": "none", "duration": 0.0}
+
+        duration = min(max(duration, 0.3), 3.0)
+        return {"enabled": True, "type": effect_type, "duration": duration}
+
+    def _normalize_facecam_clip(raw_clip: Any, index: int) -> Optional[Dict[str, Any]]:
+        if isinstance(raw_clip, str):
+            raw_path = raw_clip.strip()
+            if not raw_path:
+                return None
+            raw_clip = {"path": raw_path}
+        elif not isinstance(raw_clip, dict):
+            return None
+
+        raw_path = str(raw_clip.get("path") or "").strip()
+        if not raw_path:
+            return None
+
+        clip_name = str(raw_clip.get("name") or os.path.basename(raw_path) or f"facecam_{index + 1}").strip()
+        clip_id = str(raw_clip.get("id") or os.path.splitext(clip_name)[0] or uuid.uuid4()).strip()
+        created_at = str(raw_clip.get("created_at") or "").strip()
+        enabled = _to_bool(raw_clip.get("enabled"), True)
+        return {
+            "id": clip_id or str(uuid.uuid4()),
+            "path": raw_path.replace("\\", "/"),
+            "name": clip_name,
+            "enabled": enabled,
+            "created_at": created_at,
+        }
+
+    overlay_raw = settings.get("shorts_overlay") if isinstance(settings.get("shorts_overlay"), dict) else {}
+    overlay_texts = _split_configured_texts(overlay_raw.get("texts"))
+    overlay_timing = str(overlay_raw.get("timing") or "full").strip().lower()
+    if overlay_timing not in {"start", "end", "full"}:
+        overlay_timing = "full"
+    overlay_duration = overlay_raw.get("duration", 2.0)
+    try:
+        overlay_duration = max(0.5, float(overlay_duration))
+    except Exception:
+        overlay_duration = 2.0
+    overlay_position = _OVERLAY_POSITIONS.get(
+        str(overlay_raw.get("screen_position") or "top").strip().lower(),
+        "top",
+    )
+    overlay_mode = str(overlay_raw.get("selection_mode") or "fixed").strip().lower()
+    if overlay_mode not in {"fixed", "random"}:
+        overlay_mode = "fixed"
+    normalized["shorts_overlay"] = {
+        "enabled": bool(overlay_raw.get("enabled", False)) and bool(overlay_texts),
+        "texts": overlay_texts,
+        "selection_mode": overlay_mode,
+        "timing": overlay_timing,
+        "duration": overlay_duration,
+        "screen_position": overlay_position,
+        "intro_animation": _normalize_overlay_animation_config(overlay_raw.get("intro_animation") or settings.get("overlay_intro_animation")),
+        "outro_animation": _normalize_overlay_animation_config(overlay_raw.get("outro_animation") or settings.get("overlay_outro_animation")),
+    }
+
+    desc_raw = settings.get("extra_description") if isinstance(settings.get("extra_description"), dict) else {}
+    desc_texts = _split_configured_texts(desc_raw.get("texts"), allow_blocks=True)
+    desc_mode = str(desc_raw.get("selection_mode") or "fixed").strip().lower()
+    if desc_mode not in {"fixed", "random"}:
+        desc_mode = "fixed"
+    placement = str(desc_raw.get("placement") or "append").strip().lower()
+    if placement not in {"append", "prepend"}:
+        placement = "append"
+    normalized["extra_description"] = {
+        "enabled": bool(desc_raw.get("enabled", False)) and bool(desc_texts),
+        "texts": desc_texts,
+        "selection_mode": desc_mode,
+        "placement": placement,
+    }
+    tail_trim_raw = settings.get("tail_trim")
+    if isinstance(tail_trim_raw, dict):
+        tail_trim_enabled = _to_bool(tail_trim_raw.get("enabled"), False)
+        tail_trim_seconds = tail_trim_raw.get("seconds", 0.0)
+    elif isinstance(tail_trim_raw, (int, float, str)):
+        tail_trim_enabled = True
+        tail_trim_seconds = tail_trim_raw
+    else:
+        tail_trim_enabled = False
+        tail_trim_seconds = 0.0
+    try:
+        tail_trim_seconds = max(0.0, float(tail_trim_seconds or 0.0))
+    except Exception:
+        tail_trim_seconds = 0.0
+    normalized["tail_trim"] = {
+        "enabled": bool(tail_trim_enabled and tail_trim_seconds > 0),
+        "seconds": tail_trim_seconds,
+    }
+    effects_root = settings.get("video_effects") if isinstance(settings.get("video_effects"), dict) else {}
+    normalized["video_effects"] = {
+        "intro": _normalize_video_effect_config(effects_root.get("intro") or settings.get("intro_effect")),
+        "outro": _normalize_video_effect_config(effects_root.get("outro") or settings.get("outro_effect")),
+    }
+    facecam_raw = settings.get("facecam") if isinstance(settings.get("facecam"), dict) else {}
+    facecam_resolved = resolve_facecam_layout_config(
+        facecam_raw.get("layout") or settings.get("facecam_layout"),
+        position=facecam_raw.get("position") or settings.get("facecam_position") or "top_center",
+        shape=facecam_raw.get("shape") or settings.get("facecam_shape") or "circle",
+        scale=facecam_raw.get("scale", settings.get("facecam_scale", 0.28)),
+    )
+    facecam_enabled = _to_bool(
+        facecam_raw.get("enabled"),
+        _to_bool(settings.get("facecam_enabled"), False),
+    )
+    raw_clips = facecam_raw.get("clips")
+    if not isinstance(raw_clips, list):
+        raw_clips = settings.get("facecam_clips") if isinstance(settings.get("facecam_clips"), list) else []
+    normalized_clips = [
+        clip
+        for idx, clip in enumerate(raw_clips)
+        for clip in [_normalize_facecam_clip(clip, idx)]
+        if clip
+    ]
+    normalized["facecam"] = {
+        "layout": facecam_resolved["layout"],
+        "enabled": bool(facecam_enabled),
+        "position": facecam_resolved["position"],
+        "shape": facecam_resolved["shape"],
+        "scale": facecam_resolved["scale"],
+        "clips": normalized_clips,
+    }
+    normalized["facecam_layout"] = normalized["facecam"]["layout"]
+    normalized["facecam_enabled"] = normalized["facecam"]["enabled"]
+    normalized["facecam_position"] = normalized["facecam"]["position"]
+    normalized["facecam_shape"] = normalized["facecam"]["shape"]
+    normalized["facecam_scale"] = normalized["facecam"]["scale"]
+    normalized["facecam_clips"] = list(normalized_clips)
+    normalized["require_raw_review"] = _to_bool(settings.get("require_raw_review"), False)
+    return normalized
+
+
+def merge_source_settings(base_settings: Any, update_settings: Any) -> Dict[str, Any]:
+    base = parse_source_settings(base_settings)
+    updates = parse_source_settings(update_settings)
+    merged = dict(base)
+
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged.get(key) or {})
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+
+    return normalize_source_settings(merged)
+
+
+def _choose_configured_text(texts: List[str], selection_mode: str = "fixed") -> str:
+    clean = [str(item).strip() for item in (texts or []) if str(item).strip()]
+    if not clean:
+        return ""
+    if selection_mode == "random" and len(clean) > 1:
+        return random.choice(clean)
+    return clean[0]
+
+
+def pick_source_overlay_config(raw_settings: Any) -> Optional[Dict[str, Any]]:
+    overlay = normalize_source_settings(raw_settings).get("shorts_overlay") or {}
+    if not overlay.get("enabled"):
+        return None
+    chosen_text = _choose_configured_text(overlay.get("texts") or [], overlay.get("selection_mode", "fixed"))
+    if not chosen_text:
+        return None
+    return {
+        "text": chosen_text,
+        "timing": overlay.get("timing", "full"),
+        "duration": float(overlay.get("duration", 2.0) or 2.0),
+        "screen_position": overlay.get("screen_position", "top"),
+        "intro_animation": dict(overlay.get("intro_animation") or {"enabled": False, "type": "none", "duration": 0.0}),
+        "outro_animation": dict(overlay.get("outro_animation") or {"enabled": False, "type": "none", "duration": 0.0}),
+    }
+
+
+def pick_source_tail_trim_seconds(raw_settings: Any) -> float:
+    trim_cfg = normalize_source_settings(raw_settings).get("tail_trim") or {}
+    try:
+        seconds = max(0.0, float(trim_cfg.get("seconds", 0.0) or 0.0))
+    except Exception:
+        seconds = 0.0
+    if not trim_cfg.get("enabled"):
+        return 0.0
+    return seconds
+
+
+def pick_source_video_effects(raw_settings: Any) -> Dict[str, Dict[str, Any]]:
+    effects = normalize_source_settings(raw_settings).get("video_effects") or {}
+    intro = effects.get("intro") if isinstance(effects.get("intro"), dict) else {}
+    outro = effects.get("outro") if isinstance(effects.get("outro"), dict) else {}
+    return {
+        "intro": {
+            "enabled": bool(intro.get("enabled")),
+            "type": str(intro.get("type") or "none"),
+            "duration": float(intro.get("duration", 0.0) or 0.0),
+        },
+        "outro": {
+            "enabled": bool(outro.get("enabled")),
+            "type": str(outro.get("type") or "none"),
+            "duration": float(outro.get("duration", 0.0) or 0.0),
+        },
+    }
+
+
+def pick_source_facecam_config(raw_settings: Any) -> Dict[str, Any]:
+    facecam = normalize_source_settings(raw_settings).get("facecam") or {}
+    clips = facecam.get("clips") if isinstance(facecam.get("clips"), list) else []
+    return {
+        "layout": str(facecam.get("layout") or "top_center"),
+        "enabled": bool(facecam.get("enabled")),
+        "position": str(facecam.get("position") or "top_center"),
+        "shape": str(facecam.get("shape") or "circle"),
+        "scale": float(facecam.get("scale", 0.28) or 0.28),
+        "clips": [dict(item) for item in clips if isinstance(item, dict)],
+    }
+
+
+def pick_source_facecam_clip(raw_settings: Any, channel_id: str = "") -> Tuple[Dict[str, Any], str]:
+    facecam = pick_source_facecam_config(raw_settings)
+    if not facecam.get("enabled"):
+        return facecam, ""
+
+    valid_source_clips: List[str] = []
+    for clip in facecam.get("clips") or []:
+        if not isinstance(clip, dict) or not clip.get("enabled"):
+            continue
+        clip_path = _resolve_project_runtime_path(str(clip.get("path") or ""))
+        ext = os.path.splitext(clip_path)[1].lower()
+        if clip_path and ext in _FACECAM_ALLOWED_EXTENSIONS and ResilientFS.isfile(clip_path):
+            valid_source_clips.append(clip_path)
+
+    if valid_source_clips:
+        return facecam, random.choice(valid_source_clips)
+
+    legacy_channel_id = str(channel_id or "").strip()
+    if legacy_channel_id:
+        legacy_dir = _project_local_path(".data", "facecam", legacy_channel_id)
+        if ResilientFS.isdir(legacy_dir):
+            legacy_clips = [
+                os.path.join(legacy_dir, name)
+                for name in ResilientFS.listdir(legacy_dir)
+                if ResilientFS.isfile(os.path.join(legacy_dir, name))
+                and os.path.splitext(name)[1].lower() in _FACECAM_ALLOWED_EXTENSIONS
+            ]
+            if legacy_clips:
+                return facecam, random.choice(legacy_clips)
+
+    return facecam, ""
+
+
+def merge_source_extra_description(base_description: str, raw_settings: Any) -> str:
+    extra_cfg = normalize_source_settings(raw_settings).get("extra_description") or {}
+    if not extra_cfg.get("enabled"):
+        return (base_description or "").strip()
+
+    selected_text = _choose_configured_text(extra_cfg.get("texts") or [], extra_cfg.get("selection_mode", "fixed"))
+    selected_text = selected_text.strip()
+    if not selected_text:
+        return (base_description or "").strip()
+
+    original = (base_description or "").strip()
+    if not original:
+        return selected_text
+    if extra_cfg.get("placement") == "prepend":
+        return f"{selected_text}\n\n{original}"
+    return f"{original}\n\n{selected_text}"
+
+
+def _get_source_extra_description_text(raw_settings: Any) -> str:
+    extra_cfg = normalize_source_settings(raw_settings).get("extra_description") or {}
+    if not extra_cfg.get("enabled"):
+        return ""
+    return _choose_configured_text(extra_cfg.get("texts") or [], extra_cfg.get("selection_mode", "fixed")).strip()
+
+
+def _looks_like_shorts_url(url: Any) -> bool:
+    raw = str(url or "").strip().lower()
+    if not raw:
+        return False
+    return any(marker in raw for marker in ("/shorts/", "/reel/", "/reels/"))
+
+
+def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, source_url: Any = None) -> str:
+    explicit_video_type = str((video or {}).get("video_type") or "").strip().lower()
+    if explicit_video_type in ("shorts", "long"):
+        return explicit_video_type
+
+    platform = str(src_platform or "").strip().lower()
+    if ("shorts" in platform) or ("reels" in platform):
+        return "shorts"
+    if "long" in platform:
+        return "long"
+
+    for candidate_url in (
+        (video or {}).get("url"),
+        (video or {}).get("webpage_url"),
+        (video or {}).get("original_url"),
+        source_url,
+    ):
+        if _looks_like_shorts_url(candidate_url):
+            return "shorts"
+
+    try:
+        vid_dur = float((video or {}).get("duration") or 0)
+    except Exception:
+        vid_dur = 0.0
+    return "shorts" if (vid_dur and vid_dur <= 60.0) else "long"
+
+
+def _append_required_exact_hashtags(tags: List[str], required_tags: List[str]) -> List[str]:
+    required_lower = {str(tag or "").lower() for tag in required_tags if str(tag or "").strip()}
+    out: List[str] = []
+    seen_exact = set()
+    for tag in tags or []:
+        raw = str(tag or "").strip()
+        if not raw:
+            continue
+        if raw.lower() in required_lower and raw not in required_tags:
+            continue
+        if raw in seen_exact:
+            continue
+        seen_exact.add(raw)
+        out.append(raw)
+    for required in required_tags:
+        clean = str(required or "").strip()
+        if clean and clean not in seen_exact:
+            seen_exact.add(clean)
+            out.append(clean)
+    return out
+
+
+def _join_hashtags(tags: List[str], max_chars: int) -> str:
+    chosen: List[str] = []
+    current_len = 0
+    for raw in tags or []:
+        tag = str(raw or "").strip()
+        if not tag:
+            continue
+        next_len = len(tag) if not chosen else current_len + 1 + len(tag)
+        if next_len > max_chars:
+            break
+        chosen.append(tag)
+        current_len = next_len
+    return " ".join(chosen).strip()
+
+
+def _build_hashtag_only_upload_metadata(
+    ai_meta: Dict[str, Any],
+    *,
+    source_title: str,
+    source_name: str,
+    content_type: str,
+    target_lang: str,
+    is_shorts: bool,
+    source_description: str = "",
+    source_settings: Any = None,
+) -> Tuple[str, str, List[str]]:
+    from src.agent.ai import _extract_hashtags_from_text, _keywords_from_hashtags, _sanitize_hashtag_list, optimize_hashtags
+    from src.agent.local_metadata import extract_source_metadata_context
+
+    merged_description = merge_source_extra_description(
+        ai_meta.get("description", source_description or ""),
+        source_settings,
+    )
+    extra_description_text = _get_source_extra_description_text(source_settings)
+    source_context = ai_meta.get("source_context") if isinstance(ai_meta.get("source_context"), dict) else {}
+    source_signals = extract_source_metadata_context(
+        hint_title=source_title,
+        source_description=" ".join(part for part in [source_description, extra_description_text] if part),
+        lang=target_lang,
+        content_type=content_type,
+        source_name=source_name,
+        source_context=source_context,
+        max_hashtags=12,
+    )
+
+    hashtag_candidates: List[str] = list(ai_meta.get("hashtags") or []) + list(source_signals.get("hashtags") or [])
+    for text in (
+        ai_meta.get("title", ""),
+        ai_meta.get("description", ""),
+        merged_description,
+        source_description,
+        extra_description_text,
+    ):
+        hashtag_candidates.extend(_extract_hashtags_from_text(text))
+
+    for keyword in list(ai_meta.get("tags") or []):
+        clean = str(keyword or "").strip()
+        if clean:
+            hashtag_candidates.append(f"#{clean}")
+
+    if is_shorts:
+        hashtag_candidates.append("#shorts")
+
+    title_tags, description_tags = optimize_hashtags(
+        hashtag_candidates,
+        target_lang,
+        topic=source_signals.get("topic") or source_title or content_type,
+        limit_title=8,
+        limit_desc=18,
+    )
+
+    if is_shorts:
+        required_title_tags = _sanitize_hashtag_list(["#shorts"], target_lang, 1)
+        title_tags = required_title_tags + [tag for tag in title_tags if tag.lower() not in {req.lower() for req in required_title_tags}]
+
+    if not title_tags:
+        fallback_candidates = list(source_signals.get("hashtags") or [])
+        if is_shorts:
+            fallback_candidates.append("#shorts")
+        title_tags = _sanitize_hashtag_list(fallback_candidates or (["#shorts"] if is_shorts else ["#video"]), target_lang, 6)
+    if not description_tags:
+        description_tags = list(title_tags)
+
+    final_title = _join_hashtags(title_tags, 95)
+    if not final_title:
+        final_title = "#shorts" if is_shorts else "#video"
+
+    final_description = _join_hashtags(description_tags, 4900)
+    if not final_description:
+        final_description = final_title
+
+    upload_tags = _keywords_from_hashtags(description_tags, source_title or content_type, target_lang, limit=15)
+    return final_title, final_description, upload_tags
+
+
+def _parse_datetime_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            raw = value.strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            dt = datetime.fromisoformat(raw)
+        else:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _build_yt_opts(extra_opts: dict = None, cookies_path: Optional[str] = None) -> dict:
+    """
+    بناء إعدادات yt-dlp الموحدة مع دعم:
+    - Proxy (عبر YTDLP_PROXY)
+    - PO Token (عبر YOUTUBE_PO_TOKEN)
+    - Cookies
+    - IPv4
+    - Sleep intervals
+    """
+    from src.agent.config import load_config
+    cfg = load_config()
+    if cookies_path is None:
+        cookies_path = _resolve_any_cookiefile()
+
+    youtube_extractor_args = {}
+    if not cookies_path:
+        # بدون كوكيز، نستخدم مسار عملاء محافظ لتقليل bot-check قدر الإمكان.
+        youtube_extractor_args = {
+            "player_client": ["ios", "android", "mweb"],
+        }
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "no_check_certificate": True,
+        "socket_timeout": 30,
+        "geo_bypass": True,
+        "http_headers": {
+            "User-Agent": _MODERN_USER_AGENT,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
+            "Sec-Fetch-Mode": "navigate",
+        },
+        "extractor_args": {
+            "youtube": youtube_extractor_args,
+        },
+        # محاكاة متصفح حقيقي لتجاوز الفحص (معطل حالياً لتفادي وقوع خطأ في Render)
+        # "impersonate": "chrome",
+        # تأخير بين الطلبات لتقليل bot-check
+        "sleep_interval": 5,
+        "max_sleep_interval": 15,
+        "sleep_requests": 2,
+    }
+
+    impersonate = (os.environ.get("YTDLP_IMPERSONATE") or "").strip()
+    if impersonate:
+        opts["impersonate"] = impersonate
+
+    # === Proxy (الأهم لتجاوز bot-check على سيرفرات datacenter) ===
+    proxy = (os.environ.get("YTDLP_PROXY") or "").strip()
+    if proxy:
+        opts["proxy"] = proxy
+        logger.debug(f"Using proxy for yt-dlp: {proxy[:30]}...")
+
+    # === PO Token (Proof of Origin) ===
+    po_token = (os.environ.get("YOUTUBE_PO_TOKEN") or "").strip()
+    if po_token:
+        opts["extractor_args"]["youtube"]["po_token"] = [po_token]
+        logger.debug("Using PO Token for YouTube")
+
+    # === IPv4 ===
+    if getattr(cfg, "YTDLP_FORCE_IPV4", True):
+        opts["source_address"] = "0.0.0.0"
+
+    # === Cookies ===
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
+        logger.info(
+            "🍪 Using yt-dlp cookies file: %s (allowing yt-dlp authenticated client defaults)",
+            os.path.basename(cookies_path),
+        )
+
+    # دمج الإعدادات الإضافية
+    if extra_opts:
+        extra_opts = dict(extra_opts)
+        # دمج extractor_args بشكل عميق
+        if "extractor_args" in extra_opts:
+            for key, val in extra_opts["extractor_args"].items():
+                if key in opts["extractor_args"]:
+                    opts["extractor_args"][key].update(val)
+                else:
+                    opts["extractor_args"][key] = val
+            del extra_opts["extractor_args"]
+        # دمج http_headers بشكل عميق
+        if "http_headers" in extra_opts:
+            opts["http_headers"].update(extra_opts["http_headers"])
+            del extra_opts["http_headers"]
+        opts.update(extra_opts)
+
+    return opts
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _download_profile_overrides(ffmpeg_path: Optional[str], cookies_enabled: bool = False) -> List[Dict[str, Any]]:
+    """ترتيب محافظ لمسارات تنزيل yt-dlp: جودة أعلى أولًا ثم توافق أوسع."""
+    compatibility_profile = {
+        "label": "compatibility_mobile",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "mweb"],
+            }
+        },
+    }
+
+    if cookies_enabled:
+        authenticated_default_profile = {
+            "label": "authenticated_default",
+        }
+
+        authenticated_web_profile = {
+            "label": "authenticated_web",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["web", "web_safari", "mweb"],
+                }
+            },
+        }
+
+        if not ffmpeg_path or not _env_flag("YTDLP_HIGH_QUALITY_FIRST", True):
+            return [authenticated_default_profile, authenticated_web_profile]
+
+        return [
+            authenticated_default_profile,
+            authenticated_web_profile,
+            compatibility_profile,
+        ]
+
+    if not ffmpeg_path or not _env_flag("YTDLP_HIGH_QUALITY_FIRST", True):
+        return [compatibility_profile]
+
+    return [
+        {
+            "label": "high_quality_android_vr",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android_vr", "android", "mweb"],
+                }
+            },
+        },
+        {
+            "label": "high_quality_web",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["web", "android", "mweb"],
+                }
+            },
+        },
+        compatibility_profile,
+    ]
+
+
+def _first_env(*names: str) -> str:
+    for name in names:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _resolve_cobalt_api_settings() -> Tuple[str, str]:
+    api_url = _first_env("COBALT_API_URL", "COBALT_URL") or "https://api.cobalt.tools/"
+    auth_token = _first_env("COBALT_API_JWT", "COBALT_API_TOKEN", "COBALT_AUTH_TOKEN")
+    return api_url.strip(), auth_token.strip()
+
+
+def _disable_cobalt_fallback(reason: str):
+    global _COBALT_FALLBACK_DISABLED, _COBALT_DISABLE_HINT_SHOWN
+    _COBALT_FALLBACK_DISABLED = True
+    if reason and not _COBALT_DISABLE_HINT_SHOWN:
+        _COBALT_DISABLE_HINT_SHOWN = True
+        logger.warning(f"⚠️ Cobalt API fallback disabled for this process: {reason}")
+
+
+def _resolve_yt_cookiefile() -> str:
+    # 1. Check environment variable
+    raw_path = _first_env("YT_COOKIES_PATH", "YTDLP_COOKIES_PATH", "COOKIES_PATH")
+    if raw_path:
+        path = _resolve_project_runtime_path(raw_path)
+        if os.path.exists(path):
+            return path
+
+    # 2. Check default local path in .data
+    data_dir = os.path.abspath(os.path.join(project_root, ".data"))
+    default_path = os.path.join(data_dir, "yt_cookies.txt")
+    if os.path.exists(default_path):
+        return default_path
+
+    # 3. Check for common cookie file names in the project root
+    common_cookie_files = [
+        "www.youtube.com_cookies.txt",
+        "youtube_cookies.txt",
+        "cookies.txt",
+        "youtube.com_cookies.txt"
+    ]
+    for filename in common_cookie_files:
+        path = os.path.join(project_root, filename)
+        if os.path.exists(path):
+            logger.info(f"🍪 Found YouTube cookies file in project root: {filename}")
+            return path
+
+    # 4. Check Base64/Text env vars
+    raw_b64 = _first_env("YT_COOKIES_B64", "YTDLP_COOKIES_B64")
+    raw_txt = _first_env("YT_COOKIES_TEXT", "YTDLP_COOKIES_TEXT")
+    if not raw_b64 and not raw_txt:
+        return ""
+
+    try:
+        ResilientFS.makedirs(data_dir, exist_ok=True)
+        out_path = os.path.join(data_dir, "yt_cookies.txt")
+
+        if raw_b64:
+            content = base64.b64decode(raw_b64.encode("utf-8")).decode("utf-8", errors="replace")
+        else:
+            content = raw_txt
+
+        if not content.strip():
+            return ""
+
+        with ResilientFS.open(out_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return out_path
+    except Exception as e:
+        logger.warning(f"Failed to prepare YT cookies file: {e}")
+        return ""
+
+
+def _resolve_any_cookiefile() -> str:
+    raw_path = _first_env("YTDLP_COOKIES_PATH", "YT_COOKIES_PATH", "COOKIES_PATH")
+    if raw_path:
+        try:
+            path = _resolve_project_runtime_path(raw_path)
+            if os.path.exists(path):
+                return path
+        except Exception:
+            pass
+
+    raw_b64 = _first_env("YTDLP_COOKIES_B64", "YT_COOKIES_B64")
+    raw_txt = _first_env("YTDLP_COOKIES_TEXT", "YT_COOKIES_TEXT")
+    if raw_b64 or raw_txt:
+        try:
+            data_dir = os.path.abspath(os.path.join(project_root, ".data"))
+            ResilientFS.makedirs(data_dir, exist_ok=True)
+            out_path = os.path.join(data_dir, "yt_dlp_cookies.txt")
+            if raw_b64:
+                content = base64.b64decode(raw_b64.encode("utf-8")).decode("utf-8", errors="replace")
+            else:
+                content = raw_txt
+            ResilientFS.write_text(out_path, content, encoding="utf-8")
+            if os.path.exists(out_path):
+                return out_path
+        except Exception as e:
+            logger.warning(f"Failed to prepare YTDLP cookies file: {e}")
+
+    return _resolve_yt_cookiefile()
+
+
+def _is_youtube_botcheck_error(err: Exception) -> bool:
+    s = str(err).lower()
+    return any(phrase in s for phrase in [
+        "sign in to confirm you\u2019re not a bot",
+        "sign in to confirm you're not a bot",
+        "confirm you are not a bot",
+        "confirm you're not a bot",
+        "to verify you are a human",
+    ])
+
+
+def _classify_download_error(err: Exception) -> Tuple[str, str]:
+    raw_message = str(err).strip()
+    lowered = raw_message.lower()
+
+    if _is_youtube_botcheck_error(err):
+        return "youtube_botcheck", "YouTube requested a human-verification / anti-bot challenge"
+    if "requested format is not available" in lowered or "requested formats are not available" in lowered:
+        return "format_unavailable", "The requested high-quality format is not available for this video/client"
+    if "impersonate target" in lowered and "is not available" in lowered:
+        return "impersonate_unavailable", "The requested yt-dlp impersonation target is not available in this runtime"
+    if "rate-limited" in lowered or "too many requests" in lowered or "http error 429" in lowered:
+        return "rate_limited", "The source temporarily rate-limited this download attempt"
+    if any(token in lowered for token in ["timed out", "timeout", "connection reset", "network is unreachable", "name resolution", "temporary failure"]):
+        return "network_failure", "Network/CDN communication failed while resolving or downloading the media"
+    if any(token in lowered for token in ["private video", "members-only", "sign in to confirm your age", "video unavailable"]):
+        return "availability_restricted", "The source video is unavailable or restricted for this runtime"
+
+    return "unknown_error", raw_message or err.__class__.__name__
+
+
+def _is_facebook_reel_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.lower()
+    return ("/reel/" in u) or ("/reels/" in u) or ("facebook.com/reel/" in u) or ("facebook.com/reels/" in u)
+
+
+def _normalize_facebook_source_url(source_url: str, platform: str) -> str:
+    if not source_url:
+        return source_url
+    if not (platform or "").startswith("facebook"):
+        return source_url
+
+    raw = source_url.strip()
+    if not raw:
+        return raw
+
+    if _is_facebook_reel_url(raw):
+        return raw
+
+    if platform == "facebook_reels":
+        try:
+            from urllib.parse import urlparse
+            pr = urlparse(raw)
+            if not pr.scheme or not pr.netloc:
+                return raw
+            if "facebook.com" not in pr.netloc.lower():
+                return raw
+            base = raw.split("?", 1)[0].rstrip("/")
+            if base.endswith("/reels"):
+                return base
+            if base.endswith("/reels/"):
+                return base.rstrip("/")
+            return base + "/reels"
+        except Exception:
+            return raw
+
+    return raw
+
+# ==================== معرف النسخة ====================
+
+def get_instance_id() -> str:
+    """
+    الحصول على معرف النسخة الفريد
+    يستخدم INSTANCE_ID من المتغيرات البيئية، أو الملف المحلي .data/instance_id، أو RENDER_SERVICE_NAME، أو يولد واحدًا ويحفظه
+    """
+    # 1. فحص المتغيرات البيئية (أولوية قصوى)
+    env_id = (
+        os.environ.get("INSTANCE_ID")
+        or os.environ.get("RENDER_SERVICE_NAME")
+        or os.environ.get("HOSTNAME")
+    )
+    if env_id:
+        return env_id
+
+    # 2. فحص الملف المحلي (بمسار مطلق لتجنب التكرار عند تغيير CWD)
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+        data_dir = os.path.join(project_root, ".data")
+        id_file = os.path.join(data_dir, "instance_id")
+        
+        if ResilientFS.exists(id_file):
+            with ResilientFS.open(id_file, "r", encoding="utf-8") as f:
+                saved_id = f.read().strip()
+                if saved_id:
+                    return saved_id
+    except Exception as e:
+        logger.error(f"Failed to read instance_id file: {e}")
+
+    # 3. توليد معرف جديد وحفظه
+    new_id = f"local_{uuid.uuid4().hex[:8]}"
+    
+    try:
+        ResilientFS.makedirs(data_dir, exist_ok=True)
+        with ResilientFS.open(id_file, "w", encoding="utf-8") as f:
+            f.write(new_id)
+        logger.info(f"Generated and saved new persistent instance_id: {new_id}")
+    except Exception as e:
+        logger.error(f"Failed to save new instance_id: {e}")
+        return f"temp_{os.getpid()}"
+
+    return new_id
+
+
+# ==================== عمليات قاعدة البيانات ====================
+
+# التخزين المؤقت للإحصائيات والإعدادات لتقليل الضغط على Supabase وتحسين الاستجابة
+_stats_cache = {}  # {instance_id: (timestamp, stats_dict)}
+_config_cache = {} # {instance_id: (timestamp, config_dict)}
+_CACHE_TTL = 300   # 5 دقائق
+_AUTO_MOD_LOCAL_LOCK = threading.RLock()
+
+
+def _auto_mod_local_table_path(table: str) -> str:
+    filenames = {
+        "auto_mod_config": "auto_mod_config.json",
+        "auto_mod_sources": "auto_mod_sources.json",
+        "auto_mod_schedule": "auto_mod_schedule.json",
+        "auto_mod_processed": "auto_mod_processed.json",
+    }
+    return _project_local_path(".data", filenames.get(table, f"{table}.json"))
+
+
+def _load_local_table_rows(table: str) -> List[Dict[str, Any]]:
+    path = _auto_mod_local_table_path(table)
+    try:
+        if not ResilientFS.exists(path):
+            return []
+        with ResilientFS.open(path, "r", encoding="utf-8") as f:
+            rows = json.load(f)
+        return [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    except Exception as e:
+        logger.warning(f"Failed to load local {table}: {e}")
+        return []
+
+
+def _save_local_table_rows(table: str, rows: List[Dict[str, Any]]) -> None:
+    path = _auto_mod_local_table_path(table)
+    ResilientFS.makedirs(os.path.dirname(path), exist_ok=True)
+    with ResilientFS.open(path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+
+
+def _local_row_matches(row: Dict[str, Any], filters: Optional[Dict[str, Any]]) -> bool:
+    if not filters:
+        return True
+    return all(row.get(key) == value for key, value in filters.items())
+
+
+def _local_select_rows(table: str, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    with _AUTO_MOD_LOCAL_LOCK:
+        rows = _load_local_table_rows(table)
+    return [dict(row) for row in rows if _local_row_matches(row, filters)]
+
+
+def _local_upsert_row(table: str, data: Dict[str, Any], key_field: str = "id", on_conflict: Optional[str] = None) -> bool:
+    payload = dict(data or {})
+    if not payload:
+        return False
+
+    conflict_fields = [field.strip() for field in str(on_conflict or "").split(",") if field.strip()] or [key_field]
+
+    def _matches(row: Dict[str, Any]) -> bool:
+        for field in conflict_fields:
+            if row.get(field) != payload.get(field):
+                return False
+        return True
+
+    with _AUTO_MOD_LOCAL_LOCK:
+        rows = _load_local_table_rows(table)
+        match_index = next((idx for idx, row in enumerate(rows) if _matches(row)), None)
+        if match_index is None and payload.get(key_field) not in (None, ""):
+            match_index = next((idx for idx, row in enumerate(rows) if row.get(key_field) == payload.get(key_field)), None)
+
+        if match_index is None:
+            rows.append(payload)
+        else:
+            merged = dict(rows[match_index])
+            merged.update(payload)
+            rows[match_index] = merged
+
+        _save_local_table_rows(table, rows)
+    return True
+
+
+def _local_delete_row(table: str, key_field: str, key_value: Any) -> bool:
+    with _AUTO_MOD_LOCAL_LOCK:
+        rows = _load_local_table_rows(table)
+        new_rows = [row for row in rows if row.get(key_field) != key_value]
+        if len(new_rows) != len(rows):
+            _save_local_table_rows(table, new_rows)
+    return True
+
+class AutoModDB:
+    """طبقة قاعدة البيانات لنظام الجلب التلقائي"""
+
+    def __init__(self, instance_id: str = None):
+        self.instance_id = instance_id or get_instance_id()
+
+    # ---------- الإعدادات العامة ----------
+
+    def get_config(self, use_cache: bool = True) -> Dict[str, Any]:
+        """جلب إعدادات النسخة"""
+        now = time.time()
+        if use_cache and self.instance_id in _config_cache:
+            ts, cached_config = _config_cache[self.instance_id]
+            if now - ts < _CACHE_TTL:
+                return cached_config
+
+        try:
+            from src.agent.supabase_client import supabase_select_one
+            result = supabase_select_one(
+                "auto_mod_config", "instance_id", self.instance_id,
+                fallback_local=lambda: _local_select_rows("auto_mod_config", {"instance_id": self.instance_id}),
+            )
+            if result:
+                _config_cache[self.instance_id] = (now, result)
+                return result
+        except Exception as e:
+            logger.warning(f"Failed to get config: {e}")
+        
+        # إعدادات افتراضية
+        default_config = {
+            "instance_id": self.instance_id,
+            "auto_fetch_enabled": False,
+            "shorts_format": "crop",
+            "enhance_enabled": False,
+            "add_cta": True,
+            "default_content_type": "minecraft_mods",
+            "settings": {},
+        }
+        return default_config
+
+    def save_config(self, config: Dict[str, Any]) -> bool:
+        """حفظ إعدادات النسخة"""
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            config["instance_id"] = self.instance_id
+            config["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _local_upsert_row("auto_mod_config", config, key_field="instance_id")
+            supabase_upsert(
+                "auto_mod_config",
+                config,
+                key_field="instance_id",
+                fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
+            )
+            
+            # تحديث التخزين المؤقت
+            _config_cache[self.instance_id] = (time.time(), config)
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
+            return False
+
+    def _clear_cache(self):
+        """تفريغ التخزين المؤقت للإحصائيات لإجبار الواجهة على التحديث"""
+        if self.instance_id in _stats_cache:
+            _stats_cache.pop(self.instance_id, None)
+            logger.info(f"Stats cache cleared for instance {self.instance_id}")
+
+    # ---------- مصادر الجلب ----------
+
+    def get_sources(self, channel_id: str = None, content_type: str = None) -> List[Dict]:
+        """جلب مصادر الجلب"""
+        try:
+            from .supabase_client import supabase_select
+            filters = {"instance_id": self.instance_id}
+            if channel_id:
+                filters["channel_id"] = channel_id
+            if content_type:
+                filters["content_type"] = content_type
+            result = supabase_select(
+                "auto_mod_sources",
+                filters,
+                fallback_local=lambda: _local_select_rows("auto_mod_sources", filters),
+            )
+            return result or []
+        except Exception as e:
+            logger.error(f"Failed to get sources: {e}")
+            return []
+
+    def _get_source_by_id(self, source_id: str) -> Optional[Dict[str, Any]]:
+        source = next((item for item in self.get_sources() if item.get("id") == source_id), None)
+        if source:
+            return source
+        try:
+            from .supabase_client import supabase_select
+            records = supabase_select(
+                "auto_mod_sources",
+                {"id": source_id},
+                fallback_local=lambda: _local_select_rows("auto_mod_sources", {"id": source_id}),
+            )
+            return records[0] if records else None
+        except Exception as e:
+            logger.error(f"Failed to get source by id: {e}")
+            return None
+
+    def _save_existing_source(self, source_id: str, updates: Dict[str, Any]) -> bool:
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            source = self._get_source_by_id(source_id)
+            if not source:
+                return False
+            payload = source.copy()
+            payload.update(updates or {})
+            payload["id"] = source.get("id", source_id)
+            payload["instance_id"] = source.get("instance_id", self.instance_id)
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _local_upsert_row("auto_mod_sources", payload, key_field="id")
+            supabase_upsert(
+                "auto_mod_sources",
+                payload,
+                key_field="id",
+                fallback_local=lambda data: _local_upsert_row("auto_mod_sources", data, key_field="id"),
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save existing source: {e}")
+            return False
+
+    def add_source(self, channel_id: str, source_url: str, source_name: str = "",
+                   content_type: str = "minecraft_mods", platform: str = "youtube",
+                   facecam_settings: Dict = None, source_settings: Dict = None,
+                   source_id: Optional[str] = None) -> bool:
+        """إضافة مصدر جلب جديد"""
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            data = {
+                "id": str(source_id or uuid.uuid4()),
+                "instance_id": self.instance_id,
+                "channel_id": channel_id,
+                "source_url": source_url.strip(),
+                "source_name": source_name or self._extract_channel_name(source_url),
+                "content_type": content_type,
+                "platform": platform,
+                "enabled": True,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            merged_settings = merge_source_settings(facecam_settings, source_settings)
+            if merged_settings:
+                data["settings"] = merged_settings
+            _local_upsert_row(
+                "auto_mod_sources",
+                data,
+                key_field="id",
+                on_conflict="instance_id,channel_id,source_url",
+            )
+            supabase_upsert(
+                "auto_mod_sources", data, key_field="id",
+                fallback_local=lambda payload: _local_upsert_row(
+                    "auto_mod_sources",
+                    payload,
+                    key_field="id",
+                    on_conflict="instance_id,channel_id,source_url",
+                ),
+                on_conflict="instance_id,channel_id,source_url"
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add source: {e}")
+            return False
+
+    def remove_source(self, source_id: str) -> bool:
+        """حذف مصدر جلب"""
+        try:
+            from src.agent.supabase_client import supabase_delete
+            _local_delete_row("auto_mod_sources", "id", source_id)
+            supabase_delete(
+                "auto_mod_sources",
+                "id",
+                source_id,
+                fallback_local=lambda key: _local_delete_row("auto_mod_sources", "id", key),
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove source: {e}")
+            return False
+
+    def toggle_source(self, source_id: str, enabled: bool) -> bool:
+        """تفعيل/تعطيل مصدر"""
+        try:
+            return self._save_existing_source(source_id, {"enabled": enabled})
+        except Exception as e:
+            logger.error(f"Failed to toggle source: {e}")
+            return False
+
+    def update_source_channel(self, source_id: str, new_channel_id: str) -> bool:
+        """تغيير القناة المستهدفة لمصدر"""
+        try:
+            return self._save_existing_source(source_id, {"channel_id": new_channel_id})
+        except Exception as e:
+            logger.error(f"Failed to update source channel: {e}")
+            return False
+
+    def update_source_platform(self, source_id: str, new_platform: str) -> bool:
+        """تغيير نوع الفيديوهات (المدة) المستهدفة لمصدر"""
+        try:
+            return self._save_existing_source(source_id, {"platform": new_platform})
+        except Exception as e:
+            logger.error(f"Failed to update source platform: {e}")
+            return False
+
+    def update_source_facecam(self, source_id: str, facecam_settings: Dict) -> bool:
+        """تحديث إعدادات الفيس كام لمصدر"""
+        return self.update_source_settings(source_id, facecam_settings)
+
+    def update_source_settings(self, source_id: str, settings_update: Dict) -> bool:
+        """تحديث إعدادات المصدر مع الحفاظ على الإعدادات الأخرى"""
+        try:
+            source = self._get_source_by_id(source_id)
+            if not source:
+                return False
+            merged_settings = merge_source_settings(
+                source.get("settings") if source else {},
+                settings_update,
+            )
+            return self._save_existing_source(source_id, {"settings": merged_settings})
+        except Exception as e:
+            logger.error(f"Failed to update source settings: {e}")
+            return False
+
+    # ---------- الجدولة ----------
+
+    def get_schedule(self, channel_id: str, content_type: str = "minecraft_mods") -> Optional[Dict]:
+        """جلب إعدادات الجدولة لقناة"""
+        try:
+            from .supabase_client import supabase_select
+            filters = {
+                "instance_id": self.instance_id,
+                "channel_id": channel_id,
+                "content_type": content_type,
+            }
+            result = supabase_select(
+                "auto_mod_schedule",
+                filters,
+                fallback_local=lambda: _local_select_rows("auto_mod_schedule", filters),
+            )
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Failed to get schedule: {e}")
+            return None
+
+    def get_all_schedules(self) -> List[Dict]:
+        """جلب جميع جداول النشر للنسخة"""
+        try:
+            from .supabase_client import supabase_select
+            result = supabase_select(
+                "auto_mod_schedule",
+                {"instance_id": self.instance_id},
+                fallback_local=lambda: _local_select_rows("auto_mod_schedule", {"instance_id": self.instance_id}),
+            )
+            return result or []
+        except Exception as e:
+            logger.error(f"Failed to get schedules: {e}")
+            return []
+
+    def _get_schedule_by_id(self, sch_id: str) -> Optional[Dict[str, Any]]:
+        schedule = next((item for item in self.get_all_schedules() if item.get("id") == sch_id), None)
+        if schedule:
+            return schedule
+        try:
+            from .supabase_client import supabase_select
+            records = supabase_select(
+                "auto_mod_schedule",
+                {"id": sch_id},
+                fallback_local=lambda: _local_select_rows("auto_mod_schedule", {"id": sch_id}),
+            )
+            return records[0] if records else None
+        except Exception as e:
+            logger.error(f"Failed to get schedule by id: {e}")
+            return None
+
+    def _save_existing_schedule(self, schedule: Dict[str, Any], updates: Dict[str, Any]) -> bool:
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            if not schedule or not schedule.get("id"):
+                return False
+            payload = schedule.copy()
+            payload.update(updates or {})
+            payload["instance_id"] = schedule.get("instance_id", self.instance_id)
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _local_upsert_row("auto_mod_schedule", payload, key_field="id")
+            supabase_upsert(
+                "auto_mod_schedule",
+                payload,
+                key_field="id",
+                fallback_local=lambda data: _local_upsert_row("auto_mod_schedule", data, key_field="id"),
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save existing schedule: {e}")
+            return False
+
+    def save_schedule(self, channel_id: str, content_type: str = "minecraft_mods",
+                      interval_minutes: int = 120, daily_limit: int = 5,
+                      publish_hours: Dict = None) -> bool:
+        """حفظ إعدادات الجدولة"""
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            data = {
+                "id": str(uuid.uuid4()),
+                "instance_id": self.instance_id,
+                "channel_id": channel_id,
+                "content_type": content_type,
+                "publish_interval_minutes": interval_minutes,
+                "daily_limit": daily_limit,
+                "publish_hours": publish_hours or {"start": 0, "end": 24},
+                "enabled": True,
+                "next_publish_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _local_upsert_row(
+                "auto_mod_schedule",
+                data,
+                key_field="id",
+                on_conflict="instance_id,channel_id,content_type",
+            )
+            supabase_upsert(
+                "auto_mod_schedule", data, key_field="id",
+                fallback_local=lambda payload: _local_upsert_row(
+                    "auto_mod_schedule",
+                    payload,
+                    key_field="id",
+                    on_conflict="instance_id,channel_id,content_type",
+                ),
+                on_conflict="instance_id,channel_id,content_type"
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save schedule: {e}")
+            return False
+
+    def update_last_publish(self, channel_id: str, content_type: str = "minecraft_mods") -> bool:
+        """تحديث آخر وقت نشر"""
+        try:
+            schedule = self.get_schedule(channel_id, content_type)
+            if not schedule:
+                return False
+            now = datetime.now(timezone.utc)
+            try:
+                interval = int(schedule.get("publish_interval_minutes", 120) or 120)
+            except Exception:
+                interval = 120
+            return self._save_existing_schedule(schedule, {
+                "last_publish_at": now.isoformat(),
+                "next_publish_at": (now + timedelta(minutes=interval)).isoformat(),
+                "total_published": (schedule.get("total_published", 0) or 0) + 1,
+            })
+        except Exception as e:
+            logger.error(f"Failed to update last publish: {e}")
+            return False
+
+    def count_published_today(self, channel_id: str, content_type: str = "minecraft_mods") -> int:
+        """عدّ الفيديوهات المنشورة اليوم فعلياً لهذا الجدول بالاعتماد على السجلات النهائية."""
+        try:
+            from .supabase_client import supabase_select
+
+            filters = {
+                "instance_id": self.instance_id,
+                "channel_id": channel_id,
+                "content_type": content_type,
+                "status": "published",
+            }
+            records = supabase_select(
+                "auto_mod_processed",
+                filters,
+                fallback_local=lambda: _local_select_rows("auto_mod_processed", filters),
+            ) or []
+
+            today_utc = datetime.now(timezone.utc).date()
+            total = 0
+            for rec in records:
+                published_dt = _parse_datetime_utc(rec.get("updated_at"))
+                if published_dt and published_dt.date() == today_utc:
+                    total += 1
+            return total
+        except Exception as e:
+            logger.error(f"Failed to count published today: {e}")
+            return 0
+
+    def update_next_publish_after_attempt(self, channel_id: str, content_type: str = "minecraft_mods", *, published: bool) -> bool:
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            schedule = self.get_schedule(channel_id, content_type)
+            if not schedule:
+                return False
+
+            now = datetime.now(timezone.utc)
+            try:
+                interval = int(schedule.get("publish_interval_minutes", 120) or 120)
+            except Exception:
+                interval = 120
+
+            data = schedule.copy()
+            next_dt = now + timedelta(minutes=interval)
+            existing_next_dt = _parse_datetime_utc(schedule.get("next_publish_at"))
+            if not published and existing_next_dt and existing_next_dt > next_dt:
+                next_dt = existing_next_dt
+
+            if published:
+                data["last_publish_at"] = now.isoformat()
+                data["total_published"] = (schedule.get("total_published", 0) or 0) + 1
+            data["next_publish_at"] = next_dt.isoformat()
+            data["updated_at"] = now.isoformat()
+
+            _local_upsert_row(
+                "auto_mod_schedule",
+                data,
+                key_field="id",
+                on_conflict="instance_id,channel_id,content_type",
+            )
+            supabase_upsert(
+                "auto_mod_schedule",
+                data,
+                key_field="id",
+                fallback_local=lambda payload: _local_upsert_row(
+                    "auto_mod_schedule",
+                    payload,
+                    key_field="id",
+                    on_conflict="instance_id,channel_id,content_type",
+                ),
+                on_conflict="instance_id,channel_id,content_type",
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update next publish after attempt: {e}")
+            return False
+    def delete_schedule(self, sch_id: str) -> bool:
+        """حذف جدول نشر"""
+        try:
+            from src.agent.supabase_client import supabase_delete
+            _local_delete_row("auto_mod_schedule", "id", sch_id)
+            supabase_delete(
+                "auto_mod_schedule",
+                "id",
+                sch_id,
+                fallback_local=lambda key: _local_delete_row("auto_mod_schedule", "id", key),
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete schedule: {e}")
+            return False
+
+    def toggle_schedule(self, sch_id: str, enabled: bool) -> bool:
+        """تبديل حالة جدول نشر"""
+        try:
+            schedule = self._get_schedule_by_id(sch_id)
+            if not schedule:
+                return False
+            return self._save_existing_schedule(schedule, {"enabled": enabled})
+        except Exception as e:
+            logger.error(f"Failed to toggle schedule: {e}")
+            return False
+
+    # ---------- الفيديوهات المعالجة ----------
+
+    def is_video_processed(self, source_video_id: str, channel_id: str) -> bool:
+        """توافقاً مع السلوك الجديد: يعتبر الفيديو منتهياً فقط إذا كان منشوراً"""
+        return self.is_video_published(source_video_id, channel_id)
+
+    def get_video_process_record(self, source_video_id: str, channel_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            from .supabase_client import supabase_select
+            records = supabase_select("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }))
+            if not records:
+                return None
+            return records[0]
+        except Exception as e:
+            logger.error(f"Failed to check processed: {e}")
+            return None
+
+    def get_video_process_state(self, source_video_id: str, channel_id: str) -> Tuple[Optional[str], Optional[datetime]]:
+        rec = self.get_video_process_record(source_video_id, channel_id) or {}
+        status = (rec.get("status") or "").strip().lower() or None
+        updated_at = _parse_datetime_utc(rec.get("updated_at"))
+        return status, updated_at
+
+    def is_video_published(self, source_video_id: str, channel_id: str) -> bool:
+        status, _ = self.get_video_process_state(source_video_id, channel_id)
+        return status == "published"
+
+    def is_video_locked(self, source_video_id: str, channel_id: str, *, stale_minutes: int = 30) -> bool:
+        status, updated_at = self.get_video_process_state(source_video_id, channel_id)
+        if status != "processing":
+            return False
+        if not updated_at:
+            return True
+        try:
+            return (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=int(stale_minutes))
+        except Exception:
+            return True
+
+    def mark_video_processing(self, source_video_id: str, channel_id: str,
+                               content_type: str = "minecraft_mods", title: str = "") -> bool:
+        """تسجيل فيديو كقيد المعالجة (لمنع التعارض)"""
+        try:
+            from src.agent.supabase_client import supabase_upsert
+            payload = {
+                "id": str(uuid.uuid4()),
+                "instance_id": self.instance_id,
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+                "content_type": content_type,
+                "status": "processing",
+                "title": title,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _local_upsert_row(
+                "auto_mod_processed",
+                payload,
+                key_field="id",
+                on_conflict="source_video_id,channel_id",
+            )
+            ok = supabase_upsert(
+                "auto_mod_processed",
+                payload,
+                key_field="id",
+                fallback_local=lambda data: _local_upsert_row(
+                    "auto_mod_processed",
+                    data,
+                    key_field="id",
+                    on_conflict="source_video_id,channel_id",
+                ),
+                on_conflict="source_video_id,channel_id",
+            )
+            if not ok:
+                logger.error(
+                    f"Failed to persist processing claim for video={source_video_id[:20]}... channel={channel_id[:10]}..."
+                )
+                return False
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mark processing: {e}")
+            return False
+
+    def _mark_video_terminal_status(self, source_video_id: str, channel_id: str,
+                                    *, status: str, youtube_url: str = "",
+                                    error_message: str = "") -> bool:
+        try:
+            from src.agent.supabase_client import supabase_select, supabase_upsert
+
+            records = supabase_select("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }))
+            rec = records[0] if records else {}
+
+            if not rec:
+                logger.warning(
+                    f"Missing auto_mod_processed row for video={source_video_id[:20]}... channel={channel_id[:10]}...; creating terminal status '{status}'."
+                )
+
+            payload = {
+                "id": rec.get("id", str(uuid.uuid4())),
+                "instance_id": rec.get("instance_id", self.instance_id),
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+                "content_type": rec.get("content_type", "minecraft_mods"),
+                "title": rec.get("title", ""),
+                "status": status,
+                "youtube_url": youtube_url if status == "published" else "",
+                "error_message": (error_message[:500] if error_message else "") if status == "failed" else "",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _local_upsert_row(
+                "auto_mod_processed",
+                payload,
+                key_field="id",
+                on_conflict="source_video_id,channel_id",
+            )
+            ok = supabase_upsert(
+                "auto_mod_processed",
+                payload,
+                key_field="id",
+                fallback_local=lambda data: _local_upsert_row(
+                    "auto_mod_processed",
+                    data,
+                    key_field="id",
+                    on_conflict="source_video_id,channel_id",
+                ),
+                on_conflict="source_video_id,channel_id",
+            )
+            if not ok:
+                logger.error(
+                    f"Failed to persist terminal status '{status}' for video={source_video_id[:20]}... channel={channel_id[:10]}..."
+                )
+                return False
+
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mark {status}: {e}")
+            return False
+
+    def mark_video_published(self, source_video_id: str, channel_id: str,
+                              youtube_url: str = "") -> bool:
+        """تسجيل فيديو كمنشور"""
+        return self._mark_video_terminal_status(
+            source_video_id,
+            channel_id,
+            status="published",
+            youtube_url=youtube_url,
+        )
+
+    def mark_video_failed(self, source_video_id: str, channel_id: str,
+                           error_message: str = "") -> bool:
+        """تسجيل فيديو كفاشل"""
+        return self._mark_video_terminal_status(
+            source_video_id,
+            channel_id,
+            status="failed",
+            error_message=error_message,
+        )
+
+    def release_video_processing(self, source_video_id: str, channel_id: str) -> bool:
+        """تحرير قفل المعالجة عند الإيقاف الآمن قبل الوصول إلى حالة نهائية."""
+        try:
+            from src.agent.supabase_client import supabase_select, supabase_delete
+
+            records = supabase_select("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }))
+            rec = records[0] if records else None
+            if not rec:
+                return True
+            if (rec.get("status") or "").strip().lower() != "processing":
+                return True
+            _local_delete_row("auto_mod_processed", "id", rec["id"])
+            supabase_delete(
+                "auto_mod_processed",
+                "id",
+                rec["id"],
+                fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
+            )
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to release processing: {e}")
+            return False
+
+    def reset_stale_processing(self) -> int:
+        """إعادة تعيين أي فيديوهات 'قيد المعالجة' تابعة لهذه النسخة تم مقاطعتها"""
+        try:
+            from src.agent.supabase_client import supabase_select, supabase_delete
+            records = supabase_select("auto_mod_processed", {
+                "instance_id": self.instance_id,
+                "status": "processing"
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "instance_id": self.instance_id,
+                "status": "processing",
+            }))
+            count = 0
+            for rec in records:
+                _local_delete_row("auto_mod_processed", "id", rec["id"])
+                supabase_delete(
+                    "auto_mod_processed",
+                    "id",
+                    rec["id"],
+                    fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
+                )
+                count += 1
+            if count > 0:
+                logger.info(f"🔄 Reset {count} stale processing locks for instance {self.instance_id}")
+                self._clear_cache()
+            return count
+        except Exception as e:
+            logger.error(f"Failed to reset stale processing: {e}")
+            return 0
+
+    def get_stats(self, use_cache: bool = True) -> Dict[str, Any]:
+        """إحصائيات النظام"""
+        now = time.time()
+        if use_cache and self.instance_id in _stats_cache:
+            ts, cached_stats = _stats_cache[self.instance_id]
+            if now - ts < _CACHE_TTL:
+                return cached_stats
+
+        try:
+            from .supabase_client import supabase_select
+            all_processed = supabase_select("auto_mod_processed", {
+                "instance_id": self.instance_id
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "instance_id": self.instance_id,
+            })) or []
+            sources = self.get_sources()
+            schedules = self.get_all_schedules()
+
+            published = sum(1 for r in all_processed if r.get("status") == "published")
+            failed = sum(1 for r in all_processed if r.get("status") == "failed")
+            processing = sum(1 for r in all_processed if r.get("status") == "processing")
+
+            # جلب عدد القنوات
+            total_channels = 0
+            try:
+                from src.bot.channel_manager import ChannelManager
+                _, total_channels = ChannelManager().list_channels(limit=1)
+            except Exception as e:
+                logger.debug(f"Error getting channels count for stats: {e}")
+
+            stats = {
+                "total_channels": total_channels,
+                "total_sources": len(sources),
+                "total_schedules": len(schedules),
+                "total_processed": len(all_processed),
+                "published": published,
+                "failed": failed,
+                "processing": processing,
+                "instance_id": self.instance_id,
+                "cached_at": datetime.fromtimestamp(now).strftime("%H:%M:%S")
+            }
+            
+            _stats_cache[self.instance_id] = (now, stats)
+            return stats
+        except Exception as e:
+            logger.error(f"Failed to get stats: {e}")
+            return {"error": str(e)}
+
+    # ---------- أدوات مساعدة ----------
+
+    @staticmethod
+    def _extract_channel_name(url: str) -> str:
+        """استخراج اسم مختصر من رابط المصدر (يوتيوب/فيسبوك)"""
+        import re
+        if "facebook.com" in (url or ""):
+            m = re.search(r"facebook\.com/([^/?\s]+)", url)
+            if m:
+                return m.group(1)
+        match = re.search(r"youtube\.com/@([^/?\s]+)", url)
+        if match:
+            return match.group(1)
+        match = re.search(r"youtube\.com/channel/([^/?\s]+)", url)
+        if match:
+            return match.group(1)
+        match = re.search(r"youtube\.com/c/([^/?\s]+)", url)
+        if match:
+            return match.group(1)
+        return url[:50]
+
+
+# ==================== محرك الجلب ====================
+
+class AutoModFetcher:
+    """محرك الجلب التلقائي لفيديوهات المودات"""
+
+    def __init__(self, instance_id: str = None):
+        self.instance_id = instance_id or get_instance_id()
+        self.db = AutoModDB(self.instance_id)
+
+    async def fetch_videos_from_source(self, source_url: str, items_range: str = "1-10", platform: str = "youtube") -> List[Dict]:
+        """
+        جلب أحدث الفيديوهات من مصدر (يوتيوب/فيسبوك)
+        يعتمد الآن حصرياً على yt-dlp مع retry لتجاوز الحظر
+        """
+        if (platform or "").strip().lower() == "container" or (source_url or "").strip().lower().startswith("container:"):
+            try:
+                return await self._fetch_from_container(source_url, items_range)
+            except Exception as e:
+                logger.error(f"Failed to fetch from container source {source_url}: {e}")
+                return []
+
+        from src.agent.supabase_storage import is_source_rate_limited
+        if is_source_rate_limited(source_url):
+            logger.info(f"❄️ [CoolDown] Skipping source because it's rate-limited: {source_url}")
+            return []
+
+        try:
+            # === جلب حصري عبر yt-dlp مع retry ===
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, self._fetch_sync, source_url, items_range, platform)
+            return result
+        except Exception as e:
+            logger.error(f"Failed to fetch from {source_url}: {e}")
+            return []
+
+    @staticmethod
+    def _parse_items_range(items_range: str) -> Tuple[int, int]:
+        raw = (items_range or "").strip()
+        if not raw:
+            return (1, 10)
+        try:
+            parts = raw.split("-", 1)
+            start = int(parts[0])
+            end = int(parts[1]) if len(parts) > 1 else start
+            start = max(1, start)
+            end = max(start, end)
+            return (start, end)
+        except Exception:
+            return (1, 10)
+
+    async def _fetch_from_container(self, source_url: str, items_range: str) -> List[Dict]:
+        container_id = (source_url or "").strip()
+        if container_id.lower().startswith("container:"):
+            container_id = container_id.split(":", 1)[1].strip()
+        if not container_id:
+            return []
+        from src.agent.supabase_storage import list_container_videos
+        videos = list_container_videos(container_id) or []
+        
+        # ترتيب الفيديوهات حسب تاريخ الإنشاء تصاعدياً (الأقدم أولاً - FIFO)
+        videos.sort(key=lambda x: str(x.get("created_at", "")), reverse=False)
+        
+        start, end = self._parse_items_range(items_range)
+        subset = videos[start - 1:end]
+        out: List[Dict[str, Any]] = []
+        for v in subset:
+            vid_id = v.get("id")
+            if not vid_id:
+                continue
+            out.append({
+                "id": vid_id,
+                "title": v.get("title", ""),
+                "description": "",
+                "url": f"container://{vid_id}",
+                "duration": None,
+                "view_count": None,
+                "upload_date": v.get("created_at"),
+            })
+        return out
+
+    # (تمت إزالة نظام YouTube Data API القديم. الجلب يعتمد الآن على yt-dlp فقط.)
+
+    def _fetch_sync(self, source_url: str, items_range: str = "1-10", platform: str = "youtube") -> List[Dict]:
+        """جلب الفيديوهات بشكل متزامن عبر yt-dlp مع retry وتخطي القيود بذكاء"""
+
+        source_url = _normalize_facebook_source_url(source_url, platform)
+
+        # تحسين رابط المصدر لليوتيوب شورتس
+        if platform == "youtube_shorts" and ("youtube.com" in source_url or "youtu.be" in source_url):
+            if "@" in source_url or "/c/" in source_url or "/channel/" in source_url or "/user/" in source_url:
+                if not source_url.endswith("/shorts"):
+                    base_url = source_url.split("?")[0].rstrip("/")
+                    if not base_url.endswith("/shorts"):
+                        source_url = base_url + "/shorts"
+                        logger.info(f"🔗 Targeted source URL adjusted for Shorts: {source_url}")
+
+        url_lc = (source_url or "").lower()
+        header_overrides = {}
+        if "facebook.com" in url_lc or platform.startswith("facebook"):
+            header_overrides = {
+                "Origin": "https://www.facebook.com",
+                "Referer": "https://www.facebook.com/",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+
+        ydl_opts = _build_yt_opts({
+            "extract_flat": True,
+            "playlist_items": items_range,
+            "ignoreerrors": True,
+            "http_headers": header_overrides,
+        })
+
+        # === Retry مع backoff ذكي ===
+        max_retries = 3
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                videos = self._fetch_sync_attempt(source_url, items_range, platform, ydl_opts=ydl_opts)
+                if videos is not None:
+                    return videos
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+
+                if "impersonate target" in error_msg.lower() and "is not available" in error_msg.lower():
+                    logger.warning(f"⚠️ Impersonate target not available in this environment. Retrying without it...")
+                    os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                    ydl_opts.pop("impersonate", None)
+                    continue
+
+                if "rate-limited" in error_msg.lower() or "too many requests" in error_msg.lower():
+                    from src.agent.supabase_storage import mark_source_rate_limited
+                    mark_source_rate_limited(source_url, duration=3600)
+
+                    if attempt < max_retries:
+                        wait_time = 30 + (20 * attempt)
+                        logger.warning(f"⏳ YouTube Rate limited! Waiting {wait_time}s before retrying...")
+                        time.sleep(wait_time)
+                        continue
+                    break
+
+                is_retryable, error_type = _is_retryable_ytdlp_error(error_msg)
+                if _is_youtube_botcheck_error(e) and not is_retryable:
+                    is_retryable = True
+                    error_type = "403_forbidden"
+
+                if not is_retryable or attempt >= max_retries:
+                    if _is_youtube_botcheck_error(e) and not _resolve_yt_cookiefile():
+                        global _YT_BOTCHECK_HINT_SHOWN
+                        if not _YT_BOTCHECK_HINT_SHOWN:
+                            _YT_BOTCHECK_HINT_SHOWN = True
+                            logger.error(
+                                "🚫 YouTube bot-check detected! Configure cookies via "
+                                "YTDLP_COOKIES_PATH / YTDLP_COOKIES_B64 / YTDLP_COOKIES_TEXT "
+                                "(legacy YT_COOKIES_* aliases also work), and optionally set YTDLP_PROXY or YOUTUBE_PO_TOKEN."
+                            )
+                    logger.error(f"yt-dlp fetch error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    break
+
+                logger.warning(f"yt-dlp retryable error ({error_type}), attempt {attempt + 1}/{max_retries + 1}: {error_msg}")
+                ydl_opts = _build_retry_opts(ydl_opts, attempt + 1, error_type)
+
+                wait_time = min(5 * (2 ** attempt), 30)
+                time.sleep(wait_time)
+
+        # === فشل نهائي — تسجيل و تحديث yt-dlp ===
+        if last_error:
+            logger.error(f"yt-dlp fetch error after {max_retries} retries: {last_error}")
+            if (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower():
+                global _FB_HINT_SHOWN
+                if not _FB_HINT_SHOWN:
+                    _FB_HINT_SHOWN = True
+                    logger.error(
+                        "📘 Facebook fetch failed. On Render you usually need Cookies and/or a Proxy. "
+                        "Set YTDLP_COOKIES_B64 or YTDLP_COOKIES_PATH, and optionally YTDLP_PROXY. "
+                        "Some links may stop working due to Facebook changes."
+                    )
+            try:
+                from src.agent.error_tracker import get_error_tracker
+                et = get_error_tracker()
+                et.record_error("download", "fetch_error", str(last_error))
+
+                if et.consecutive_fails("download") >= 5:
+                    logger.warning("🔄 Too many download failures. Attempting yt-dlp auto-update...")
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+                            capture_output=True, text=True, timeout=120
+                        )
+                        if result.returncode == 0:
+                            logger.info("✅ yt-dlp updated successfully!")
+                            et.record_success("download")
+                        else:
+                            logger.warning(f"⚠️ yt-dlp update failed: {result.stderr[:200]}")
+                    except Exception as upd_err:
+                        logger.warning(f"⚠️ yt-dlp auto-update error: {upd_err}")
+            except Exception:
+                pass
+
+        return []
+
+    def _fetch_sync_attempt(self, source_url: str, items_range: str, platform: str, ydl_opts: Optional[Dict[str, Any]] = None) -> List[Dict]:
+        """محاولة واحدة لجلب الفيديوهات عبر yt-dlp"""
+        import yt_dlp
+
+        if ydl_opts is None:
+            url_lc = (source_url or "").lower()
+            header_overrides = {}
+            if "facebook.com" in url_lc or platform.startswith("facebook"):
+                header_overrides = {
+                    "Origin": "https://www.facebook.com",
+                    "Referer": "https://www.facebook.com/",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+
+            ydl_opts = _build_yt_opts({
+                "extract_flat": True,
+                "playlist_items": items_range,
+                "ignoreerrors": True,
+                # لا نستخدم noplaylist هنا لأنه يمنع جلب قائمة فيديوهات القناة
+                "http_headers": header_overrides,
+            })
+        else:
+            ydl_opts = dict(ydl_opts)
+
+        if os.environ.get("YTDLP_SKIP_IMPERSONATE") == "1":
+            ydl_opts.pop("impersonate", None)
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(source_url, download=False)
+            except Exception as e:
+                if "impersonate target" in str(e).lower() and "is not available" in str(e).lower():
+                    # If it fails here, we raise to trigger the retry logic in _fetch_sync
+                    raise
+                raise 
+            
+            if not info:
+                return []
+
+            entries = info.get("entries") or []
+            videos = []
+            for entry in entries:
+                if not entry:
+                    continue
+                vid_id = entry.get("id") or entry.get("url", "")
+                if not vid_id:
+                    continue
+                fb_url = entry.get("webpage_url") or entry.get("url") or ""
+                if platform == "facebook_reels" and fb_url and (not _is_facebook_reel_url(fb_url)):
+                    continue
+
+                duration = entry.get("duration")
+                if duration is not None:
+                    logger.debug(f"ℹ️ Video {vid_id} duration: {duration}s")
+
+                videos.append({
+                    "id": vid_id,
+                    "title": entry.get("title", ""),
+                    "description": entry.get("description", ""),
+                    "url": entry.get("webpage_url") or entry.get("url") or f"https://www.youtube.com/watch?v={vid_id}",
+                    "duration": duration,
+                    "view_count": entry.get("view_count"),
+                    "upload_date": entry.get("upload_date"),
+                })
+            return videos
+
+    async def download_video(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
+        """تنزيل فيديو من URL مع تحديد مدة قصوى اختيارية"""
+        try:
+            output_dir = _ensure_runtime_dir(output_dir)
+            if (video_url or "").strip().lower().startswith("container://"):
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, self._download_container_sync, video_url, output_dir)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, self._download_sync, video_url, output_dir, max_duration
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Failed to download {video_url}: {e}")
+            return None
+
+    def _download_container_sync(self, video_url: str, output_dir: str) -> Optional[str]:
+        try:
+            vid_id = (video_url or "").split("container://", 1)[1].strip()
+        except Exception:
+            return None
+        if not vid_id:
+            return None
+        try:
+            from pathlib import Path as _Path
+            from src.agent.supabase_storage import get_container_video, download_container_video_to_file
+
+            rec = get_container_video(vid_id) or {}
+            try:
+                logger.info(
+                    f"📥 [AutoMod] Container download: video={vid_id[:20]}..., provider={(rec.get('storage_provider') or '')}, "
+                    f"bucket={(rec.get('storage_bucket') or '')}, storage_path={(str(rec.get('storage_path') or '')[:60])}, "
+                    f"local_path={(str(rec.get('local_path') or '')[:60])}"
+                )
+            except Exception:
+                pass
+            ext = ".mp4"
+            candidate = rec.get("storage_path") or rec.get("local_path") or ""
+            try:
+                cand_ext = _Path(str(candidate)).suffix
+                if cand_ext:
+                    ext = cand_ext
+            except Exception:
+                pass
+
+            os.makedirs(output_dir, exist_ok=True)
+            dest = os.path.join(output_dir, f"{vid_id}{ext}")
+            ok = download_container_video_to_file(vid_id, dest)
+            if ok and os.path.exists(dest):
+                return dest
+            try:
+                logger.warning(
+                    f"❌ [AutoMod] Container download failed: video={vid_id[:20]}..., ok={ok}, dest_exists={os.path.exists(dest)}"
+                )
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            logger.error(f"Failed to download container video {vid_id}: {e}")
+            return None
+
+    def _download_sync(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
+        """تنزيل بشكل متزامن — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة وretry"""
+        output_dir = _ensure_runtime_dir(output_dir)
+        max_retries = 3
+        last_error = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = self._download_sync_attempt(video_url, output_dir, max_duration)
+                if result:
+                    return result
+                # إذا لم يرجع ملف لكن بدون استثناء
+                if attempt < max_retries:
+                    wait_time = 5 * attempt
+                    logger.warning(f"⏳ Download attempt {attempt}/{max_retries} returned None. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                return None
+            except Exception as e:
+                last_error = e
+                error_code, error_reason = _classify_download_error(e)
+                if _is_youtube_botcheck_error(e):
+                    # Bot-check — محاولة التجاوز عبر واجهة برمجية خارجية (Cobalt API)
+                    if not _COBALT_FALLBACK_DISABLED:
+                        logger.warning(
+                            f"🚫 YouTube bot-check detected ({error_code}): {error_reason}. Attempting fallback via Cobalt API..."
+                        )
+                        cobalt_result = self._download_via_cobalt(video_url, output_dir)
+                        if cobalt_result:
+                            return cobalt_result
+                    
+                    if not _resolve_yt_cookiefile():
+                        global _YT_BOTCHECK_HINT_SHOWN
+                        if not _YT_BOTCHECK_HINT_SHOWN:
+                            _YT_BOTCHECK_HINT_SHOWN = True
+                            logger.error(
+                                "🚫 Cobalt API fallback also failed. Configure cookies via "
+                                "YTDLP_COOKIES_PATH / YTDLP_COOKIES_B64 / YTDLP_COOKIES_TEXT "
+                                "(legacy YT_COOKIES_* aliases also work)."
+                            )
+                    logger.error(f"yt-dlp download error ({error_code}): {error_reason} | raw={e}")
+                    return None
+
+                if attempt < max_retries:
+                    if "impersonate target" in str(e).lower() and "is not available" in str(e).lower():
+                        logger.warning(f"⚠️ Impersonate target not available for download. Retrying without it...")
+                        os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                        continue
+
+                    if "rate-limited" in str(e).lower() or "too many requests" in str(e).lower():
+                        wait_time = 30 + (20 * attempt)
+                        logger.warning(f"⏳ Download Rate limited! Waiting {wait_time}s before retrying...")
+                    else:
+                        wait_time = 5 * (3 ** (attempt - 1))  # 5s, 15s, 45s
+                        logger.warning(
+                            f"⏳ Download attempt {attempt}/{max_retries} failed ({error_code}): {error_reason}. "
+                            f"Retrying in {wait_time}s... | raw={e}"
+                        )
+                    time.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"yt-dlp download error after {max_retries} retries ({error_code}): {error_reason} | raw={e}"
+                    )
+
+        return None
+
+    def _download_via_cobalt(self, video_url: str, output_dir: str) -> Optional[str]:
+        """تنزيل الفيديو كـ Fallback باستخدام Cobalt API لتجاوز bot-check"""
+        try:
+            import httpx
+            import urllib.parse
+            if _COBALT_FALLBACK_DISABLED:
+                return None
+            output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
+            api_url, auth_token = _resolve_cobalt_api_settings()
+            
+            logger.info(f"🔄 Cobalt API Fallback started for {video_url}")
+            
+            # استخراج معرف الفيديو للإسم
+            vid_id = "unknown_cobalt_vid"
+            if "watch?v=" in video_url:
+                vid_id = urllib.parse.parse_qs(urllib.parse.urlparse(video_url).query).get('v', [vid_id])[0]
+            elif "youtu.be/" in video_url:
+                vid_id = video_url.split("youtu.be/")[-1].split("?")[0]
+            elif "shorts/" in video_url:
+                vid_id = video_url.split("shorts/")[-1].split("?")[0]
+            
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": _MODERN_USER_AGENT
+            }
+            if auth_token:
+                headers["Authorization"] = f"Bearer {auth_token}"
+            payload = {
+                "url": video_url,
+                "videoQuality": "1080",
+                "filenamePattern": "basic"
+            }
+            
+            # الطلب الأول يعطينا رابط التنزيل المباشر
+            # ملاحظة: بعض سرفرات Cobalt تتطلب JWT، إذا فشل هذا فالبديل هو الكوكيز المحلية فقط
+            resp = httpx.post(
+                api_url,
+                json=payload, 
+                headers=headers,
+                timeout=30.0
+            )
+            
+            if resp.status_code != 200:
+                response_text = (resp.text or "").strip()
+                lowered = response_text.lower()
+                if (
+                    "error.api.auth.jwt.missing" in lowered
+                    or ("jwt" in lowered and "missing" in lowered)
+                    or resp.status_code in (401, 403)
+                ):
+                    _disable_cobalt_fallback(
+                        "configured/default Cobalt server requires JWT auth. "
+                        "Set COBALT_API_JWT or COBALT_API_TOKEN to enable it."
+                    )
+                    return None
+                logger.warning(f"Cobalt API error: {resp.status_code} - {resp.text}")
+                return None
+                
+            data = resp.json()
+            if data.get("status") not in ("redirect", "stream", "picker"):
+                logger.warning(f"Cobalt API unexpected status: {data}")
+                return None
+                
+            if data.get("status") == "picker":
+                picker_items = data.get("picker", [])
+                if picker_items:
+                    download_url = picker_items[0].get("url")
+                else:
+                    download_url = None
+            else:
+                download_url = data.get("url")
+                
+            if not download_url:
+                logger.warning(f"Cobalt API did not return a valid download URL. Response: {data}")
+                return None
+                
+            # تنزيل الملف الفعلي
+            output_file = os.path.join(output_dir, f"{vid_id}_cobalt.mp4")
+            
+            logger.info("Cobalt API successfully resolved URL, starting physical download...")
+            try:
+                with httpx.stream("GET", download_url, timeout=300.0) as stream_resp:
+                    if stream_resp.status_code != 200:
+                        logger.warning(f"Stream error: {stream_resp.status_code}")
+                        return None
+                        
+                    with ResilientFS.open(output_file, "wb") as f:
+                        for chunk in stream_resp.iter_bytes(chunk_size=1024*1024):
+                            f.write(chunk)
+            finally:
+                _release_runtime_dir_keepalive(keepalive_path)
+                        
+            logger.info(f"✅ Cobalt API Fallback successful: {output_file}")
+            return output_file
+            
+        except Exception as e:
+            logger.error(f"Cobalt API Fallback failed: {e}")
+            return None
+
+    def _download_sync_attempt(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
+        """محاولة واحدة للتنزيل — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة"""
+        import yt_dlp
+        output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
+        output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
+        cookies_path = _resolve_any_cookiefile()
+
+        # الحصول على مسار FFmpeg للدمج
+        try:
+            from src.agent.ffmpeg_utils import ffmpeg_bin
+            ffmpeg_path = ffmpeg_bin()
+        except Exception:
+            ffmpeg_path = None
+
+        # أولوية الجودة: أعلى جودة ممكنة مع دعم دقة الشورتس العمودية (1920x1080)
+        if ffmpeg_path:
+            fmt = (
+                "bestvideo[height<=1920][width<=1920][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1920][width<=1920]+bestaudio/"
+                "bestvideo+bestaudio/"
+                "best[ext=mp4]/"
+                "best/"
+                "b"
+            )
+        else:
+            fmt = "best[ext=mp4]/best/b"
+            logger.warning(
+                "⚠️ FFmpeg not found — skipping merged high-quality streams and using a single compatibility profile only "
+                "(typically max ~720p)"
+            )
+
+        base_dl_extra = {
+            "format": fmt,
+            "outtmpl": output_template,
+            "noplaylist": True,
+            "merge_output_format": "mp4" if ffmpeg_path else None,
+            "retries": 5,
+            "fragment_retries": 5,
+        }
+
+        # إضافة فلتر المدة إذا كان مطلوباً (للشورتس مثلاً)
+        if max_duration:
+            def duration_filter(info_dict):
+                dur = info_dict.get("duration")
+                if dur and float(dur) > max_duration:
+                    return f"Video is too long ({dur}s > {max_duration}s)"
+                return None
+            base_dl_extra["match_filter"] = duration_filter
+
+        if ffmpeg_path:
+            base_dl_extra["ffmpeg_location"] = ffmpeg_path
+        else:
+            base_dl_extra["postprocessors"] = []
+
+        download_profiles = _download_profile_overrides(ffmpeg_path, cookies_enabled=bool(cookies_path))
+        profile_labels = [
+            str(profile.get("label") or f"profile_{idx}")
+            for idx, profile in enumerate(download_profiles, start=1)
+        ]
+        if cookies_path:
+            logger.info(
+                "🍪 yt-dlp cookie resolution active before download: %s | profiles=%s",
+                os.path.basename(cookies_path),
+                ", ".join(profile_labels),
+            )
+        else:
+            logger.warning(
+                "🍪 No yt-dlp cookies resolved before download. project_root=%s | profiles=%s",
+                project_root,
+                ", ".join(profile_labels),
+            )
+        last_profile_error = None
+
+        try:
+            for profile_index, profile in enumerate(download_profiles, start=1):
+                profile_label = profile.get("label") or f"profile_{profile_index}"
+                dl_extra = dict(base_dl_extra)
+                for key, value in profile.items():
+                    if key != "label":
+                        dl_extra[key] = value
+
+                ydl_opts = _build_yt_opts(dl_extra, cookies_path=cookies_path)
+                if os.environ.get("YTDLP_SKIP_IMPERSONATE") == "1":
+                    ydl_opts.pop("impersonate", None)
+
+                try:
+                    logger.info(
+                        f"📥 Trying download profile {profile_index}/{len(download_profiles)}: {profile_label}"
+                    )
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        try:
+                            info = ydl.extract_info(video_url, download=True)
+                        except Exception as e:
+                            if "impersonate target" in str(e).lower() and "is not available" in str(e).lower():
+                                raise
+                            raise
+
+                        if info:
+                            dl_height = info.get("height") or info.get("resolution", "?")
+                            dl_format = info.get("format", "?")
+                            dl_format_id = info.get("format_id", "?")
+                            dl_vcodec = info.get("vcodec", "?")
+                            logger.info(
+                                f"📹 Downloaded quality ({profile_label}): {dl_height}p | "
+                                f"format={dl_format} | format_id={dl_format_id} | "
+                                f"vcodec={dl_vcodec} | url={video_url[:60]}"
+                            )
+
+                            filename = ydl.prepare_filename(info)
+                            base = os.path.splitext(filename)[0]
+                            for ext in [".mp4", ".mkv", ".webm"]:
+                                if ResilientFS.exists(base + ext):
+                                    return base + ext
+                            if ResilientFS.exists(filename):
+                                return filename
+                except Exception as e:
+                    last_profile_error = e
+                    error_code, error_reason = _classify_download_error(e)
+                    if profile_index < len(download_profiles):
+                        logger.warning(
+                            f"⚠️ Download profile {profile_label} failed ({error_code}): {error_reason}. "
+                            f"Trying fallback profile. | raw={e}"
+                        )
+                        continue
+                    raise
+        finally:
+            _release_runtime_dir_keepalive(keepalive_path)
+        if last_profile_error:
+            raise last_profile_error
+        return None
+
+    async def process_video(self, input_path: str, video_id: str,
+                            shorts_format: str = "crop",
+                            enhance: bool = False,
+                            add_cta: bool = True,
+                            hflip: bool = False,
+                            video_type: str = "shorts",
+                            video_effects: Optional[Dict[str, Any]] = None,
+                            trim_start: float = 1.0,
+                            trim_end: float = 1.0) -> Optional[str]:
+        """معالجة الفيديو — يدعم شورتس وطويل
+        
+        video_type:
+            - 'shorts': تحويل لشورتس 9:16 مع جميع المعالجات
+            - 'long': الحفاظ على الفيديو كما هو مع تحسين YouTube فقط
+        """
+        try:
+            from src.agent.mod_video_processor import ModVideoProcessor
+
+            output_dir = _project_local_path(".output", "auto_mod_shorts" if video_type == "shorts" else "auto_mod_long")
+            ResilientFS.makedirs(output_dir, exist_ok=True)
+
+            mvp = ModVideoProcessor(temp_dir=_project_local_path(".temp", "auto_mod"))
+
+            if video_type == "long":
+                # --- مسار الفيديوهات الطويلة ---
+                # stream copy فقط (بدون إعادة ترميز = 0 فقدان جودة)
+                final_path = os.path.join(output_dir, f"{video_id}_mod.mp4")
+                loop = asyncio.get_running_loop()
+                import functools
+                opt_func = functools.partial(
+                    mvp._optimize_for_youtube,
+                    input_path=input_path,
+                    output_path=final_path,
+                )
+                ok = await loop.run_in_executor(None, opt_func)
+                if ok and ResilientFS.exists(final_path):
+                    return final_path
+                # fallback: نسخ مباشر
+                ResilientFS.copy2(input_path, final_path)
+                return final_path if ResilientFS.exists(final_path) else None
+            else:
+                # --- مسار الشورتس ---
+                loop = asyncio.get_running_loop()
+                import functools
+                process_func = functools.partial(
+                    mvp.process_mod_video,
+                    input_video=input_path,
+                    output_dir=output_dir,
+                    video_id=video_id,
+                    trim_start=trim_start,
+                    trim_end=trim_end,
+                    add_cta=add_cta,
+                    convert_to_shorts=True,
+                    shorts_format=shorts_format,
+                    enhance=enhance,
+                    video_effects=video_effects,
+                    hflip=hflip,
+                )
+                out_path, info = await loop.run_in_executor(None, process_func)
+                return out_path
+        except Exception as e:
+            logger.error(f"Failed to process video {video_id}: {e}")
+            return None
+
+    async def _apply_source_tail_trim(self, input_path: str, video_id: str, trim_seconds: float) -> Optional[str]:
+        try:
+            seconds = max(0.0, float(trim_seconds or 0.0))
+        except Exception:
+            seconds = 0.0
+        if seconds <= 0:
+            return input_path
+
+        from src.agent.mod_video_processor import ModVideoProcessor
+
+        root, ext = os.path.splitext(input_path)
+        if not ext:
+            ext = ".mp4"
+        output_path = f"{root}.tailtrim_{video_id[:24]}_{uuid.uuid4().hex[:8]}{ext}"
+        ResilientFS.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        mvp = ModVideoProcessor(temp_dir=_project_local_path(".temp", "auto_mod"))
+        loop = asyncio.get_running_loop()
+        import functools
+
+        trim_func = functools.partial(mvp._trim_video, input_path, output_path, 0.0, seconds)
+        await loop.run_in_executor(None, trim_func)
+        if ResilientFS.exists(output_path):
+            return output_path
+        return None
+
+    @staticmethod
+    def _resolve_reusable_video_artifact(path: Optional[str]) -> Optional[str]:
+        resolved = _resolve_project_runtime_path(path or "")
+        if not resolved:
+            return None
+        try:
+            from src.agent.ffmpeg_utils import validate_input_file
+
+            if validate_input_file(resolved):
+                return resolved
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _expected_processed_output_path(video_id: str, video_type: str) -> str:
+        output_dir = _project_local_path(".output", "auto_mod_shorts" if video_type == "shorts" else "auto_mod_long")
+        return os.path.join(output_dir, f"{video_id}_mod.mp4")
+
+    def _get_reusable_processed_output_path(self, video_id: str, video_type: str) -> Optional[str]:
+        candidate = self._expected_processed_output_path(video_id, video_type)
+        return self._resolve_reusable_video_artifact(candidate)
+
+    async def run_cycle(
+        self,
+        notify_func=None,
+        force: bool = False,
+        *,
+        target_channel_id: Optional[str] = None,
+        target_content_type: Optional[str] = None,
+        target_source_id: Optional[str] = None,
+        target_video_id: Optional[str] = None,
+        target_video_url: Optional[str] = None,
+        target_video_title: Optional[str] = None,
+        target_video_type: Optional[str] = None,
+        target_raw_video_path: Optional[str] = None,
+        preview_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        تشغيل دورة جلب واحدة مع إشعارات تفصيلية:
+        1. فحص الإعدادات
+        2. فحص الجدولة
+        3. جلب فيديوهات جديدة
+        4. معالجة ونشر
+
+        Args:
+            notify_func: دالة اختيارية لإرسال إشعارات (message)
+            force: تخطي فحص الوقت والحد اليومي (للتشغيل اليدوي الفوري)
+            target_channel_id: عند التحديد، حصر التشغيل القسري في جدول قناة محدد
+            target_content_type: عند التحديد، حصر التشغيل القسري في نوع محتوى محدد
+            target_source_id: عند التحديد، حصر التشغيل القسري في مصدر محدد داخل الجدول المستهدف
+            target_video_id: عند التحديد مع target_source_id، حصر الاستئناف الفوري في فيديو محدد داخل المصدر
+            target_video_url: عند التحديد مع target_video_id، استخدام رابط الفيديو الموافق عليه مباشرة دون جلب فيديو جديد من المصدر
+            target_video_title: عنوان اختياري للفيديو الموافق عليه عند الاستئناف المباشر
+            target_video_type: نوع اختياري (`shorts` أو `long`) للفيديو الموافق عليه عند الاستئناف المباشر
+            target_raw_video_path: مسار اختياري لملف خام محفوظ من مرحلة raw review لإعادة استخدامه عند الاستئناف
+            preview_mode: عند التفعيل، تنفيذ نفس مسار المعالجة لإنتاج فيديو تجريبي دون رفعه أو تعديل الحالات الرسمية
+
+        Returns:
+            نتائج الدورة
+        """
+
+        async def _notify(msg: str):
+            """إرسال إشعار آمن"""
+            if notify_func:
+                try:
+                    await notify_func(msg)
+                except Exception:
+                    pass
+
+        preview_mode = bool(preview_mode)
+        preview_source = None
+        if preview_mode and target_source_id:
+            preview_source = self.db._get_source_by_id(str(target_source_id))
+            if not preview_source:
+                await _notify("⚠️ لم يتم العثور على المصدر المطلوب لتنفيذ فيديو الاختبار.")
+                return {
+                    "status": "no_target_source",
+                    "message": "Target source not found",
+                    "processed": 0,
+                    "published": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "waiting_raw_review": 0,
+                }
+            target_channel_id = target_channel_id or preview_source.get("channel_id")
+            target_content_type = target_content_type or preview_source.get("content_type", "minecraft_mods")
+
+        if not _RUN_CYCLE_LOCK.acquire(blocking=False):
+            logger.warning("⏸ [AutoMod] Ignoring overlapping run_cycle request because another cycle is still running.")
+            await _notify("⏳ توجد دورة جلب أخرى قيد التشغيل بالفعل، لذلك تم تجاهل هذه المحاولة لمنع التكرار.")
+            return {"status": "busy", "message": "Another auto-mod cycle is already running"}
+
+        try:
+            # ========== بدء الدورة ==========
+            cycle_start = time.time()
+            await _notify(
+                "🔄 *بدء دورة الجلب التلقائي*\n"
+                f"🆔 النسخة: `{self.instance_id[:20]}`\n"
+                f"🕐 الوقت: `{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}`"
+            )
+
+            # ========== فحص الإعدادات ==========
+            config = self.db.get_config()
+            if not config.get("auto_fetch_enabled") and not force:
+                await _notify("⚠️ الجلب التلقائي *معطل*. قم بتفعيله أولاً.")
+                return {"status": "disabled", "message": "Auto fetch is disabled"}
+
+            # ========== فحص الجداول ==========
+            schedules = self.db.get_all_schedules()
+            active = [s for s in schedules if s.get("enabled")]
+            schedule_total = len(schedules)
+
+            if target_channel_id or target_content_type:
+                filtered_active = []
+                for schedule in active:
+                    if target_channel_id and schedule.get("channel_id") != target_channel_id:
+                        continue
+                    if target_content_type and schedule.get("content_type", "minecraft_mods") != target_content_type:
+                        continue
+                    filtered_active.append(schedule)
+                active = filtered_active
+
+            if not active:
+                if preview_mode and preview_source and target_channel_id:
+                    active = [{
+                        "enabled": True,
+                        "channel_id": target_channel_id,
+                        "content_type": target_content_type or "minecraft_mods",
+                        "preview_only": True,
+                    }]
+                    schedule_total = max(schedule_total, 1)
+                if target_channel_id or target_content_type:
+                    if not active:
+                        await _notify("⚠️ لم يتم العثور على جدول نشر نشط يطابق الاستهداف المطلوب.")
+                        return {"status": "no_target_schedule", "message": "No matching active schedule"}
+                elif not active:
+                    await _notify("⚠️ لا توجد *جداول نشر نشطة*. أضف جدول نشر أولاً.")
+                    return {"status": "no_schedules", "message": "No active schedules"}
+
+            await _notify(
+                f"📋 تم العثور على *{len(active)}* جدول نشر نشط من أصل {max(schedule_total, len(active))}."
+            )
+
+            results = {"processed": 0, "published": 0, "failed": 0, "skipped": 0, "waiting_raw_review": 0, "previewed": 0}
+            errors_log = []
+            auto_paused = False  # علامة لإيقاف الأتمتة تلقائياً عند خطأ حرج
+            pending_raw_review_paused = False
+            approved_target_resume = bool(force and target_source_id and target_video_id)
+            direct_target_resume = bool(approved_target_resume and target_video_url)
+
+            if has_pending_raw_reviews() and not approved_target_resume and not preview_mode:
+                await _notify(
+                    "⏸ توجد مراجعة فيديو خام معلّقة بالفعل، لذلك تم إيقاف دورة الأتمتة بالكامل حتى يصدر قرارك."
+                )
+                return {
+                    **results,
+                    "status": "waiting_raw_review",
+                    "message": "Pending raw review exists",
+                    "waiting_raw_review": 1,
+                }
+
+            for sch_idx, schedule in enumerate(active, 1):
+                channel_id = schedule["channel_id"]
+                content_type = schedule.get("content_type", "minecraft_mods")
+                schedule_force = bool(force)
+                if schedule_force and (target_channel_id or target_content_type):
+                    if target_channel_id and channel_id != target_channel_id:
+                        schedule_force = False
+                    if target_content_type and content_type != target_content_type:
+                        schedule_force = False
+
+                # فحص الوقت
+                if not schedule_force and not self._is_publish_time(schedule):
+                    results["skipped"] += 1
+                    logger.info(f"⏭ [AutoMod] Skipping schedule {sch_idx}: Not publish time yet (Channel: {channel_id[:10]}...)")
+                    await _notify(
+                        f"⏭ الجدول {sch_idx}: *تخطي* — لم يحن وقت النشر بعد.\n"
+                        f"   📺 القناة: `{channel_id[:20]}...`"
+                    )
+                    continue
+
+                # فحص الحد اليومي
+                if not schedule_force and self._reached_daily_limit(schedule):
+                    results["skipped"] += 1
+                    logger.info(f"⏭ [AutoMod] Skipping schedule {sch_idx}: Daily limit reached (Channel: {channel_id[:10]}...)")
+                    await _notify(
+                        f"⏭ الجدول {sch_idx}: *تخطي* — تم بلوغ الحد اليومي.\n"
+                        f"   📺 القناة: `{channel_id[:20]}...`"
+                    )
+                    continue
+
+                logger.info(f"📡 [AutoMod] Processing schedule {sch_idx}... (Channel: {channel_id[:10]}...)")
+                await _notify(
+                    f"📡 الجدول {sch_idx}: *بدء المعالجة*\n"
+                    f"   📺 القناة: `{channel_id[:20]}...`\n"
+                    f"   📦 النوع: `{content_type}`"
+                )
+
+                # جلب المصادر لهذه القناة ونوع المحتوى
+                if preview_mode and preview_source and target_source_id and schedule_force:
+                    preview_channel = preview_source.get("channel_id")
+                    preview_content_type = preview_source.get("content_type", "minecraft_mods")
+                    sources_list = [preview_source] if (preview_channel == channel_id and preview_content_type == content_type) else []
+                else:
+                    sources_list = self.db.get_sources(channel_id, content_type)
+                if target_source_id and schedule_force and not preview_mode:
+                    sources_list = [
+                        source for source in sources_list
+                        if str(source.get("id") or f"{channel_id}:{source.get('source_url', '')}") == str(target_source_id)
+                    ]
+                if not sources_list:
+                    logger.info(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
+                    await _notify(
+                        f"⚠️ الجدول {sch_idx}: لا توجد مصادر للقناة `{channel_id[:20]}...`"
+                    )
+                    continue
+
+                await _notify(f"🔍 تم العثور على *{len(sources_list)}* مصدر للبحث.")
+
+                schedule_done = False
+                for source in sources_list:
+                    if schedule_done:
+                        break
+
+                    src_name = source.get("source_name", "مصدر")
+                    src_url = source.get("source_url", "")
+                    src_platform = source.get("platform", "youtube")
+                    source_settings = normalize_source_settings(source.get("settings"))
+                    require_raw_review = bool(source_settings.get("require_raw_review"))
+                    source_id = str(source.get("id") or f"{channel_id}:{src_url}")
+                    if not source.get("enabled") and not (preview_mode and source_id == str(target_source_id)):
+                        continue
+                    logger.info(f"🔍 [AutoMod] Fetching from source: {src_name} (platform={src_platform}, url={src_url[:50]}...)")
+
+                    source_pending_review = get_pending_raw_review(source_id) if (require_raw_review and not preview_mode) else None
+                    if source_pending_review and not approved_target_resume and not preview_mode:
+                        logger.info(
+                            f"⏸ [AutoMod] Source {src_name} is waiting for raw review decision (source_id={source_id[:20]}...)"
+                        )
+                        pending_raw_review_paused = True
+                        results["waiting_raw_review"] = max(results["waiting_raw_review"], 1)
+                        schedule_done = True
+                        await _notify(
+                            f"⏸ المصدر `{src_name[:30]}` لديه فيديو خام بانتظار قرارك بالفعل، لذلك سيتم إيقاف دورة الأتمتة بالكامل الآن."
+                        )
+                        break
+
+                    current_vid_id = ""
+                    current_vid_title = ""
+                    current_dl_path = None
+                    current_out_path = None
+                    current_yt_url = ""
+                    claimed_processing = False
+
+                    try:
+                        # مستويات البحث المتدرجة (نطاقات غير متداخلة لتحسين الكفاءة وتوسيع نطاق الاستخراج)
+                        search_ranges = [
+                            "1-50",
+                            "51-250",
+                            "251-1000",
+                            "1001-5000",
+                            "5001-20000"
+                        ]
+                    
+                        fetch_order = config.get("settings", {}).get("fetch_order", "newest")
+                        videos = []
+                        found_new_video = False
+
+                        if direct_target_resume and schedule_force and source_id == str(target_source_id):
+                            videos = [{
+                                "id": str(target_video_id),
+                                "title": str(target_video_title or "بدون عنوان"),
+                                "url": str(target_video_url),
+                                "video_type": str(target_video_type or ""),
+                            }]
+                            found_new_video = True
+                            logger.info(
+                                "⚡ [AutoMod] Directly resuming approved raw-review video %s from source %s without refetch discovery",
+                                str(target_video_id)[:20],
+                                src_name,
+                            )
+                            await _notify(
+                                f"⚡ استئناف فوري للفيديو الموافق عليه مباشرة دون جلب فيديو جديد:\n"
+                                f"   📺 `{str(target_video_title or 'بدون عنوان')[:60]}`"
+                            )
+                        else:
+                            for idx, s_range in enumerate(search_ranges):
+                                if found_new_video:
+                                    break
+
+                                await _notify(
+                                    f"🔎 *جلب فيديوهات من:* `{src_name}` (النطاق: {s_range}, الترتيب: {fetch_order})\n"
+                                    f"   🔗 `{src_url[:60]}`"
+                                )
+                            
+                                # إضافة تأخير بسيط لتجنب التزامن الشديد
+                                if idx > 0:
+                                    import random
+                                    delay = random.uniform(3.0, 7.0)
+                                    logger.debug(f"⏳ Normalizing fetch rhythm... waiting {delay:.1f}s")
+                                    await asyncio.sleep(delay)
+                            
+                                batch_videos = await self.fetch_videos_from_source(src_url, items_range=s_range, platform=src_platform)
+                                logger.info(f"📦 [AutoMod] Source {src_name}: fetched {len(batch_videos)} videos (range={s_range})")
+
+                                if not batch_videos:
+                                    if idx == 0:
+                                        await _notify(f"📭 لم يتم العثور على فيديوهات في النطاق الأول من `{src_name}`.")
+                                        break # ربما القناة فارغة أو هناك خطأ في الوصول
+                                    else:
+                                        await _notify(f"⏹️ لا توجد فيديوهات إضافية بعد النطاق {search_ranges[idx-1]}.")
+                                        break
+
+                                # فحص الفيديوهات في هذا النطاق
+                                potential_videos = []
+                                published_count = 0
+                                locked_count = 0
+                                other_count = 0
+                                for v in batch_videos:
+                                    v_id = v.get("id", "")
+                                    if not v_id:
+                                        continue
+
+                                    if is_raw_review_blocked(source_id, v_id):
+                                        other_count += 1
+                                        continue
+                                    if is_raw_review_skip_active(source_id, v_id):
+                                        other_count += 1
+                                        continue
+
+                                    status, updated_at = self.db.get_video_process_state(v_id, channel_id)
+                                    if status == "published":
+                                        published_count += 1
+                                        continue
+                                    if status == "processing":
+                                        if not updated_at:
+                                            locked_count += 1
+                                            continue
+                                        try:
+                                            if (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=30):
+                                                locked_count += 1
+                                                continue
+                                        except Exception:
+                                            locked_count += 1
+                                            continue
+                                    if status:
+                                        other_count += 1
+                                    potential_videos.append(v)
+
+                                if target_video_id and schedule_force and source_id == str(target_source_id):
+                                    potential_videos = [
+                                        item for item in potential_videos
+                                        if str(item.get("id", "")) == str(target_video_id)
+                                    ]
+                                elif require_raw_review and potential_videos:
+                                    approved_videos = [
+                                        item for item in potential_videos
+                                        if is_raw_review_approved(source_id, item.get("id", ""))
+                                    ]
+                                    if approved_videos:
+                                        potential_videos = approved_videos
+                                try:
+                                    logger.info(
+                                        f"🧾 [AutoMod] Source {src_name}: new={len(potential_videos)}, published={published_count}, locked={locked_count}, other={other_count} (channel={channel_id[:10]}...)"
+                                    )
+                                except Exception:
+                                    pass
+                            
+                                if potential_videos:
+                                    # وجدنا فيديوهات جديدة في هذا النطاق!
+                                    found_new_video = True
+                                
+                                    # تطبيق ترتيب الجلب (Fetch Order) المكتشف في هذا النطاق
+                                    if fetch_order == "oldest":
+                                        # ترتيب من الأقدم للأحدث (نأخذ أقدم فيديو في النطاق المكتشف)
+                                        try:
+                                            potential_videos.sort(key=lambda x: x.get("upload_date") or "99999999")
+                                        except Exception: pass
+                                    elif fetch_order == "random":
+                                        import random
+                                        random.shuffle(potential_videos)
+                                    else: # newest
+                                        try:
+                                            potential_videos.sort(key=lambda x: x.get("upload_date") or "00000000", reverse=True)
+                                        except Exception: pass
+                                
+                                    videos = potential_videos
+                                    await _notify(f"🎯 وجدنا *{len(potential_videos)}* فيديو جديد في النطاق {s_range} ({fetch_order}).")
+                                    break
+                                else:
+                                    if idx < len(search_ranges) - 1:
+                                        await _notify(f"🔄 جميع فيديوهات النطاق {s_range} تمت معالجتها. *جاري البحث في النطاق التالي...*")
+                                    else:
+                                        await _notify(f"📭 تم الوصول لأقصى عمق بحث ({depth}) ولم نجد فيديوهات جديدة.")
+                                        logger.info(
+                                            f"📭 [AutoMod] No new videos in any range for source {src_name} (channel={channel_id[:10]}...)"
+                                        )
+
+                        if not found_new_video:
+                            continue
+
+                        processed_in_this_source = 0
+
+                        for video in videos:
+                            vid_id = video.get("id", "")
+                            vid_title = video.get("title", "بدون عنوان")[:60]
+                            if not vid_id:
+                                continue
+
+                            # بما أننا قمنا بالتصفية مسبقاً في حلقة البحث العميق، الفيديوهات هنا هي "جديدة"
+                            logger.info(
+                                f"🎬 [AutoMod] Selected video {vid_id[:20]}... from {src_name} for channel {channel_id[:10]}..."
+                            )
+                            current_vid_id = vid_id
+                            current_vid_title = vid_title
+                            current_dl_path = None
+                            current_out_path = None
+                            current_yt_url = ""
+                            claimed_processing = False
+                            await _notify(
+                                f"🎬 *فيديو جديد مختار:* `{vid_title}`\n"
+                                f"   🆔 `{vid_id[:20]}`"
+                            )
+
+                            # ========== فحص الموارد قبل التنزيل ==========
+                            try:
+                                from .disk_guard import should_allow_download
+                                if not should_allow_download():
+                                    await _notify("⚠️ المساحة غير كافية. تم تخطي التنزيل.")
+                                    errors_log.append(f"مساحة غير كافية: {vid_title}")
+                                    logger.warning(
+                                        f"⛔ [AutoMod] Skipping download due to disk space (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                    )
+                                    if not preview_mode:
+                                        self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
+                                    schedule_done = True
+                                    break
+                            except Exception:
+                                pass
+
+                            # تسجيل كقيد المعالجة
+                            if preview_mode:
+                                await _notify(
+                                    f"🧪 وضع الاختبار للمصدر `{src_name[:30]}`: سيتم إنشاء فيديو نهائي تجريبي دون حجز حالة المعالجة أو تعديل سجل النشر الرسمي."
+                                )
+                            else:
+                                claimed_processing = self.db.mark_video_processing(
+                                    vid_id, channel_id, content_type, video.get("title", "")
+                                )
+                                if not claimed_processing:
+                                    await _notify(f"⚠️ تعذر حجز حالة المعالجة للفيديو `{vid_title}`. تم الإيقاف الآمن لهذه المحاولة.")
+                                    errors_log.append(f"فشل قفل المعالجة: {vid_title}")
+                                    logger.error(
+                                        f"❌ [AutoMod] Failed to acquire processing claim (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                    )
+                                    results["failed"] += 1
+                                    self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
+                                    schedule_done = True
+                                    break
+
+                            src_platform = source.get("platform", "youtube")
+                            vid_type = _infer_processing_video_type(video, src_platform, source.get("source_url"))
+                            type_label = "شورتس" if vid_type == "shorts" else "طويل"
+                            approved_resume_for_video = bool(
+                                approved_target_resume
+                                and schedule_force
+                                and source_id == str(target_source_id)
+                                and str(vid_id) == str(target_video_id)
+                            )
+                            dl_path = None
+                            out_path = None
+
+                            if approved_resume_for_video:
+                                out_path = self._get_reusable_processed_output_path(vid_id, vid_type)
+                                if out_path:
+                                    current_out_path = out_path
+                                    logger.info(
+                                        "♻️ [AutoMod] Reusing existing processed artifact for approved video %s: %s",
+                                        vid_id[:20],
+                                        out_path,
+                                    )
+                                    await _notify(
+                                        f"♻️ تم العثور على نسخة معالجة جاهزة للفيديو الموافق عليه، وسيتم استخدامها مباشرة:\n"
+                                        f"   📺 `{vid_title}`"
+                                    )
+
+                            if not out_path:
+                                reusable_raw_path = None
+                                if approved_resume_for_video:
+                                    reusable_raw_path = self._resolve_reusable_video_artifact(target_raw_video_path)
+                                if reusable_raw_path:
+                                    dl_path = reusable_raw_path
+                                    current_dl_path = dl_path
+                                    logger.info(
+                                        "♻️ [AutoMod] Reusing preserved raw artifact for approved video %s: %s",
+                                        vid_id[:20],
+                                        dl_path,
+                                    )
+                                    await _notify(
+                                        f"♻️ سيتم استكمال الفيديو الموافق عليه من الملف الخام المحفوظ دون إعادة تنزيل:\n"
+                                        f"   📺 `{vid_title}`"
+                                    )
+                                else:
+                                    # ========== تنزيل ==========
+                                    await _notify(f"⬇️ *جاري التنزيل:* `{vid_title}`...")
+                                    dl_dir = _ensure_runtime_dir(_project_local_path(".temp", "auto_mod_downloads"))
+
+                                    # تحديد المدة القصوى بناءً على النوع المختار
+                                    max_dur = 60 if src_platform in ("youtube_shorts", "facebook_reels") else None
+                                    dl_path = await self.download_video(video["url"], dl_dir, max_duration=max_dur)
+                                    current_dl_path = dl_path
+
+                                    if not dl_path:
+                                        err_msg = f"❌ *فشل التنزيل:* `{vid_title}`"
+                                        await _notify(err_msg)
+                                        errors_log.append(f"تنزيل فاشل: {vid_title}")
+                                        logger.warning(
+                                            f"❌ [AutoMod] Download failed (video={vid_id[:20]}..., channel={channel_id[:10]}..., source={src_name})"
+                                        )
+                                        if not preview_mode:
+                                            self.db.mark_video_failed(vid_id, channel_id, "Download failed")
+                                        results["failed"] += 1
+                                        try:
+                                            from src.agent.error_tracker import get_error_tracker
+                                            get_error_tracker().record_error("download", "download_failed", vid_title)
+                                        except Exception:
+                                            pass
+                                        if not preview_mode:
+                                            self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
+                                        schedule_done = True
+                                        break
+
+                                    try:
+                                        file_size_mb = ResilientFS.getsize(dl_path) / (1024 * 1024)
+                                        await _notify(f"✅ تم التنزيل ({file_size_mb:.1f} MB)")
+                                    except Exception:
+                                        await _notify("✅ تم التنزيل.")
+
+                                if require_raw_review and not preview_mode and not is_raw_review_approved(source_id, vid_id):
+                                    from src.bot.raw_review import request_raw_video_review
+
+                                    existing_pending = get_pending_raw_review(source_id)
+                                    requested = await request_raw_video_review(
+                                        source_id=source_id,
+                                        channel_id=channel_id,
+                                        source_name=src_name,
+                                        source_url=src_url,
+                                        content_type=content_type,
+                                        video=video,
+                                        raw_video_path=dl_path,
+                                        video_type=vid_type,
+                                    )
+                                    if claimed_processing:
+                                        self.db.release_video_processing(vid_id, channel_id)
+                                        claimed_processing = False
+                                    if requested:
+                                        current_dl_path = None
+                                    else:
+                                        self._cleanup_file(dl_path)
+                                        current_dl_path = None
+                                    schedule_done = True
+                                    pending_raw_review_paused = bool(requested or existing_pending)
+                                    if pending_raw_review_paused:
+                                        results["waiting_raw_review"] += 1
+                                    else:
+                                        results["failed"] += 1
+
+                                    if requested:
+                                        await _notify(
+                                            f"🛑 تم إرسال الفيديو الخام للمراجعة اليدوية قبل المعالجة:\n"
+                                            f"   📺 `{vid_title}`\n"
+                                            f"   🧪 المصدر: `{src_name[:30]}`"
+                                        )
+                                    elif existing_pending:
+                                        await _notify(
+                                            f"⏸ يوجد أصلًا فيديو خام بانتظار المراجعة لهذا المصدر، لذلك تم تجاهل الفيديو الجديد:\n"
+                                            f"   📺 `{vid_title}`"
+                                        )
+                                    else:
+                                        await _notify(
+                                            f"⚠️ تعذر إرسال الفيديو الخام للمراجعة اليدوية، لذلك لن تتم المعالجة الآن:\n"
+                                            f"   📺 `{vid_title}`"
+                                        )
+                                    break
+
+                                await _notify(
+                                    f"⚙️ *جاري المعالجة:* `{vid_title}`\n"
+                                    f"   📐 النوع: `{type_label}`"
+                                )
+
+                                from src.agent.ffmpeg_utils import ffmpeg_bin
+                                if not ffmpeg_bin():
+                                     err_msg = "⚠️ *تنبيه:* FFmpeg غير موجود على النظام. لا يمكن معالجة الشورتس بدون FFmpeg. يرجى تثبيته لضمان عمل البوت."
+                                     await _notify(err_msg)
+                                     errors_log.append("FFmpeg missing")
+                                     logger.warning(
+                                         f"❌ [AutoMod] FFmpeg missing; cannot process (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                     )
+                                     if not preview_mode:
+                                         self.db.mark_video_failed(vid_id, channel_id, "FFmpeg missing")
+                                     results["failed"] += 1
+                                     self._cleanup_file(dl_path)
+                                     if not preview_mode:
+                                         self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
+                                     schedule_done = True
+                                     break
+
+                                tail_trim_seconds = pick_source_tail_trim_seconds(source_settings)
+                                if tail_trim_seconds > 0:
+                                    await _notify(
+                                        f"✂️ *قص ثابت للمصدر:* حذف `{tail_trim_seconds:g}` ثانية من نهاية الفيديو قبل المعالجة"
+                                    )
+                                    trimmed_dl_path = await self._apply_source_tail_trim(dl_path, vid_id, tail_trim_seconds)
+                                    if not trimmed_dl_path:
+                                        err_msg = f"❌ *فشل قص نهاية الفيديو:* `{vid_title}`"
+                                        await _notify(err_msg)
+                                        errors_log.append(f"قص نهاية فاشل: {vid_title}")
+                                        logger.warning(
+                                            f"❌ [AutoMod] Tail trim failed (video={vid_id[:20]}..., channel={channel_id[:10]}..., seconds={tail_trim_seconds})"
+                                        )
+                                        if not preview_mode:
+                                            self.db.mark_video_failed(vid_id, channel_id, "Tail trim failed")
+                                        results["failed"] += 1
+                                        self._cleanup_file(dl_path)
+                                        current_dl_path = None
+                                        if not preview_mode:
+                                            self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
+                                        schedule_done = True
+                                        break
+                                    if trimmed_dl_path != dl_path:
+                                        self._cleanup_file(dl_path)
+                                        dl_path = trimmed_dl_path
+                                        current_dl_path = trimmed_dl_path
+
+                                out_path = await self.process_video(
+                                    dl_path, vid_id,
+                                    shorts_format=config.get("shorts_format", "crop"),
+                                    enhance=config.get("enhance_enabled", False),
+                                    add_cta=config.get("add_cta", True),
+                                    hflip=config.get("hflip_enabled", False),
+                                    video_type=vid_type,
+                                    video_effects=pick_source_video_effects(source_settings),
+                                    trim_end=0.0 if (vid_type == "shorts" and tail_trim_seconds > 0) else 1.0,
+                                )
+                                current_out_path = out_path
+
+                                if not out_path:
+                                    err_msg = f"❌ *فشل المعالجة:* `{vid_title}`"
+                                    await _notify(err_msg)
+                                    errors_log.append(f"معالجة فاشلة: {vid_title}")
+                                    logger.warning(
+                                        f"❌ [AutoMod] Processing failed (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                    )
+                                    if not preview_mode:
+                                        self.db.mark_video_failed(vid_id, channel_id, "Processing failed")
+                                    results["failed"] += 1
+                                    self._cleanup_file(dl_path)
+                                    if not preview_mode:
+                                        self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
+                                    schedule_done = True
+                                    break
+
+                                await _notify("✅ تمت المعالجة بنجاح.")
+
+                            # ========== نص مخصص (Custom Overlay Text) ==========
+                            source_overlay = pick_source_overlay_config(source_settings) if vid_type == "shorts" else None
+                            channel_overlay = None
+                            if not source_overlay and vid_type == "shorts":
+                                try:
+                                    from src.bot.channel_manager import ChannelManager as _CM
+                                    _ch = _CM().get_channel(channel_id)
+                                    _overlay_texts = getattr(_ch, "custom_overlay_texts", None) or [] if _ch else []
+                                    if _overlay_texts:
+                                        channel_overlay = random.choice(_overlay_texts)
+                                except Exception:
+                                    channel_overlay = None
+
+                            overlay_cfg = source_overlay or channel_overlay
+                            if overlay_cfg and vid_type == "shorts":
+                                try:
+                                    _ov_text = (overlay_cfg.get("text") or "").strip()
+                                    if _ov_text:
+                                        await _notify(f"✏️ *جاري إضافة نص مخصص:* `{_ov_text[:40]}`...")
+                                        from src.agent.mod_video_processor import ModVideoProcessor as _MVP
+                                        _mvp_ov = _MVP(temp_dir=_project_local_path(".temp", "auto_mod"))
+                                        _ov_out_dir = _project_local_path(".output", "auto_mod_overlay")
+                                        ResilientFS.makedirs(_ov_out_dir, exist_ok=True)
+                                        _ov_out = os.path.join(_ov_out_dir, f"{vid_id}_overlay.mp4")
+
+                                        loop = asyncio.get_running_loop()
+                                        import functools
+                                        _ov_func = functools.partial(
+                                            _mvp_ov.add_custom_overlay_text,
+                                            input_path=out_path,
+                                            output_path=_ov_out,
+                                            text=_ov_text,
+                                            timing=overlay_cfg.get("timing", "full"),
+                                            duration=float(overlay_cfg.get("duration", 2.0)),
+                                            screen_position=overlay_cfg.get("screen_position", "top"),
+                                            intro_animation=overlay_cfg.get("intro_animation"),
+                                            outro_animation=overlay_cfg.get("outro_animation"),
+                                        )
+                                        await loop.run_in_executor(None, _ov_func)
+                                        if ResilientFS.exists(_ov_out):
+                                            self._cleanup_file(out_path)
+                                            out_path = _ov_out
+                                            await _notify("✅ تم إضافة النص المخصص.")
+                                        else:
+                                            await _notify("⚠️ فشل إضافة النص المخصص، سيتم الرفع بدونه.")
+                                except Exception as ov_err:
+                                    logger.warning(f"Custom overlay text failed: {ov_err}")
+                                    await _notify(f"⚠️ فشل النص المخصص: `{str(ov_err)[:80]}`")
+
+                            # ========== فيس كام (Facecam overlay) ==========
+                            facecam_cfg, facecam_clip = pick_source_facecam_clip(source_settings, channel_id)
+
+                            if facecam_cfg.get("enabled"):
+                                try:
+                                    await _notify("🎬 *جاري إضافة فيس كام...*")
+                                    if facecam_clip:
+                                        from src.agent.config import load_config as _load_cfg
+                                        from src.agent.renderer import render_with_pip
+
+                                        render_cfg = _load_cfg()
+                                        render_out_dir = _project_local_path(".output", "auto_mod_facecam")
+                                        ResilientFS.makedirs(render_out_dir, exist_ok=True)
+
+                                        fc_pos = facecam_cfg.get("position", "top_center")
+                                        fc_shape = facecam_cfg.get("shape", "circle")
+                                        fc_scale = facecam_cfg.get("scale", 0.28)
+                                        fc_layout = facecam_cfg.get("layout", "top_center")
+
+                                        loop = asyncio.get_running_loop()
+                                        import functools
+                                        render_func = functools.partial(
+                                            render_with_pip,
+                                            cfg=render_cfg,
+                                            input_path=out_path,
+                                            out_dir=render_out_dir,
+                                            facecam_enabled=True,
+                                            facecam_path=facecam_clip,
+                                            facecam_layout=fc_layout,
+                                            facecam_position=fc_pos,
+                                            facecam_shape=fc_shape,
+                                            facecam_scale=fc_scale,
+                                        )
+                                        fc_out = await loop.run_in_executor(None, render_func)
+                                        if fc_out and ResilientFS.exists(fc_out):
+                                            self._cleanup_file(out_path)
+                                            out_path = fc_out
+                                            await _notify("✅ تم إضافة الفيس كام.")
+                                        else:
+                                            await _notify("⚠️ فشل إضافة الفيس كام، سيتم الرفع بدونه.")
+                                    else:
+                                        await _notify(
+                                            f"⚠️ لا توجد مقاطع فيس كام صالحة للمصدر `{source.get('source_name', '')[:20]}...`\n"
+                                            "سيتم الرفع بدون فيس كام."
+                                        )
+                                except Exception as fc_err:
+                                    logger.warning(f"Facecam overlay failed: {fc_err}")
+                                    await _notify(f"⚠️ فشل الفيس كام: `{str(fc_err)[:80]}`")
+
+                            if preview_mode:
+                                await _notify(
+                                    f"🧪 *اكتمل فيديو الاختبار بنجاح*\n"
+                                    f"📺 `{vid_title}`\n"
+                                    "لن يتم رفع هذا الفيديو إلى YouTube ولن يتم تعديل حالة النشر الرسمية."
+                                )
+                                results["previewed"] += 1
+                                results["status"] = "preview_ready"
+                                results["preview_video_path"] = out_path
+                                results["preview_video_title"] = video.get("title", "")
+                                results["preview_source_id"] = source_id
+                                results["preview_source_name"] = src_name
+                                results["preview_channel_id"] = channel_id
+                            else:
+                                # ========== رفع إلى YouTube ==========
+                                await _notify(
+                                    f"⬆️ *جاري الرفع إلى YouTube:* `{vid_title}`\n"
+                                    f"   📺 القناة: `{channel_id[:20]}...`"
+                                )
+                                yt_url = await self._upload_to_youtube(
+                                    out_path, channel_id, video.get("title", ""),
+                                    source.get("source_name", ""),
+                                    content_type, (vid_type == "shorts"),
+                                    source_description=video.get("description", ""),
+                                    source_settings=source_settings,
+                                    source_video_metadata={
+                                        "id": video.get("id", ""),
+                                        "original_title": video.get("title", ""),
+                                        "original_description": video.get("description", ""),
+                                        "source_url": video.get("url", ""),
+                                        "duration": video.get("duration"),
+                                        "view_count": video.get("view_count"),
+                                        "upload_date": video.get("upload_date"),
+                                        "source_name": source.get("source_name", ""),
+                                    },
+                                )
+                                current_yt_url = yt_url or ""
+
+                                if yt_url:
+                                    self.db.mark_video_published(vid_id, channel_id, yt_url)
+                                    results["published"] += 1
+                                    logger.info(
+                                        f"✅ [AutoMod] Published (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                    )
+
+                                    await _notify(
+                                        f"🎉 *تم النشر بنجاح!*\n"
+                                        f"📺 `{vid_title}`\n"
+                                        f"🔗 {yt_url}"
+                                    )
+                                else:
+                                    err_msg = f"❌ *فشل الرفع:* `{vid_title}`"
+                                    await _notify(err_msg)
+                                    errors_log.append(f"رفع فاشل: {vid_title}")
+                                    logger.warning(
+                                        f"❌ [AutoMod] Upload failed (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                    )
+                                    self.db.mark_video_failed(vid_id, channel_id, "Upload failed")
+                                    results["failed"] += 1
+
+                                self.db.update_next_publish_after_attempt(channel_id, content_type, published=bool(yt_url))
+                            results["processed"] += 1
+
+                            # تنظيف الملفات المؤقتة
+                            self._cleanup_file(dl_path)
+                            if not preview_mode:
+                                self._cleanup_file(out_path)
+
+                            # نشر فيديو واحد فقط لكل دورة لكل قناة
+                            schedule_done = True
+                            break
+
+                    except Exception as e:
+                        from src.agent.uploader import is_youtube_quota_error, AuthenticationRequiredError
+
+                        if claimed_processing and current_vid_id and not preview_mode:
+                            try:
+                                recovered_ok = self.db.mark_video_published(current_vid_id, channel_id, current_yt_url) if current_yt_url else self.db.mark_video_failed(
+                                    current_vid_id,
+                                    channel_id,
+                                    f"Unexpected automation error: {str(e)[:400]}",
+                                )
+                                if not recovered_ok:
+                                    logger.error(
+                                        f"❌ [AutoMod] Failed to recover processing state after exception (video={current_vid_id[:20]}..., channel={channel_id[:10]}...)"
+                                    )
+                                self._cleanup_file(current_dl_path)
+                                self._cleanup_file(current_out_path)
+                                self.db.update_next_publish_after_attempt(channel_id, content_type, published=bool(current_yt_url))
+                                schedule_done = True
+                            except Exception as recovery_err:
+                                logger.error(
+                                    f"❌ [AutoMod] Recovery after source exception failed (video={current_vid_id[:20]}..., channel={channel_id[:10]}...): {recovery_err}"
+                                )
+                    
+                        # ===== أخطاء حرجة → إيقاف الأتمتة تلقائياً =====
+                        is_critical = False
+                        pause_reason = ""
+                    
+                        if isinstance(e, AuthenticationRequiredError):
+                            is_critical = True
+                            pause_reason = (
+                                "🔐 *مشكلة مصادقة القناة!*\n\n"
+                                f"📺 القناة: `{channel_id[:25]}...`\n"
+                                f"📛 السبب: `{str(e)[:200]}`\n\n"
+                                "💡 *الحل:*\n"
+                                "1. افتح البوت واذهب إلى ⚙️ إعدادات القنوات\n"
+                                "2. أعد ربط القناة المتأثرة بملف مصادقة جديد\n"
+                                "3. أعد تشغيل الأتمتة يدوياً بعد الإصلاح"
+                            )
+                        elif is_youtube_quota_error(e):
+                            is_critical = True
+                            pause_reason = (
+                                "📊 *نفدت حصة YouTube الأسبوعية!*\n\n"
+                                f"📺 القناة: `{channel_id[:25]}...`\n"
+                                f"📛 السبب: `{str(e)[:200]}`\n\n"
+                                "💡 *الحل:*\n"
+                                "1. انتظر حتى تتجدد حصة YouTube (عادةً بعد 24-48 ساعة)\n"
+                                "2. أو استخدم ملف مصادقة لحساب/مشروع Google آخر\n"
+                                "3. أعد تشغيل الأتمتة يدوياً بعد الإصلاح"
+                            )
+                    
+                        if is_critical and not preview_mode:
+                            # ===== إيقاف الأتمتة تلقائياً =====
+                            try:
+                                config["auto_fetch_enabled"] = False
+                                self.db.save_config(config)
+                                logger.warning("🛑 [AutoMod] Auto-fetch DISABLED due to critical publishing error.")
+                            except Exception as db_err:
+                                logger.error(f"Failed to disable auto-fetch in DB: {db_err}")
+                        
+                            # إشعار المسؤول
+                            auto_pause_msg = (
+                                "🛑 *تم إيقاف الأتمتة تلقائياً!*\n"
+                                "━━━━━━━━━━━━━━━━━━━\n\n"
+                                f"{pause_reason}\n\n"
+                                "━━━━━━━━━━━━━━━━━━━\n"
+                                "⏸ الأتمتة مُعطلة الآن. استخدم /menu → الأتمتة → ▶️ تشغيل لإعادة التفعيل."
+                            )
+                            await _notify(auto_pause_msg)
+                            errors_log.append(f"🛑 إيقاف تلقائي: {str(e)[:80]}")
+                            auto_paused = True
+                        
+                            # إنهاء الدورة فوراً
+                            break
+                        else:
+                            # أخطاء عادية — تسجيل ومتابعة
+                            err_msg = f"💥 *خطأ غير متوقع* أثناء معالجة `{src_name}`:\n`{str(e)[:200]}`"
+                            await _notify(err_msg)
+                            errors_log.append(f"خطأ في {src_name}: {str(e)[:100]}")
+                            logger.error(f"Error processing source {src_url}: {e}")
+                    if schedule_done or auto_paused:
+                        break
+                    
+                if auto_paused or pending_raw_review_paused:
+                    break
+                if results["processed"] >= 1:
+                    await _notify("⏳ تم الوصول للإجمالي الأقصى (فيديو واحد) في هذه الدورة حفاظاً على استقرار السيرفر.")
+                    break
+
+            # ========== ملخص الدورة ==========
+            elapsed = time.time() - cycle_start
+            elapsed_str = f"{elapsed:.1f}s" if elapsed < 60 else f"{elapsed/60:.1f}m"
+            if pending_raw_review_paused:
+                results["status"] = "waiting_raw_review"
+                results["message"] = "Waiting for raw review approval"
+
+            summary = (
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "📊 *ملخص دورة الجلب التلقائي*\n\n"
+                f"⏱ المدة: `{elapsed_str}`\n"
+                f"📦 معالج: *{results['processed']}*\n"
+                f"✅ منشور: *{results['published']}*\n"
+                f"❌ فاشل: *{results['failed']}*\n"
+                f"🧪 بانتظار مراجعة خام: *{results['waiting_raw_review']}*\n"
+                f"⏭ متخطى: *{results['skipped']}*\n"
+            )
+
+            if errors_log:
+                summary += "\n🔴 *الأخطاء:*\n"
+                for err in errors_log[:5]:
+                    summary += f"  • {err}\n"
+                if len(errors_log) > 5:
+                    summary += f"  • ... و{len(errors_log) - 5} أخطاء أخرى\n"
+
+            if not results["processed"] and not results["failed"] and not results["waiting_raw_review"]:
+                summary += "\n💤 لا توجد فيديوهات جديدة للمعالجة."
+            elif results["waiting_raw_review"]:
+                summary += "\n⏸ تم إيقاف بقية الدورة حتى يتم اتخاذ قرار المراجعة الخام."
+            elif preview_mode and results.get("previewed"):
+                summary += "\n🧪 تم إنشاء فيديو اختبار نهائي دون أي نشر أو تعديل للحالة الرسمية."
+
+            await _notify(summary)
+
+            return results
+        finally:
+            _RUN_CYCLE_LOCK.release()
+
+    async def run_test_render(self, source_id: str, *, notify_func=None) -> Dict[str, Any]:
+        """إنشاء فيديو اختبار لمصدر محدد عبر نفس خط المعالجة الحقيقي دون نشر رسمي."""
+        source = self.db._get_source_by_id(str(source_id))
+        if not source:
+            if notify_func:
+                try:
+                    await notify_func("⚠️ لم يتم العثور على المصدر المطلوب لتوليد فيديو الاختبار.")
+                except Exception:
+                    pass
+            return {
+                "status": "no_target_source",
+                "message": "Target source not found",
+                "processed": 0,
+                "published": 0,
+                "failed": 0,
+                "skipped": 0,
+                "waiting_raw_review": 0,
+            }
+
+        return await self.run_cycle(
+            notify_func=notify_func,
+            force=True,
+            target_channel_id=source.get("channel_id"),
+            target_content_type=source.get("content_type", "minecraft_mods"),
+            target_source_id=str(source_id),
+            preview_mode=True,
+        )
+
+    async def _upload_to_youtube(self, video_path: str, channel_id: str,
+                                  title: str, source_name: str,
+                                  content_type: str, is_shorts: bool = True,
+                                  source_description: str = "",
+                                  source_settings: Any = None,
+                                  source_video_metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """رفع فيديو إلى YouTube عبر ChannelManager مع تجديد التوكن مسبقاً"""
+        try:
+            from src.agent.config import load_config
+            from src.agent.uploader import upload_video_with_token, _creds_from_token_file
+            from src.bot.channel_manager import ChannelManager
+            from src.agent.ai import generate_ai_metadata
+            from src.agent.error_tracker import get_error_tracker
+            
+            et = get_error_tracker()
+            cfg = load_config()
+            cm = ChannelManager()
+
+            # الحصول على بيانات القناة
+            channel = cm.get_channel(channel_id)
+            if not channel:
+                logger.error(f"Channel {channel_id} not found")
+                et.record_error("upload", "channel_not_found", channel_id)
+                return None
+
+            token_path = channel.token_path
+            if not token_path or not os.path.exists(token_path):
+                logger.error(f"Token not found for channel {channel_id}")
+                et.record_error("upload", "token_missing", channel_id)
+                return None
+
+            # === فحص التوكن مسبقاً وتجديده إذا لزم الأمر ===
+            try:
+                _creds_from_token_file(token_path)
+                logger.debug(f"✅ Token pre-validated for {channel_id[:20]}")
+            except Exception as tok_err:
+                logger.warning(f"⚠️ Token pre-validation failed: {tok_err}")
+                et.record_error("upload", "token_invalid", str(tok_err))
+                raise  # سيتم التقاطها من run_cycle كخطأ حرج
+
+            # استخدام لغة القناة بدل اللغة المُثبتة
+            target_lang = getattr(channel, "language", "ar") or "ar"
+
+            # توليد بيانات الفيديو محلياً قبل النشر
+            ai_meta = generate_ai_metadata(
+                cfg=cfg,
+                source_title=title,
+                source_description=source_description,
+                content_type=content_type,
+                target_lang=target_lang,
+                is_shorts=is_shorts,
+                channel_key=channel_id,
+                video_path=video_path,
+                source_context=source_video_metadata or {},
+            )
+            
+            final_title, description, tags = _build_hashtag_only_upload_metadata(
+                ai_meta,
+                source_title=title,
+                source_name=source_name,
+                content_type=content_type,
+                target_lang=target_lang,
+                is_shorts=is_shorts,
+                source_description=source_description,
+                source_settings=source_settings,
+            )
+            
+            privacy = getattr(channel, "privacy", "unlisted") or "unlisted"
+
+            loop = asyncio.get_running_loop()
+            import functools
+            upload_func = functools.partial(
+                upload_video_with_token,
+                cfg=cfg,
+                token_path=token_path,
+                file_path=video_path,
+                title=final_title,
+                description=description,
+                tags=tags,
+                privacy=privacy,
+            )
+            video_id = await loop.run_in_executor(None, upload_func)
+
+            if video_id:
+                youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+                logger.info(f"✅ Auto-published: {youtube_url}")
+                et.record_success("upload")
+                return youtube_url
+            et.record_error("upload", "no_video_id", "upload returned None")
+            return None
+        except Exception as e:
+            from src.agent.uploader import is_youtube_quota_error, AuthenticationRequiredError
+            from src.agent.error_tracker import get_error_tracker
+            et = get_error_tracker()
+            
+            # أخطاء حرجة يجب إيصالها للمستدعي لإيقاف الأتمتة تلقائياً
+            if isinstance(e, AuthenticationRequiredError):
+                logger.error(f"🔐 Upload auth error (will auto-pause): {e}")
+                et.record_error("upload", "auth", str(e))
+                raise
+            if is_youtube_quota_error(e):
+                logger.error(f"📊 Upload quota error (will auto-pause): {e}")
+                et.record_error("upload", "quota", str(e))
+                raise
+            # أخطاء عادية (شبكة، timeout...) — نبلع ونعيد None
+            logger.error(f"Upload failed (non-critical): {e}")
+            et.record_error("upload", "non_critical", str(e))
+            return None
+
+    def _is_publish_time(self, schedule: Dict) -> bool:
+        """فحص إذا كان الوقت مناسبًا للنشر"""
+        now = datetime.now(timezone.utc)
+
+        # فحص next_publish_at
+        next_pub = schedule.get("next_publish_at")
+        next_dt = _parse_datetime_utc(next_pub)
+        if next_dt and now < next_dt:
+            return False
+        # إذا لم يكن هناك next_publish_at، نعتبر أنه يحق له النشر الآن
+
+        # فحص ساعات النشر
+        hours = schedule.get("publish_hours") or {}
+        try:
+            start_hour = int(hours.get("start", 8))
+        except Exception:
+            start_hour = 8
+        try:
+            end_hour = int(hours.get("end", 22))
+        except Exception:
+            end_hour = 22
+        start_hour = max(0, min(23, start_hour))
+        end_hour = max(0, min(24, end_hour))
+        current_hour = now.hour
+        if start_hour <= end_hour:
+            return start_hour <= current_hour < end_hour
+        else:
+            return current_hour >= start_hour or current_hour < end_hour
+
+    def _reached_daily_limit(self, schedule: Dict) -> bool:
+        """فحص الحد اليومي (بالاعتماد على توقيت UTC)"""
+        try:
+            daily_limit = int(schedule.get("daily_limit", 5) or 5)
+        except Exception:
+            daily_limit = 5
+        if daily_limit <= 0 or daily_limit >= 999:
+            return False
+
+        channel_id = str(schedule.get("channel_id") or "").strip()
+        if not channel_id:
+            return False
+
+        try:
+            content_type = schedule.get("content_type", "minecraft_mods")
+            total_today = self.db.count_published_today(channel_id, content_type)
+            return total_today >= daily_limit
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cleanup_file(path: str):
+        """حذف ملف مؤقت"""
+        try:
+            if path:
+                ResilientFS.remove(path)
+        except Exception:
+            pass
+
+
+def _normalize_auto_fetch_loop_config(config: Any, default_interval_seconds: int) -> Dict[str, Any]:
+    safe_default = max(5, int(default_interval_seconds or 60))
+    if not isinstance(config, dict):
+        return {
+            "auto_fetch_enabled": True,
+            "auto_fetch_interval_seconds": safe_default,
+        }
+
+    normalized = dict(config)
+    try:
+        interval = int(normalized.get("auto_fetch_interval_seconds", safe_default) or safe_default)
+    except Exception:
+        interval = safe_default
+
+    normalized["auto_fetch_enabled"] = bool(normalized.get("auto_fetch_enabled", True))
+    normalized["auto_fetch_interval_seconds"] = max(5, interval)
+    return normalized
+
+
+def _compute_loop_sleep_seconds(loop_started_monotonic: float, interval_seconds: int) -> int:
+    """احسب المدة المتبقية قبل بداية الدورة التالية دون مضاعفة الانتظار بعد دورة طويلة."""
+    safe_interval = max(5, int(interval_seconds or 60))
+    try:
+        elapsed = max(0.0, time.monotonic() - float(loop_started_monotonic))
+    except Exception:
+        elapsed = 0.0
+    return max(0, int(round(safe_interval - elapsed)))
+
+async def start_auto_fetch_loop(interval_seconds: int = 3600):
+    """
+    تشغيل حلقة الجلب التلقائي في الخلفية
+    مع تكامل كامل مع أنظمة الحماية والمراقبة
+    """
+    from src.agent.auto_mod_fetcher import AutoModFetcher, AutoModDB, get_instance_id
+    from src.agent.heartbeat import get_heartbeat_monitor
+    from src.agent.disk_guard import cleanup_old_files, should_allow_download
+    from src.agent.memory_guard import periodic_maintenance as mem_maintenance, should_defer_heavy_work
+    from src.agent.error_tracker import get_error_tracker
+    import asyncio
+    import logging
+    
+    logger = logging.getLogger("AutoModLoop")
+    hb = get_heartbeat_monitor()
+    et = get_error_tracker()
+    
+    instance_id = get_instance_id()
+    logger.info(f"⏳ Auto-fetch loop started for instance: {instance_id} (Interval: {interval_seconds}s)")
+    
+    # تسجيل في HeartbeatMonitor
+    hb.register("auto_fetch", max_silence_seconds=interval_seconds * 3 + 300)
+    
+    fetcher = AutoModFetcher(instance_id)
+    db = AutoModDB(instance_id)
+    consecutive_loop_errors = 0
+    config = _normalize_auto_fetch_loop_config(None, interval_seconds)
+    
+    # التأكد من وجود الإعدادات في Supabase للنسخة الحالية
+    try:
+        config = _normalize_auto_fetch_loop_config(db.get_config(use_cache=False), interval_seconds)
+        if not config or config.get("instance_id") != instance_id:
+            logger.info(f"📝 Initializing config for new instance: {instance_id}")
+            db.save_config(config)
+            
+        # تنظيف أي فيديوهات علقت قيد المعالجة بسبب انهيار سابق
+        stale_count = db.reset_stale_processing()
+        if stale_count > 0:
+            logger.info(f"🧹 Cleaned up {stale_count} stale processing locks for instance {instance_id}")
+
+    except Exception as e:
+        logger.warning(f"Could not initialize config: {e}")
+
+    while True:
+        loop_started_monotonic = time.monotonic()
+        hb.beat("auto_fetch")  # نبضة في كل دورة
+        
+        try:
+            # === صيانة دورية ===
+            cleanup_old_files()  # تنظيف القرص
+            mem_maintenance()    # صيانة الذاكرة
+            
+            # === فحص الموارد قبل العمل الثقيل ===
+            mem_defer, mem_reason, mem_retry = should_defer_heavy_work()
+            if mem_defer:
+                logger.warning(f"⏳ Deferring fetch cycle: {mem_reason} (retry in {mem_retry}s)")
+                et.record_error("auto_fetch", "resource", mem_reason)
+                await asyncio.sleep(min(mem_retry, interval_seconds))
+                continue
+            
+            if not should_allow_download():
+                logger.warning("⏳ Deferring fetch cycle: disk space critical")
+                et.record_error("auto_fetch", "disk", "disk space critical")
+                await asyncio.sleep(120)
+                continue
+            
+            # === إعادة جلب الإعدادات ===
+            config = _normalize_auto_fetch_loop_config(db.get_config(use_cache=False), interval_seconds)
+            
+            if config.get("auto_fetch_enabled"):
+                # فحص نمط الأخطاء — إذا كان المكوّن "ميت"، نوقف مؤقتاً
+                action = et.suggest_action("auto_fetch")
+                if action == "disable":
+                    logger.warning("🛑 ErrorTracker suggests disabling auto_fetch. Waiting 10 min...")
+                    await asyncio.sleep(600)
+                    et.record_success("auto_fetch")  # reset after wait
+                    continue
+                elif action == "backoff":
+                    extra_wait = min(300, interval_seconds)
+                    logger.warning(f"⏳ ErrorTracker suggests backoff. Extra wait: {extra_wait}s")
+                    await asyncio.sleep(extra_wait)
+                
+                logger.info("🔄 [AutoMod] Starting scheduled cycle...")
+                await fetcher.run_cycle()
+                et.record_success("auto_fetch")
+                consecutive_loop_errors = 0
+            else:
+                logger.debug("💤 [AutoMod] Auto-fetch is disabled in config.")
+                
+        except Exception as e:
+            consecutive_loop_errors += 1
+            et.record_error("auto_fetch", "loop_error", str(e))
+            logger.error(f"❌ [AutoMod] Error in fetch loop ({consecutive_loop_errors}): {e}", exc_info=True)
+            
+            # إذا كانت الأخطاء متتالية كثيراً، ننتظر أطول
+            if consecutive_loop_errors >= 5:
+                extra = min(300, 60 * consecutive_loop_errors)
+                logger.warning(f"⏳ Too many loop errors. Extra wait: {extra}s")
+                await asyncio.sleep(extra)
+            
+        # استخراج الفاصل الزمني من الإعدادات (مع قابلية للتحديث الديناميكي)
+        interval_seconds = _normalize_auto_fetch_loop_config(config, interval_seconds).get("auto_fetch_interval_seconds", 60)
+        await asyncio.sleep(_compute_loop_sleep_seconds(loop_started_monotonic, interval_seconds))
+
+
+if __name__ == "__main__":
+    import sys
+    
+    # تحديد الفاصل الزمني من سطر الأوامر إن وجد
+    interval = 3600
+    if len(sys.argv) > 1:
+        try:
+            interval = int(sys.argv[1])
+        except ValueError:
+            pass
+            
+    print(f"🚀 Starting AutoMod fetcher loop (interval: {interval}s)...")
+    try:
+        asyncio.run(start_auto_fetch_loop(interval))
+    except KeyboardInterrupt:
+        print("\n👋 Fetcher stopped by user.")
+    except Exception as e:
+        print(f"\n💥 Fatal error: {e}")
