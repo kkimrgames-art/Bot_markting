@@ -105,14 +105,14 @@ def _get_shorts_encoder_settings() -> dict:
             except Exception:
                 pass
     
-    is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1" or os.getenv("RENDER") == "true"
+    is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1" or os.getenv("RENDER") in ("1", "true")
     # YouTube-optimized settings for shorts
     # Defaults tailored for speed on mobile/low-end devices while maintaining good quality
     settings = {
         "encoder": "libx264",
         "preset": _env_str("SHORTS_X264_PRESET", "ultrafast" if is_low_res else "medium"),
         "crf": _env_str("SHORTS_X264_CRF", "28" if is_low_res else "20"),
-        "threads": _env_int("FFMPEG_THREADS", 1 if (is_low_res or os.getenv("RENDER") == "true") else 0),
+        "threads": _env_int("FFMPEG_THREADS", 1 if is_low_res else 0),
         "extra_args": [
             "-profile:v", "high",
             "-level", _env_str("SHORTS_H264_LEVEL", "4.2"), # 4.2 is safer for mobile/TikTok/Shorts
@@ -2094,9 +2094,10 @@ class ModVideoProcessor:
             v_profile = "high444"
             v_pix_fmt = "yuv444p"
         else:
-            # 🆕 Improved settings: Lower CRF with fast preset
-            x264_preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-            x264_crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")  # Visually lossless enough
+            # 🆕 Improved settings: Lower CRF with fast preset, respecting RENDER mode
+            _, base_preset, base_crf = self._shorts_x264_settings()
+            x264_preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            x264_crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             v_profile = "high"
             v_pix_fmt = "yuv420p"  # No color space conversion later
 
