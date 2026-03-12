@@ -81,6 +81,25 @@ _COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST: Dict[str, float] = {}
 _COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST: Dict[str, str] = {}
 _COBALT_FALLBACK_COOLDOWN_SECONDS = 900
 _COBALT_DISABLE_HINT_SHOWN = False
+
+# === Invidious / Piped fallback instances ===
+_INVIDIOUS_INSTANCES = [
+    "https://vid.puffyan.us",
+    "https://invidious.fdn.fr",
+    "https://inv.tux.pizza",
+    "https://invidious.privacyredirect.com",
+    "https://invidious.projectsegfau.lt",
+    "https://iv.datura.network",
+]
+_PIPED_API_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.projectsegfau.lt",
+    "https://pipedapi.in.projectsegfau.lt",
+    "https://pipedapi.leptons.xyz",
+]
+_INVIDIOUS_PIPED_COOLDOWN_UNTIL: Dict[str, float] = {}
+_INVIDIOUS_PIPED_COOLDOWN_SECONDS = 600
 _COBALT_MISSING_AUTH_HINT_SHOWN = False
 _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 _RUN_CYCLE_LOCK = threading.Lock()
@@ -1025,6 +1044,36 @@ def _runtime_environment_name() -> str:
     return "render" if any((os.environ.get(name) or "").strip() for name in markers) else "local_or_other"
 
 
+def _resolve_remote_downloader_settings() -> Dict[str, Any]:
+    base_url = _first_env("DOWNLOADER_WORKER_URL", "REMOTE_DOWNLOADER_URL").rstrip("/")
+    token = _first_env("DOWNLOADER_WORKER_TOKEN", "REMOTE_DOWNLOADER_TOKEN")
+
+    enabled_raw = os.environ.get("DOWNLOADER_WORKER_ENABLED")
+    enabled = bool(base_url) if enabled_raw is None else _env_flag("DOWNLOADER_WORKER_ENABLED", bool(base_url))
+
+    prefer_raw = os.environ.get("DOWNLOADER_WORKER_PREFER_REMOTE")
+    default_prefer_remote = bool(base_url) and _runtime_environment_name() == "render"
+    prefer_remote = default_prefer_remote if prefer_raw is None else _env_flag(
+        "DOWNLOADER_WORKER_PREFER_REMOTE",
+        default_prefer_remote,
+    )
+
+    timeout_raw = _first_env("DOWNLOADER_WORKER_TIMEOUT")
+    timeout_seconds = 420.0
+    if timeout_raw:
+        with suppress(Exception):
+            timeout_seconds = max(30.0, float(timeout_raw))
+
+    return {
+        "url": base_url,
+        "token": token,
+        "enabled": bool(base_url) and enabled,
+        "prefer_remote": bool(base_url) and prefer_remote,
+        "timeout_seconds": timeout_seconds,
+        "host": _safe_url_host(base_url),
+    }
+
+
 def _yt_dlp_version_label() -> str:
     try:
         import yt_dlp
@@ -1143,6 +1192,7 @@ def _build_ytdlp_runtime_diagnostics(
     profile_labels: Optional[List[str]] = None,
 ) -> str:
     api_url, auth_scheme, auth_token = _resolve_cobalt_api_settings()
+    remote_settings = _resolve_remote_downloader_settings()
     proxy = _first_env("YTDLP_PROXY")
     proxy_status = "off" if not proxy else f"on:{_proxy_scheme_label(proxy)}"
     po_token = _first_env("YOUTUBE_PO_TOKEN")
@@ -1166,6 +1216,8 @@ def _build_ytdlp_runtime_diagnostics(
         f"cobalt_auth={'present' if auth_token else 'missing'}",
         f"cobalt_auth_scheme={(auth_scheme.lower() if auth_scheme else 'none')}",
         f"cobalt_host={_safe_url_host(api_url)}",
+        f"remote_worker={'on' if remote_settings['enabled'] else 'off'}:{remote_settings['host']}",
+        f"remote_prefer={'yes' if remote_settings['prefer_remote'] else 'no'}",
     ]
     if profile_labels:
         parts.append(f"profiles={','.join(profile_labels)}")
@@ -2605,6 +2657,24 @@ class AutoModFetcher:
             video_url = normalized_video_url
         max_retries = 3
         last_error = None
+        remote_settings = _resolve_remote_downloader_settings()
+        remote_worker_eligible = bool(_extract_youtube_video_id(video_url)) and remote_settings.get("enabled")
+        remote_worker_tried = False
+
+        if remote_worker_eligible and remote_settings.get("prefer_remote"):
+            remote_worker_tried = True
+            logger.info(
+                "🌐 Trying remote downloader worker first for YouTube URL | host=%s | %s",
+                remote_settings.get("host"),
+                _build_ytdlp_runtime_diagnostics("download_remote_first", cookies_info=cookies_info),
+            )
+            remote_result = self._download_via_remote_worker(video_url, output_dir, max_duration=max_duration)
+            if remote_result:
+                return remote_result
+            logger.warning(
+                "⚠️ Remote downloader worker returned no file. Falling back to local yt-dlp. | host=%s",
+                remote_settings.get("host"),
+            )
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -2622,14 +2692,35 @@ class AutoModFetcher:
                 last_error = e
                 error_code, error_reason = _classify_download_error(e)
                 if _is_youtube_botcheck_error(e):
-                    # Bot-check — محاولة التجاوز عبر واجهة برمجية خارجية (Cobalt API)
+                    if remote_worker_eligible and not remote_worker_tried:
+                        remote_worker_tried = True
+                        logger.warning(
+                            "🚫 YouTube bot-check detected (%s): %s. Attempting fallback via remote downloader worker... | %s",
+                            error_code,
+                            error_reason,
+                            _build_ytdlp_runtime_diagnostics("download_botcheck_remote_fallback", cookies_info=cookies_info),
+                        )
+                        remote_result = self._download_via_remote_worker(video_url, output_dir, max_duration=max_duration)
+                        if remote_result:
+                            return remote_result
+
+                    # Bot-check — محاولة التجاوز عبر Invidious/Piped أولاً ثم Cobalt
+                    if _extract_youtube_video_id(video_url):
+                        logger.warning(
+                            "🚫 YouTube bot-check detected (%s): %s. Attempting Invidious/Piped fallback... | %s",
+                            error_code,
+                            error_reason,
+                            _build_ytdlp_runtime_diagnostics("download_botcheck_invidious", cookies_info=cookies_info),
+                        )
+                        inv_result = self._download_via_invidious_piped(video_url, output_dir)
+                        if inv_result:
+                            return inv_result
+
                     cobalt_api_url, _, _ = _resolve_cobalt_api_settings()
                     cobalt_disabled, cobalt_disable_reason = _get_cobalt_fallback_disable_state(cobalt_api_url)
                     if not cobalt_disabled:
                         logger.warning(
-                            "🚫 YouTube bot-check detected (%s): %s. Attempting fallback via Cobalt API... | %s",
-                            error_code,
-                            error_reason,
+                            "🚫 Invidious/Piped failed. Attempting fallback via Cobalt API... | %s",
                             _build_ytdlp_runtime_diagnostics("download_botcheck", cookies_info=cookies_info),
                         )
                         cobalt_result = self._download_via_cobalt(video_url, output_dir)
@@ -2646,9 +2737,9 @@ class AutoModFetcher:
                     if not _YT_BOTCHECK_HINT_SHOWN:
                         _YT_BOTCHECK_HINT_SHOWN = True
                         logger.error(
-                            "🚫 Cobalt API fallback also failed. %s | %s",
+                            "🚫 All fallbacks failed (Invidious/Piped + Cobalt). %s | %s",
                             _build_youtube_botcheck_hint(cookies_info),
-                            _build_ytdlp_runtime_diagnostics("download_botcheck_fallback_failed", cookies_info=cookies_info),
+                            _build_ytdlp_runtime_diagnostics("download_all_fallbacks_failed", cookies_info=cookies_info),
                         )
                     logger.error(f"yt-dlp download error ({error_code}): {error_reason} | raw={e}")
                     return None
@@ -2674,6 +2765,275 @@ class AutoModFetcher:
                         f"yt-dlp download error after {max_retries} retries ({error_code}): {error_reason} | raw={e}"
                     )
 
+        return None
+
+    def _download_via_remote_worker(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
+        settings = _resolve_remote_downloader_settings()
+        if not settings.get("enabled") or not settings.get("url"):
+            return None
+
+        try:
+            import httpx
+
+            output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
+            endpoint = f"{settings['url']}/download"
+            headers = {
+                "Accept": "application/octet-stream",
+                "Content-Type": "application/json",
+            }
+            if settings.get("token"):
+                headers["Authorization"] = f"Bearer {settings['token']}"
+
+            payload: Dict[str, Any] = {"url": video_url}
+            if max_duration is not None:
+                payload["max_duration"] = max_duration
+
+            timeout_seconds = float(settings.get("timeout_seconds") or 420.0)
+            timeout = httpx.Timeout(timeout_seconds, connect=min(20.0, timeout_seconds))
+
+            # === Retry logic for busy worker (503) or rate-limited (429) ===
+            max_worker_retries = 3
+            retry_backoff = [15, 30, 60]  # seconds between retries
+
+            for worker_attempt in range(1, max_worker_retries + 1):
+                logger.info(
+                    "🌐 Remote worker request (attempt %d/%d) for %s | host=%s",
+                    worker_attempt, max_worker_retries,
+                    video_url,
+                    settings.get("host"),
+                )
+
+                try:
+                    with httpx.stream("POST", endpoint, json=payload, headers=headers, timeout=timeout) as resp:
+                        # Retry on 503 (worker busy/queued) or 429 (rate limit)
+                        if resp.status_code in (503, 429):
+                            response_body = resp.read().decode("utf-8", errors="replace")[:400]
+                            if worker_attempt < max_worker_retries:
+                                wait = retry_backoff[worker_attempt - 1] if worker_attempt - 1 < len(retry_backoff) else 60
+                                logger.warning(
+                                    "⏳ Remote worker busy (status=%s). Waiting %ds before retry %d/%d... | body=%s",
+                                    resp.status_code, wait, worker_attempt + 1, max_worker_retries,
+                                    response_body,
+                                )
+                                time.sleep(wait)
+                                continue
+                            else:
+                                logger.warning(
+                                    "Remote worker still busy after %d retries. Falling back. | body=%s",
+                                    max_worker_retries, response_body,
+                                )
+                                return None
+
+                        if resp.status_code != 200:
+                            response_body = resp.read().decode("utf-8", errors="replace")[:400]
+                            logger.warning(
+                                "Remote downloader worker error: status=%s host=%s body=%s",
+                                resp.status_code,
+                                settings.get("host"),
+                                response_body,
+                            )
+                            return None
+
+                        video_id = _extract_youtube_video_id(video_url) or "remote_download"
+                        suggested_name = (resp.headers.get("x-downloader-filename") or "").strip()
+                        ext = os.path.splitext(suggested_name)[1] or ".mp4"
+                        output_file = os.path.join(output_dir, f"{video_id}_remote{ext}")
+
+                        with ResilientFS.open(output_file, "wb") as fh:
+                            for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                                if chunk:
+                                    fh.write(chunk)
+
+                        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                            logger.info("✅ Remote downloader worker successful: %s", output_file)
+                            return output_file
+
+                        logger.warning(
+                            "Remote downloader worker finished without a readable file. host=%s output=%s",
+                            settings.get("host"),
+                            output_file,
+                        )
+                        return None
+                except httpx.TimeoutException:
+                    if worker_attempt < max_worker_retries:
+                        wait = retry_backoff[worker_attempt - 1] if worker_attempt - 1 < len(retry_backoff) else 60
+                        logger.warning(
+                            "⏳ Remote worker timeout. Retrying in %ds... (%d/%d)",
+                            wait, worker_attempt + 1, max_worker_retries,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise
+
+            return None  # exhausted retries
+        except Exception as exc:
+            logger.warning(
+                "Remote downloader worker request failed for host=%s: %s",
+                settings.get("host"),
+                exc,
+            )
+            return None
+        finally:
+            try:
+                _release_runtime_dir_keepalive(keepalive_path)
+            except Exception:
+                pass
+
+    def _download_via_invidious_piped(self, video_url: str, output_dir: str) -> Optional[str]:
+        """Fallback: تنزيل الفيديو عبر خوادم Invidious/Piped العامة لتجاوز حظر YouTube"""
+        video_id = _extract_youtube_video_id(video_url)
+        if not video_id:
+            return None
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("httpx not installed — skipping Invidious/Piped fallback")
+            return None
+
+        output_dir = _ensure_runtime_dir(output_dir)
+        now = time.time()
+
+        # --- محاولة Invidious أولاً ---
+        for instance_url in _INVIDIOUS_INSTANCES:
+            host = _safe_url_host(instance_url)
+            cooldown_until = _INVIDIOUS_PIPED_COOLDOWN_UNTIL.get(host, 0.0)
+            if cooldown_until and cooldown_until > now:
+                continue
+
+            api_endpoint = f"{instance_url.rstrip('/')}/api/v1/videos/{video_id}"
+            try:
+                logger.info("🔄 Invidious fallback: trying %s for video %s", host, video_id)
+                resp = httpx.get(
+                    api_endpoint,
+                    headers={"Accept": "application/json", "User-Agent": _MODERN_USER_AGENT},
+                    timeout=20.0,
+                    follow_redirects=True,
+                )
+                if resp.status_code != 200:
+                    logger.debug("Invidious %s returned %s", host, resp.status_code)
+                    _INVIDIOUS_PIPED_COOLDOWN_UNTIL[host] = now + _INVIDIOUS_PIPED_COOLDOWN_SECONDS
+                    continue
+
+                data = resp.json()
+                # اختيار أفضل stream متاح
+                adaptive = data.get("adaptiveFormats") or []
+                format_streams = data.get("formatStreams") or []
+
+                # أولاً: البحث عن stream مدمج بأعلى جودة
+                best_combined = None
+                best_combined_height = 0
+                for s in format_streams:
+                    if s.get("url"):
+                        h = int(s.get("resolution", "0p").replace("p", "") or 0)
+                        if h > best_combined_height:
+                            best_combined = s.get("url")
+                            best_combined_height = h
+
+                download_url = best_combined
+                if not download_url:
+                    # fallback: أول adaptive video stream
+                    for s in adaptive:
+                        if s.get("url") and s.get("type", "").startswith("video/"):
+                            download_url = s.get("url")
+                            break
+
+                if not download_url:
+                    logger.debug("Invidious %s: no download URL found in response", host)
+                    continue
+
+                # تنزيل الملف
+                output_file = os.path.join(output_dir, f"{video_id}_invidious.mp4")
+                with httpx.stream("GET", download_url, timeout=300.0, follow_redirects=True) as stream_resp:
+                    if stream_resp.status_code != 200:
+                        logger.debug("Invidious %s: stream download returned %s", host, stream_resp.status_code)
+                        continue
+                    with ResilientFS.open(output_file, "wb") as f:
+                        for chunk in stream_resp.iter_bytes(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+
+                if os.path.exists(output_file) and os.path.getsize(output_file) > 10000:
+                    logger.info("✅ Invidious fallback successful via %s: %s (%s)", host, output_file, f"{best_combined_height}p" if best_combined_height else "adaptive")
+                    return output_file
+                else:
+                    with suppress(Exception):
+                        ResilientFS.remove(output_file)
+                    logger.debug("Invidious %s: downloaded file too small or missing", host)
+
+            except Exception as exc:
+                logger.debug("Invidious %s failed: %s", host, exc)
+                _INVIDIOUS_PIPED_COOLDOWN_UNTIL[host] = now + _INVIDIOUS_PIPED_COOLDOWN_SECONDS
+                continue
+
+        # --- محاولة Piped ---
+        for instance_url in _PIPED_API_INSTANCES:
+            host = _safe_url_host(instance_url)
+            cooldown_until = _INVIDIOUS_PIPED_COOLDOWN_UNTIL.get(host, 0.0)
+            if cooldown_until and cooldown_until > now:
+                continue
+
+            api_endpoint = f"{instance_url.rstrip('/')}/streams/{video_id}"
+            try:
+                logger.info("🔄 Piped fallback: trying %s for video %s", host, video_id)
+                resp = httpx.get(
+                    api_endpoint,
+                    headers={"Accept": "application/json", "User-Agent": _MODERN_USER_AGENT},
+                    timeout=20.0,
+                    follow_redirects=True,
+                )
+                if resp.status_code != 200:
+                    logger.debug("Piped %s returned %s", host, resp.status_code)
+                    _INVIDIOUS_PIPED_COOLDOWN_UNTIL[host] = now + _INVIDIOUS_PIPED_COOLDOWN_SECONDS
+                    continue
+
+                data = resp.json()
+                video_streams = data.get("videoStreams") or []
+                audio_streams = data.get("audioStreams") or []
+
+                # البحث عن أفضل stream فيديو+صوت أو فيديو فقط
+                best_url = None
+                best_quality = 0
+                for s in video_streams:
+                    url = s.get("url") or ""
+                    if not url:
+                        continue
+                    # نفضل streams التي تحتوي video+audio
+                    is_video_only = s.get("videoOnly", True)
+                    q = int(str(s.get("quality", "0p")).replace("p", "") or 0)
+                    # إعطاء أولوية أعلى للـ streams غير video-only
+                    effective_q = q + (1000 if not is_video_only else 0)
+                    if effective_q > best_quality:
+                        best_quality = effective_q
+                        best_url = url
+
+                if not best_url:
+                    logger.debug("Piped %s: no suitable video stream found", host)
+                    continue
+
+                output_file = os.path.join(output_dir, f"{video_id}_piped.mp4")
+                with httpx.stream("GET", best_url, timeout=300.0, follow_redirects=True) as stream_resp:
+                    if stream_resp.status_code != 200:
+                        logger.debug("Piped %s: stream download returned %s", host, stream_resp.status_code)
+                        continue
+                    with ResilientFS.open(output_file, "wb") as f:
+                        for chunk in stream_resp.iter_bytes(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+
+                if os.path.exists(output_file) and os.path.getsize(output_file) > 10000:
+                    logger.info("✅ Piped fallback successful via %s: %s", host, output_file)
+                    return output_file
+                else:
+                    with suppress(Exception):
+                        ResilientFS.remove(output_file)
+                    logger.debug("Piped %s: downloaded file too small or missing", host)
+
+            except Exception as exc:
+                logger.debug("Piped %s failed: %s", host, exc)
+                _INVIDIOUS_PIPED_COOLDOWN_UNTIL[host] = now + _INVIDIOUS_PIPED_COOLDOWN_SECONDS
+                continue
+
+        logger.warning("⚠️ All Invidious/Piped instances failed for video %s", video_id)
         return None
 
     def _download_via_cobalt(self, video_url: str, output_dir: str) -> Optional[str]:
