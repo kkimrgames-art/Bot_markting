@@ -33,3 +33,13 @@ services:
         sync: false
       - key: YTDLP_IMPERSONATE
         sync: false
+      - key: DOWNLOADER_WORKER_URL
+        sync: false
+      - key: DOWNLOADER_WORKER_TOKEN
+        sync: false
+      - key: DOWNLOADER_WORKER_ENABLED
+        value: "true"
+      - key: DOWNLOADER_WORKER_PREFER_REMOTE
+        value: "true"
+      - key: DOWNLOADER_WORKER_TIMEOUT
+        value: "420"

@@ -12,7 +12,7 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.agent.auto_mod_fetcher import AutoModDB, AutoModFetcher, _RUN_CYCLE_LOCK, _build_hashtag_only_upload_metadata, _build_yt_opts, _compute_loop_sleep_seconds, _create_runtime_dir_keepalive, _download_profile_overrides, _infer_processing_video_type, _normalize_auto_fetch_loop_config, _release_runtime_dir_keepalive, _resolve_any_cookiefile, normalize_source_settings, pick_source_facecam_clip, pick_source_facecam_config, pick_source_overlay_config, pick_source_tail_trim_seconds, pick_source_video_effects
+from src.agent.auto_mod_fetcher import AutoModDB, AutoModFetcher, _RUN_CYCLE_LOCK, _build_hashtag_only_upload_metadata, _build_ytdlp_runtime_diagnostics, _build_yt_opts, _compute_loop_sleep_seconds, _create_runtime_dir_keepalive, _download_profile_overrides, _infer_processing_video_type, _normalize_auto_fetch_loop_config, _normalize_youtube_watch_url, _release_runtime_dir_keepalive, _resolve_any_cookiefile, _resolve_cobalt_api_settings, _resolve_cookiefile_details, normalize_source_settings, pick_source_facecam_clip, pick_source_facecam_config, pick_source_overlay_config, pick_source_tail_trim_seconds, pick_source_video_effects
 from src.agent.disk_guard import cleanup_old_files
 from src.agent.ffmpeg_utils import _candidate_ffmpeg_dirs
 from src.agent.local_metadata import extract_source_metadata_context
@@ -813,7 +813,7 @@ class RuntimeRepairTests(unittest.TestCase):
         with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
              patch.dict(os.environ, {"YTDLP_HIGH_QUALITY_FIRST": "1"}, clear=True), \
              patch("src.agent.ffmpeg_utils.ffmpeg_bin", return_value="/usr/bin/ffmpeg"), \
-             patch("src.agent.auto_mod_fetcher._resolve_any_cookiefile", return_value=""), \
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "", "source": "none", "available": False, "path_label": "none", "issues": []}), \
              patch("yt_dlp.YoutubeDL", side_effect=[first_ctx, second_ctx]) as mock_ydl, \
              patch("src.agent.auto_mod_fetcher.ResilientFS.exists", side_effect=lambda path: str(path) == mp4_path):
             result = fetcher._download_sync_attempt("https://www.youtube.com/watch?v=vid1", output_dir)
@@ -839,7 +839,7 @@ class RuntimeRepairTests(unittest.TestCase):
         with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
              patch.dict(os.environ, {"YTDLP_HIGH_QUALITY_FIRST": "1"}, clear=True), \
              patch("src.agent.ffmpeg_utils.ffmpeg_bin", side_effect=RuntimeError("missing ffmpeg")), \
-             patch("src.agent.auto_mod_fetcher._resolve_any_cookiefile", return_value=""), \
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "", "source": "none", "available": False, "path_label": "none", "issues": []}), \
              patch("yt_dlp.YoutubeDL", return_value=only_ctx) as mock_ydl, \
              patch("src.agent.auto_mod_fetcher.ResilientFS.exists", side_effect=lambda path: str(path) == mp4_path):
             result = fetcher._download_sync_attempt("https://www.youtube.com/watch?v=vid2", output_dir)
@@ -852,8 +852,34 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertEqual(used_opts["extractor_args"]["youtube"]["player_client"], ["ios", "android", "mweb"])
         self.assertEqual(used_opts["postprocessors"], [])
 
+    def test_normalize_youtube_watch_url_converts_shorts_to_canonical_watch_url(self):
+        normalized = _normalize_youtube_watch_url("https://www.youtube.com/shorts/abc123xyz89?feature=share")
+        self.assertEqual(normalized, "https://www.youtube.com/watch?v=abc123xyz89")
+
+    def test_download_sync_attempt_normalizes_shorts_url_before_ytdlp(self):
+        fetcher = AutoModFetcher("inst-download-normalize-shorts")
+        output_dir = os.path.join(self.tempdir.name, "downloads_normalized")
+        mp4_path = os.path.join(output_dir, "abc123xyz89.mp4")
+        only_ctx = self._mock_ydl_context(
+            info={"id": "abc123xyz89", "title": "Demo", "ext": "mp4", "height": 720, "format_id": "22"},
+            filename=mp4_path,
+        )
+
+        with patch.dict(os.environ, {"YTDLP_HIGH_QUALITY_FIRST": "1"}, clear=True), \
+             patch("src.agent.ffmpeg_utils.ffmpeg_bin", side_effect=RuntimeError("missing ffmpeg")), \
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "", "source": "none", "available": False, "path_label": "none", "issues": []}), \
+             patch("yt_dlp.YoutubeDL", return_value=only_ctx), \
+             patch("src.agent.auto_mod_fetcher.ResilientFS.exists", side_effect=lambda path: str(path) == mp4_path):
+            result = fetcher._download_sync_attempt("https://www.youtube.com/shorts/abc123xyz89?feature=share", output_dir)
+
+        self.assertEqual(result, mp4_path)
+        only_ctx.__enter__.return_value.extract_info.assert_called_once_with(
+            "https://www.youtube.com/watch?v=abc123xyz89",
+            download=True,
+        )
+
     def test_build_yt_opts_with_cookies_leaves_authenticated_client_selection_to_yt_dlp(self):
-        with patch("src.agent.auto_mod_fetcher._resolve_any_cookiefile", return_value="/tmp/cookies.txt"), \
+        with patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "/tmp/cookies.txt", "source": "env_path:YTDLP_COOKIES_PATH", "available": True, "path_label": "cookies.txt", "issues": []}), \
              patch("src.agent.config.load_config", return_value=SimpleNamespace(YTDLP_FORCE_IPV4=True)):
             opts = _build_yt_opts()
 
@@ -867,13 +893,80 @@ class RuntimeRepairTests(unittest.TestCase):
         with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
              patch.object(fetcher, "_download_sync_attempt", side_effect=Exception("Sign in to confirm you're not a bot")), \
              patch.object(fetcher, "_download_via_cobalt", return_value=None), \
-             patch("src.agent.auto_mod_fetcher._resolve_yt_cookiefile", return_value="/tmp/cookies.txt"):
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "/tmp/cookies.txt", "source": "project_file:www.youtube.com_cookies.txt", "available": True, "path_label": "cookies.txt", "issues": []}):
             result = fetcher._download_sync("https://www.youtube.com/watch?v=vid3", output_dir)
 
         self.assertIsNone(result)
         combined_logs = "\n".join(captured.output)
         self.assertIn("youtube_botcheck", combined_logs)
         self.assertIn("Attempting fallback via Cobalt API", combined_logs)
+
+    def test_download_sync_prefers_remote_worker_on_render_when_configured(self):
+        fetcher = AutoModFetcher("inst-download-remote-first")
+        output_dir = os.path.join(self.tempdir.name, "downloads_remote_first")
+        expected = os.path.join(output_dir, "vid6_remote.mp4")
+
+        with patch.dict(os.environ, {
+            "RENDER": "true",
+            "DOWNLOADER_WORKER_URL": "https://worker.example.com",
+        }, clear=True), \
+             patch.object(fetcher, "_download_via_remote_worker", return_value=expected) as remote_mock, \
+             patch.object(fetcher, "_download_sync_attempt") as local_mock:
+            result = fetcher._download_sync("https://www.youtube.com/watch?v=vid6", output_dir)
+
+        self.assertEqual(result, expected)
+        remote_mock.assert_called_once_with(
+            "https://www.youtube.com/watch?v=vid6",
+            output_dir,
+            max_duration=None,
+        )
+        local_mock.assert_not_called()
+
+    def test_download_sync_botcheck_tries_remote_worker_before_cobalt_when_not_preferred(self):
+        fetcher = AutoModFetcher("inst-download-remote-botcheck")
+        output_dir = os.path.join(self.tempdir.name, "downloads_remote_botcheck")
+        expected = os.path.join(output_dir, "vid7_remote.mp4")
+
+        with patch.dict(os.environ, {
+            "DOWNLOADER_WORKER_URL": "https://worker.example.com",
+            "DOWNLOADER_WORKER_PREFER_REMOTE": "0",
+        }, clear=True), \
+             patch.object(fetcher, "_download_sync_attempt", side_effect=Exception("Sign in to confirm you're not a bot")), \
+             patch.object(fetcher, "_download_via_remote_worker", return_value=expected) as remote_mock, \
+             patch.object(fetcher, "_download_via_cobalt") as cobalt_mock, \
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "/tmp/cookies.txt", "source": "project_file:www.youtube.com_cookies.txt", "available": True, "path_label": "cookies.txt", "issues": []}):
+            result = fetcher._download_sync("https://www.youtube.com/watch?v=vid7", output_dir)
+
+        self.assertEqual(result, expected)
+        remote_mock.assert_called_once_with(
+            "https://www.youtube.com/watch?v=vid7",
+            output_dir,
+            max_duration=None,
+        )
+        cobalt_mock.assert_not_called()
+
+    def test_download_sync_botcheck_falls_back_to_cobalt_after_remote_worker_failure(self):
+        fetcher = AutoModFetcher("inst-download-remote-then-cobalt")
+        output_dir = os.path.join(self.tempdir.name, "downloads_remote_then_cobalt")
+        expected = os.path.join(output_dir, "vid8_cobalt.mp4")
+
+        with patch.dict(os.environ, {
+            "DOWNLOADER_WORKER_URL": "https://worker.example.com",
+            "DOWNLOADER_WORKER_PREFER_REMOTE": "0",
+        }, clear=True), \
+             patch.object(fetcher, "_download_sync_attempt", side_effect=Exception("Sign in to confirm you're not a bot")), \
+             patch.object(fetcher, "_download_via_remote_worker", return_value=None) as remote_mock, \
+             patch.object(fetcher, "_download_via_cobalt", return_value=expected) as cobalt_mock, \
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "/tmp/cookies.txt", "source": "project_file:www.youtube.com_cookies.txt", "available": True, "path_label": "cookies.txt", "issues": []}):
+            result = fetcher._download_sync("https://www.youtube.com/watch?v=vid8", output_dir)
+
+        self.assertEqual(result, expected)
+        remote_mock.assert_called_once_with(
+            "https://www.youtube.com/watch?v=vid8",
+            output_dir,
+            max_duration=None,
+        )
+        cobalt_mock.assert_called_once_with("https://www.youtube.com/watch?v=vid8", output_dir)
 
     def test_resolve_any_cookiefile_writes_env_cookie_text_to_runtime_file(self):
         cookie_text = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tSID\tdemo\n"
@@ -887,6 +980,72 @@ class RuntimeRepairTests(unittest.TestCase):
         with open(resolved, "r", encoding="utf-8") as f:
             self.assertEqual(f.read(), cookie_text.strip())
 
+    def test_resolve_cookiefile_details_tracks_missing_env_path_and_falls_back_to_project_file(self):
+        cookie_path = os.path.join(self.tempdir.name, "www.youtube.com_cookies.txt")
+        with open(cookie_path, "w", encoding="utf-8") as f:
+            f.write("# Netscape HTTP Cookie File\n")
+
+        with patch.dict(os.environ, {"YTDLP_COOKIES_PATH": "missing/cookies.txt"}, clear=True), \
+             patch("src.agent.auto_mod_fetcher.project_root", self.tempdir.name):
+            details = _resolve_cookiefile_details()
+
+        self.assertTrue(details["available"])
+        self.assertEqual(details["source"], "project_file:www.youtube.com_cookies.txt")
+        self.assertIn("YTDLP_COOKIES_PATH=missing", details["issues"][0])
+
+    def test_build_ytdlp_runtime_diagnostics_redacts_proxy_credentials(self):
+        cookies_info = {
+            "path": "/tmp/yt_dlp_cookies.txt",
+            "source": "env_text:YTDLP_COOKIES_TEXT",
+            "available": True,
+            "path_label": ".data/yt_dlp_cookies.txt",
+            "issues": [],
+        }
+
+        with patch.dict(os.environ, {
+            "RENDER": "true",
+            "YTDLP_PROXY": "http://user:secret@example.com:8080",
+            "YOUTUBE_PO_TOKEN": "demo-token",
+            "YTDLP_IMPERSONATE": "chrome",
+            "COBALT_API_URL": "https://api.cobalt.tools/",
+            "COBALT_API_TOKEN": "secret-cobalt",
+            "DOWNLOADER_WORKER_URL": "https://worker.example.com",
+        }, clear=True):
+            text = _build_ytdlp_runtime_diagnostics("unit_test", cookies_info=cookies_info, profile_labels=["authenticated_default"])
+
+        self.assertIn("runtime=render", text)
+        self.assertIn("proxy=on:http", text)
+        self.assertNotIn("secret@example.com", text)
+        self.assertNotIn("secret-cobalt", text)
+        self.assertIn("cookies=env_text:YTDLP_COOKIES_TEXT:.data/yt_dlp_cookies.txt", text)
+        self.assertIn("cobalt_auth_scheme=api-key", text)
+        self.assertIn("remote_worker=on:worker.example.com", text)
+        self.assertIn("remote_prefer=yes", text)
+        self.assertIn("profiles=authenticated_default", text)
+
+
+    def test_resolve_cobalt_api_settings_distinguishes_jwt_from_api_key(self):
+        with patch.dict(os.environ, {
+            "COBALT_API_URL": "https://cobalt.example.com/",
+            "COBALT_API_TOKEN": "api-key-demo",
+        }, clear=True):
+            api_url, auth_scheme, auth_token = _resolve_cobalt_api_settings()
+
+        self.assertEqual(api_url, "https://cobalt.example.com/")
+        self.assertEqual(auth_scheme, "Api-Key")
+        self.assertEqual(auth_token, "api-key-demo")
+
+        with patch.dict(os.environ, {
+            "COBALT_API_URL": "https://cobalt.example.com/",
+            "COBALT_API_JWT": "jwt-demo",
+            "COBALT_API_TOKEN": "api-key-demo",
+        }, clear=True):
+            api_url, auth_scheme, auth_token = _resolve_cobalt_api_settings()
+
+        self.assertEqual(api_url, "https://cobalt.example.com/")
+        self.assertEqual(auth_scheme, "Bearer")
+        self.assertEqual(auth_token, "jwt-demo")
+
     def test_download_sync_skips_cobalt_when_fallback_was_disabled(self):
         fetcher = AutoModFetcher("inst-download-botcheck-disabled")
         output_dir = os.path.join(self.tempdir.name, "downloads_botcheck_disabled")
@@ -895,7 +1054,7 @@ class RuntimeRepairTests(unittest.TestCase):
              patch.object(fetcher, "_download_sync_attempt", side_effect=Exception("Sign in to confirm you're not a bot")), \
              patch.object(fetcher, "_download_via_cobalt") as cobalt_mock, \
              patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED", True), \
-             patch("src.agent.auto_mod_fetcher._resolve_yt_cookiefile", return_value="/tmp/cookies.txt"):
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "/tmp/cookies.txt", "source": "project_file:www.youtube.com_cookies.txt", "available": True, "path_label": "cookies.txt", "issues": []}):
             result = fetcher._download_sync("https://www.youtube.com/watch?v=vid4", output_dir)
 
         self.assertIsNone(result)
@@ -912,8 +1071,12 @@ class RuntimeRepairTests(unittest.TestCase):
         )
 
         with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
+             patch.dict(os.environ, {"COBALT_API_URL": "https://jwt-required.example/"}, clear=True), \
              patch("httpx.post", return_value=response) as post_mock, \
              patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED", False), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED_HOSTS", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST", {}), \
              patch("src.agent.auto_mod_fetcher._COBALT_DISABLE_HINT_SHOWN", False):
             first = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid5", output_dir)
             second = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid5", output_dir)
@@ -921,7 +1084,93 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertEqual(post_mock.call_count, 1)
-        self.assertIn("requires JWT auth", "\n".join(captured.output))
+        self.assertIn("requires Bearer JWT auth", "\n".join(captured.output))
+
+    def test_download_via_cobalt_uses_api_key_authorization_for_token_env(self):
+        fetcher = AutoModFetcher("inst-download-cobalt-api-key")
+        output_dir = os.path.join(self.tempdir.name, "downloads_cobalt_api_key")
+        response = SimpleNamespace(status_code=500, text="server error")
+
+        with patch.dict(os.environ, {
+            "COBALT_API_URL": "https://cobalt.example.com/",
+            "COBALT_API_TOKEN": "api-key-demo",
+        }, clear=True), \
+             patch("httpx.post", return_value=response) as post_mock, \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED", False):
+            result = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid5", output_dir)
+
+        self.assertIsNone(result)
+        headers = post_mock.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Api-Key api-key-demo")
+
+    def test_download_via_cobalt_403_sets_host_scoped_cooldown_not_global_disable(self):
+        fetcher = AutoModFetcher("inst-download-cobalt-cooldown")
+        output_dir = os.path.join(self.tempdir.name, "downloads_cobalt_cooldown")
+        response = SimpleNamespace(status_code=403, text="forbidden")
+
+        with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
+             patch("httpx.post", return_value=response) as post_mock, \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED", False), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED_HOSTS", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST", {}):
+            with patch.dict(os.environ, {"COBALT_API_URL": "https://host-one.example/"}, clear=True):
+                first = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid5", output_dir)
+                second = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid5", output_dir)
+
+            with patch.dict(os.environ, {"COBALT_API_URL": "https://host-two.example/"}, clear=True):
+                third = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid5", output_dir)
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertIsNone(third)
+        self.assertEqual(post_mock.call_count, 2)
+        combined_logs = "\n".join(captured.output)
+        self.assertIn("temporarily disabled for host=host-one.example", combined_logs)
+
+    def test_download_sync_skips_cobalt_when_current_host_is_in_cooldown(self):
+        fetcher = AutoModFetcher("inst-download-cobalt-cooldown-sync")
+        output_dir = os.path.join(self.tempdir.name, "downloads_cobalt_cooldown_sync")
+        future_ts = datetime.now(timezone.utc).timestamp() + 120
+
+        with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
+             patch.dict(os.environ, {"COBALT_API_URL": "https://cooldown.example/"}, clear=True), \
+             patch.object(fetcher, "_download_sync_attempt", side_effect=Exception("Sign in to confirm you're not a bot")), \
+             patch.object(fetcher, "_download_via_cobalt") as cobalt_mock, \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED", False), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED_HOSTS", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST", {"cooldown.example": future_ts}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST", {"cooldown.example": "temporary challenge"}), \
+             patch("src.agent.auto_mod_fetcher._resolve_cookiefile_details", return_value={"path": "/tmp/cookies.txt", "source": "project_file:www.youtube.com_cookies.txt", "available": True, "path_label": "cookies.txt", "issues": []}):
+            result = fetcher._download_sync("https://www.youtube.com/watch?v=vid4", output_dir)
+
+        self.assertIsNone(result)
+        cobalt_mock.assert_not_called()
+        self.assertIn("Skipping Cobalt API fallback for host=cooldown.example", "\n".join(captured.output))
+
+    def test_download_via_cobalt_logs_missing_auth_without_leaking_secret(self):
+        fetcher = AutoModFetcher("inst-download-cobalt-missing-auth")
+        output_dir = os.path.join(self.tempdir.name, "downloads_cobalt_missing_auth")
+        response = SimpleNamespace(
+            status_code=400,
+            text='{"status":"error","error":{"code":"error.api.auth.jwt.missing"}}',
+        )
+
+        with self.assertLogs("src.agent.auto_mod_fetcher", level="WARNING") as captured, \
+             patch.dict(os.environ, {"COBALT_API_URL": "https://api.cobalt.tools/"}, clear=True), \
+             patch("httpx.post", return_value=response), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED", False), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_DISABLED_HOSTS", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST", {}), \
+             patch("src.agent.auto_mod_fetcher._COBALT_DISABLE_HINT_SHOWN", False), \
+             patch("src.agent.auto_mod_fetcher._COBALT_MISSING_AUTH_HINT_SHOWN", False):
+            result = fetcher._download_via_cobalt("https://www.youtube.com/watch?v=vid6", output_dir)
+
+        self.assertIsNone(result)
+        combined_logs = "\n".join(captured.output)
+        self.assertIn("without auth token", combined_logs)
+        self.assertIn("api.cobalt.tools", combined_logs)
 
     def test_infer_processing_video_type_prefers_shorts_url_when_duration_missing(self):
         video = {
