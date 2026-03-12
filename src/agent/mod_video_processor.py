@@ -246,6 +246,7 @@ class ModVideoProcessor:
         cta_position: Optional[str] = None,
         video_effects: Optional[Dict[str, Any]] = None,
         hflip: bool = False,
+        progress_callback: Optional[callable] = None,
     ) -> Tuple[str, dict]:
         """
         معالجة فيديو مود
@@ -311,6 +312,10 @@ class ModVideoProcessor:
             # 🔧 استخدام stream copy للحفاظ على الجودة الأصلية
             # سيتم الترميز لاحقاً في convert_to_shorts أو الترميز النهائي
             if trim_start > 0 or trim_end > 0:
+                logger.info("✂️ Step 1/5: Trimming video...")
+                if progress_callback:
+                    try: progress_callback("1/5 ✂️ قص الفيديو...")
+                    except Exception: pass
                 self._trim_video(current_path, trimmed_path, trim_start, trim_end, force_encode=False)
                 current_path = str(trimmed_path)
             
@@ -322,12 +327,20 @@ class ModVideoProcessor:
             
             # الخطوة 2: تحويل لصيغة شورتس (9:16)
             if convert_to_shorts:
+                logger.info("📐 Step 2/5: Converting to shorts format...")
+                if progress_callback:
+                    try: progress_callback("2/5 📐 تحويل لصيغة شورتس...")
+                    except Exception: pass
                 self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format)
                 current_path = str(resized_path)
                 final_width, final_height = 1080, 1920
             
             # الخطوة 3: إضافة نص علوي (اختياري)
             if top_text:
+                logger.info("📝 Step 3/5: Adding text overlay...")
+                if progress_callback:
+                    try: progress_callback("3/5 📝 إضافة نص...")
+                    except Exception: pass
                 self._add_top_overlay_text(current_path, overlay_path, top_text, custom_font, top_text_size, top_text_y, is_custom)
                 current_path = str(overlay_path)
 
@@ -377,6 +390,10 @@ class ModVideoProcessor:
                     self._optimize_for_youtube(str(pre_final_path), str(final_path))
             else:
                 # التحسين النهائي مباشرة
+                logger.info("🎬 Step 5/5: Final encoding...")
+                if progress_callback:
+                    try: progress_callback("5/5 🎬 الترميز النهائي...")
+                    except Exception: pass
                 if convert_to_shorts:
                     ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
                     if not ok_final:
@@ -481,9 +498,9 @@ class ModVideoProcessor:
 
         vf_parts.append("format=yuv420p")
         vf = ",".join(vf_parts)
-        ff_threads, _, _ = self._shorts_x264_settings()
-        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
+        ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         has_audio = self._has_audio(input_path)
         fps = self._get_video_fps(input_path)
@@ -649,7 +666,7 @@ class ModVideoProcessor:
                     str(tmp_out),
                 ]
 
-                result = subprocess.run(cmd, capture_output=True, timeout=1200)
+                result = subprocess.run(cmd, capture_output=True, timeout=600)
                 stderr = (result.stderr or b"").decode(errors="ignore")
                 if result.returncode != 0:
                     return False, stderr
@@ -1094,10 +1111,10 @@ class ModVideoProcessor:
             
             logger.debug(f"Applying VF filter: {drawtext_filter}")
 
-            # 🔧 استخدام إعدادات وسيط محسّنة
-            ff_threads, _, _ = self._shorts_x264_settings()
-            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
+            # 🔧 استخدام إعدادات وسيط محسّنة (تحترم RENDER / LOW_RESOURCE_MODE)
+            ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
             fps = self._get_video_fps(input_path)
             if not fps or fps <= 0:
@@ -1290,9 +1307,9 @@ class ModVideoProcessor:
 
             logger.debug(f"Custom overlay VF filter: {drawtext_filter}")
 
-            ff_threads, _, _ = self._shorts_x264_settings()
-            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
+            ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
             fps = self._get_video_fps(input_path)
             if not fps or fps <= 0:
@@ -1986,9 +2003,8 @@ class ModVideoProcessor:
                 return default
             return val.strip().lower() in {"1", "true", "yes", "on"}
 
-        ff_threads = max(1, _env_int("FFMPEG_THREADS", 2))
-        x264_preset = _env_str("FFMPEG_X264_PRESET", "medium")
-        x264_crf = max(14, min(30, _env_int("FFMPEG_X264_CRF", 18)))
+        # 🔧 استخدام _shorts_x264_settings() لاحترام RENDER / LOW_RESOURCE_MODE
+        ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
         trim_mode = _env_str("FFMPEG_TRIM_MODE", "encode").lower()
         if _env_bool("FFMPEG_LOW_CPU", False) and trim_mode == "encode":
             trim_mode = "copy"
@@ -2247,20 +2263,13 @@ class ModVideoProcessor:
         cmd.append(str(tmp_out))
 
         try:
-            timeout_s = int((os.getenv("FFMPEG_TIMEOUT_SECONDS", "1800") or "1800").strip())
+            timeout_s = int((os.getenv("FFMPEG_TIMEOUT_SECONDS", "600") or "600").strip())
         except Exception:
-            timeout_s = 1800
+            timeout_s = 600
         if timeout_s <= 0:
-            timeout_s = 1800
+            timeout_s = 600
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            try:
-                retry_timeout_s = int((os.getenv("FFMPEG_TIMEOUT_RETRY_SECONDS", str(max(timeout_s * 2, 3600))) ) or str(max(timeout_s * 2, 3600)))
-            except Exception:
-                retry_timeout_s = max(timeout_s * 2, 3600)
-            result = subprocess.run(cmd, capture_output=True, timeout=retry_timeout_s)
+        result = subprocess.run(cmd, capture_output=True, timeout=timeout_s)
         if result.returncode != 0:
             raise RuntimeError(f"Failed to convert to shorts: {result.stderr.decode()}")
 
@@ -2349,9 +2358,9 @@ class ModVideoProcessor:
         ff_threads, preset, crf = self._shorts_x264_settings()
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         try:
-            lossless_intermediate = str(os.getenv("SHORTS_INTERMEDIATE_LOSSLESS", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+            lossless_intermediate = str(os.getenv("SHORTS_INTERMEDIATE_LOSSLESS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
         except Exception:
-            lossless_intermediate = True
+            lossless_intermediate = False
         fps = self._get_video_fps(input_path)
         if not fps or fps <= 0:
             fps = 30.0
