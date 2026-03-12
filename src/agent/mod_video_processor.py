@@ -770,9 +770,10 @@ class ModVideoProcessor:
                     v_profile = "high444"
                     v_pix_fmt = "yuv444p"
                 else:
-                    # 🆕 إعدادات محسّنة: CRF منخفض
-                    preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "faster") or "faster").strip() or "faster"
-                    crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "14") or "14")
+                    # 🆕 إعدادات محسّنة لبيئات الموارد المنخفضة
+                    _, base_preset, base_crf = self._shorts_x264_settings()
+                    preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                    crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
                     v_profile = None
                     v_pix_fmt = "yuv420p"
                 # 🆕 استخدام مستوى صوت عشوائي (90-100%) لتنويع المحتوى
@@ -2657,9 +2658,9 @@ class ModVideoProcessor:
             ovl_esc = ffmpeg_escape_path(overlay_path)
             overlay_input = str(overlay_path)
             # 🔧 استخدام إعدادات وسيط محسّنة
-            ff_threads, _, _ = self._shorts_x264_settings()
-            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "faster") or "faster").strip() or "faster"
-            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "14") or "14")
+            ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             # إضافة تأثيري fade-in و fade-out على طبقة الدعوة
             video_duration = self._get_video_duration(input_path)
             if not video_duration:
