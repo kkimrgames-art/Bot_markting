@@ -105,13 +105,14 @@ def _get_shorts_encoder_settings() -> dict:
             except Exception:
                 pass
     
+    is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1" or os.getenv("RENDER") == "true"
     # YouTube-optimized settings for shorts
     # Defaults tailored for speed on mobile/low-end devices while maintaining good quality
     settings = {
         "encoder": "libx264",
-        "preset": _env_str("SHORTS_X264_PRESET", "medium"),  # Default changed to medium for balance
-        "crf": _env_str("SHORTS_X264_CRF", "20"),  # Default changed to 20 (visually near-lossless but faster)
-        "threads": _env_int("FFMPEG_THREADS", 0),  # 0 = auto
+        "preset": _env_str("SHORTS_X264_PRESET", "ultrafast" if is_low_res else "medium"),
+        "crf": _env_str("SHORTS_X264_CRF", "28" if is_low_res else "20"),
+        "threads": _env_int("FFMPEG_THREADS", 1 if (is_low_res or os.getenv("RENDER") == "true") else 0),
         "extra_args": [
             "-profile:v", "high",
             "-level", _env_str("SHORTS_H264_LEVEL", "4.2"), # 4.2 is safer for mobile/TikTok/Shorts
@@ -1629,9 +1630,12 @@ class ModVideoProcessor:
             )
 
             # 🔧 استخدام إعدادات وسيط محسّنة
-            ff_threads, _, _ = self._shorts_x264_settings()
-            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
+            ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+            if os.getenv("LOW_RESOURCE_MODE") == "1":
+                base_preset = "ultrafast"
+                base_crf = 26
+            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
             base_cmd = [
                 ffmpeg_bin(),
@@ -1788,9 +1792,12 @@ class ModVideoProcessor:
         vf = ",".join(vf_parts) if vf_parts else "null"
 
         # 🔧 استخدام إعدادات وسيط محسّنة
-        ff_threads, _, _ = self._shorts_x264_settings()
-        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
+        ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+        if os.getenv("LOW_RESOURCE_MODE") == "1":
+            base_preset = "ultrafast"
+            base_crf = 26
+        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         has_audio = self._has_audio(input_path)
         fps = self._get_video_fps(input_path)
@@ -1949,9 +1956,11 @@ class ModVideoProcessor:
         crf_default = _env_int("FFMPEG_X264_CRF", 23)
         crf = max(18, min(28, _env_int("SHORTS_X264_CRF", crf_default)))
 
-        if _env_bool("FFMPEG_LOW_CPU", False):
-            preset = _env_str("FFMPEG_X264_PRESET", "ultrafast")
-            crf = max(20, min(30, _env_int("FFMPEG_X264_CRF", 24)))
+        if _env_bool("LOW_RESOURCE_MODE", False) or _env_bool("FFMPEG_LOW_CPU", False) or _env_bool("RENDER", False):
+            preset = "ultrafast"
+            crf_target = 28 if (_env_bool("RENDER", False) or _env_bool("LOW_RESOURCE_MODE", False)) else 26
+            crf = _env_int("SHORTS_X264_CRF", crf_target)
+            ff_threads = 1
 
         return ff_threads, preset, crf
     

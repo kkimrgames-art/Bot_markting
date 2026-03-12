@@ -234,6 +234,10 @@ def _detect_and_remove_borders(input_path: str, temp_dir: str) -> str:
     Detect and remove letterbox/pillarbox borders from video.
     Returns path to processed video.
     """
+    if os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1":
+        logger.info("LOW_RESOURCE_MODE enabled: Skipping aggressive border detection to save CPU/RAM.")
+        return input_path
+
     # Use FFmpeg's cropdetect with diversified passes to capture black/colored/blurred borders
     # 1) strict luma-based
     cmd1 = [
@@ -552,14 +556,22 @@ def render_with_pip(
     
     fps_val = q.get("fps")
     fps = int(fps_val) if fps_val else None
+    
+    is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1"
+    default_crf_val = "28" if is_low_res else "18"
+    default_preset_val = "ultrafast" if is_low_res else "veryfast"
+
     try:
-        default_crf = int(os.getenv("SHORTS_RENDER_CRF", os.getenv("SHORTS_X264_CRF", "18")) or 18)
+        default_crf = int(os.getenv("SHORTS_RENDER_CRF", os.getenv("SHORTS_X264_CRF", default_crf_val)) or default_crf_val)
     except Exception:
-        default_crf = 18
+        default_crf = int(default_crf_val)
     crf = int(q.get("crf") or default_crf)
-    preset = str(q.get("preset") or os.getenv("SHORTS_RENDER_PRESET", os.getenv("SHORTS_X264_PRESET", "slow")) or "slow")
+    preset = str(q.get("preset") or os.getenv("SHORTS_RENDER_PRESET", os.getenv("SHORTS_X264_PRESET", default_preset_val)) or default_preset_val)
+    
     ffmpeg_threads = getattr(cfg, "FFMPEG_THREADS", None)
-    if not ffmpeg_threads:
+    if is_low_res or os.getenv("RENDER") == "true":
+        ffmpeg_threads = 1
+    elif not ffmpeg_threads:
         try:
             from .resource_guard import recommend_ffmpeg_threads
             ffmpeg_threads = recommend_ffmpeg_threads() or 2

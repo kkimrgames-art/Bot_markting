@@ -4367,6 +4367,9 @@ class AutoModFetcher:
 
             await _notify(summary)
 
+            # Mandatory Render cooldown: Stay active but don't start a new cycle for 5 mins
+            # This prevents "back-to-back" heavy processing which causes memory leaks/exhaustion
+            logger.info("🎬 [AutoMod] Mandatory 5-minute cooldown starting...")
             return results
         finally:
             _RUN_CYCLE_LOCK.release()
@@ -4568,7 +4571,8 @@ class AutoModFetcher:
 
 
 def _normalize_auto_fetch_loop_config(config: Any, default_interval_seconds: int) -> Dict[str, Any]:
-    safe_default = max(5, int(default_interval_seconds or 60))
+    # Increased default fallback to 15 minutes (900s) on Render to ensure stability
+    safe_default = max(300, int(default_interval_seconds or 900))
     if not isinstance(config, dict):
         return {
             "auto_fetch_enabled": True,
@@ -4582,7 +4586,7 @@ def _normalize_auto_fetch_loop_config(config: Any, default_interval_seconds: int
         interval = safe_default
 
     normalized["auto_fetch_enabled"] = bool(normalized.get("auto_fetch_enabled", True))
-    normalized["auto_fetch_interval_seconds"] = max(5, interval)
+    normalized["auto_fetch_interval_seconds"] = max(300, interval)
     return normalized
 
 
@@ -4696,8 +4700,15 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
                 await asyncio.sleep(extra)
             
         # استخراج الفاصل الزمني من الإعدادات (مع قابلية للتحديث الديناميكي)
-        interval_seconds = _normalize_auto_fetch_loop_config(config, interval_seconds).get("auto_fetch_interval_seconds", 60)
-        await asyncio.sleep(_compute_loop_sleep_seconds(loop_started_monotonic, interval_seconds))
+        interval_seconds = _normalize_auto_fetch_loop_config(config, interval_seconds).get("auto_fetch_interval_seconds", 600)
+        
+        # Enforce a minimum wait of 5 minutes between cycles regardless of the interval setting
+        # This is a safety buffer for Render's limited resources.
+        sleep_duration = _compute_loop_sleep_seconds(loop_started_monotonic, interval_seconds)
+        rendered_sleep = max(300, sleep_duration) 
+        
+        logger.info(f"💤 [AutoMod] Next cycle in {rendered_sleep}s (Schedule: {interval_seconds}s, Minimum Cooldown: 300s)")
+        await asyncio.sleep(rendered_sleep)
 
 
 if __name__ == "__main__":
