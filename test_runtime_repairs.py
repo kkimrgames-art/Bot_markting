@@ -2557,6 +2557,45 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertEqual(record["status"], "published")
         self.assertEqual(record["youtube_url"], "https://youtu.be/x")
 
+    # ────────────────────────────────────────────────
+    # FFmpeg Low-Resource Settings Tests
+    # ────────────────────────────────────────────────
+
+    def test_shorts_x264_settings_ultrafast_on_render(self):
+        """When RENDER=1, preset must be ultrafast and CRF >= 26."""
+        mvp = ModVideoProcessor(temp_dir=self.tempdir.name)
+        with patch.dict(os.environ, {"RENDER": "1"}, clear=False):
+            threads, preset, crf = mvp._shorts_x264_settings()
+        self.assertEqual(preset, "ultrafast")
+        self.assertGreaterEqual(crf, 26)
+        self.assertGreater(threads, 0)
+
+    def test_shorts_x264_settings_ultrafast_on_low_resource(self):
+        """When LOW_RESOURCE_MODE=1, preset must be ultrafast and CRF >= 26."""
+        mvp = ModVideoProcessor(temp_dir=self.tempdir.name)
+        with patch.dict(os.environ, {"LOW_RESOURCE_MODE": "1", "RENDER": ""}, clear=False):
+            threads, preset, crf = mvp._shorts_x264_settings()
+        self.assertEqual(preset, "ultrafast")
+        self.assertGreaterEqual(crf, 26)
+
+    def test_shorts_x264_settings_uses_env_overrides(self):
+        """Custom env vars override the base defaults."""
+        mvp = ModVideoProcessor(temp_dir=self.tempdir.name)
+        with patch.dict(os.environ, {
+            "RENDER": "1",
+            "SHORTS_X264_PRESET": "superfast",
+            "SHORTS_X264_CRF": "30",
+        }, clear=False):
+            threads, preset, crf = mvp._shorts_x264_settings()
+        self.assertEqual(preset, "superfast")
+        self.assertEqual(crf, 30)
+
+    def test_process_mod_video_accepts_progress_callback(self):
+        """process_mod_video signature must accept progress_callback kwarg."""
+        import inspect
+        sig = inspect.signature(ModVideoProcessor.process_mod_video)
+        self.assertIn("progress_callback", sig.parameters)
+
 
 if __name__ == "__main__":
     unittest.main()
