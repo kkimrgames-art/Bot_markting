@@ -103,6 +103,8 @@ _INVIDIOUS_PIPED_COOLDOWN_SECONDS = 600
 _COBALT_MISSING_AUTH_HINT_SHOWN = False
 _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 _RUN_CYCLE_LOCK = threading.Lock()
+_RUN_CYCLE_META_LOCK = threading.Lock()
+_RUN_CYCLE_STARTED_MONOTONIC = 0.0
 
 
 def _processing_lock_stale_minutes(default_minutes: int = 90) -> int:
@@ -120,6 +122,26 @@ def _should_force_reset_processing_on_boot() -> bool:
     multi_instance_raw = (os.getenv("AUTOMODBOT_ALLOW_MULTI_INSTANCE", "") or "").strip().lower()
     multi_instance = multi_instance_raw in {"1", "true", "yes", "on"}
     return force_reset and not multi_instance
+
+
+def _mark_run_cycle_started() -> None:
+    global _RUN_CYCLE_STARTED_MONOTONIC
+    with _RUN_CYCLE_META_LOCK:
+        _RUN_CYCLE_STARTED_MONOTONIC = time.monotonic()
+
+
+def _mark_run_cycle_finished() -> None:
+    global _RUN_CYCLE_STARTED_MONOTONIC
+    with _RUN_CYCLE_META_LOCK:
+        _RUN_CYCLE_STARTED_MONOTONIC = 0.0
+
+
+def _running_cycle_elapsed_seconds() -> int:
+    with _RUN_CYCLE_META_LOCK:
+        started = float(_RUN_CYCLE_STARTED_MONOTONIC or 0.0)
+    if started <= 0:
+        return 0
+    return max(0, int(time.monotonic() - started))
 
 _OVERLAY_POSITIONS = {
     "top": "top",
@@ -3587,11 +3609,21 @@ class AutoModFetcher:
             target_content_type = target_content_type or preview_source.get("content_type", "minecraft_mods")
 
         if not _RUN_CYCLE_LOCK.acquire(blocking=False):
-            logger.warning("⏸ [AutoMod] Ignoring overlapping run_cycle request because another cycle is still running.")
-            await _notify("⏳ توجد دورة جلب أخرى قيد التشغيل بالفعل، لذلك تم تجاهل هذه المحاولة لمنع التكرار.")
-            return {"status": "busy", "message": "Another auto-mod cycle is already running"}
+            running_for = _running_cycle_elapsed_seconds()
+            logger.info(
+                f"⏳ [AutoMod] Overlapping run_cycle request ignored (current cycle still running for {running_for}s)."
+            )
+            await _notify(
+                f"⏳ توجد دورة جلب أخرى قيد التشغيل منذ `{running_for}` ثانية، وتم تجاهل هذه المحاولة لمنع التكرار."
+            )
+            return {
+                "status": "busy",
+                "message": "Another auto-mod cycle is already running",
+                "running_for_seconds": running_for,
+            }
 
         try:
+            _mark_run_cycle_started()
             # ========== بدء الدورة ==========
             cycle_start = time.time()
             await _notify(
@@ -4492,6 +4524,7 @@ class AutoModFetcher:
             logger.info("🎬 [AutoMod] Mandatory 5-minute cooldown starting...")
             return results
         finally:
+            _mark_run_cycle_finished()
             _RUN_CYCLE_LOCK.release()
 
     async def run_test_render(self, source_id: str, *, notify_func=None) -> Dict[str, Any]:
@@ -4805,7 +4838,14 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
                     await asyncio.sleep(extra_wait)
                 
                 logger.info("🔄 [AutoMod] Starting scheduled cycle...")
-                await fetcher.run_cycle()
+                cycle_result = await fetcher.run_cycle()
+                if isinstance(cycle_result, dict) and cycle_result.get("status") == "busy":
+                    busy_for = int(cycle_result.get("running_for_seconds") or 0)
+                    logger.info(
+                        f"⏳ [AutoMod] Previous cycle still active ({busy_for}s). Retrying soon without long cooldown."
+                    )
+                    await asyncio.sleep(30)
+                    continue
                 et.record_success("auto_fetch")
                 consecutive_loop_errors = 0
             else:
