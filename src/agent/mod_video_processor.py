@@ -57,6 +57,24 @@ def _get_random_volume_level(min_percent: int = 90, max_percent: int = 100) -> f
     return percent / 100.0
 
 
+def _safe_processing_fps(raw_fps: Optional[float]) -> float:
+    try:
+        fps = float(raw_fps or 0.0)
+    except Exception:
+        fps = 0.0
+    if fps <= 0:
+        fps = 30.0
+    render_mode = str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}
+    low_cpu_mode = str(os.getenv("LOW_RESOURCE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"} or str(os.getenv("FFMPEG_LOW_CPU", "")).strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        default_max = 30.0 if (render_mode or low_cpu_mode) else 60.0
+        max_fps = float((os.getenv("SHORTS_MAX_FPS", str(default_max)) or str(default_max)).strip())
+    except Exception:
+        max_fps = 30.0 if (render_mode or low_cpu_mode) else 60.0
+    max_fps = max(15.0, min(120.0, max_fps))
+    return min(fps, max_fps)
+
+
 """معالج فيديوهات المودات"""
 
 
@@ -134,6 +152,11 @@ def _get_shorts_encoder_settings() -> dict:
     hwaccel_mode = _env_str("FFMPEG_USE_HWACCEL", "auto")
     if hwaccel_mode.lower() in {"false", "0", "no", "off", "disabled"}:
         return settings
+    if hwaccel_mode.lower() == "auto":
+        render_mode = str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}
+        allow_on_render = str(os.getenv("FFMPEG_ALLOW_HWACCEL_ON_RENDER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        if render_mode and not allow_on_render:
+            return settings
     
     try:
         cmd = [ffmpeg_bin(), "-hide_banner", "-encoders"]
@@ -542,8 +565,7 @@ class ModVideoProcessor:
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         has_audio = self._has_audio(input_path)
         fps = self._get_video_fps(input_path)
-        if not fps or fps <= 0:
-            fps = 30.0
+        fps = _safe_processing_fps(fps)
         gop = max(1, int(round(fps)))
 
         cmd = [
@@ -571,7 +593,13 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        try:
+            default_timeout = "420" if (str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}) else "600"
+            timeout_s = int((os.getenv("SHORTS_EFFECTS_TIMEOUT_SECONDS", default_timeout) or default_timeout).strip())
+        except Exception:
+            timeout_s = 420
+        timeout_s = max(120, timeout_s)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         if res.returncode != 0:
             raise RuntimeError((res.stderr or "")[-2500:])
     
@@ -611,8 +639,7 @@ class ModVideoProcessor:
         try:
             def _run_encode(enc_settings: dict) -> Tuple[bool, str]:
                 fps = float(target_fps) if target_fps and target_fps > 0 else self._get_video_fps(input_path)
-                if not fps or fps <= 0:
-                    fps = 30.0
+                fps = _safe_processing_fps(fps)
                 gop = int(round(fps))
                 if gop < 1:
                     gop = 30
@@ -2066,8 +2093,7 @@ class ModVideoProcessor:
             ]
         else:
             fps = self._get_video_fps(input_path)
-            if not fps or fps <= 0:
-                fps = 30.0
+            fps = _safe_processing_fps(fps)
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
             cmd = [
                 ffmpeg_bin(),
@@ -2118,9 +2144,7 @@ class ModVideoProcessor:
         except Exception:
             lossless_intermediate = False
         
-        fps = self._get_video_fps(input_path)
-        if not fps or fps <= 0:
-            fps = 30.0
+        fps = _safe_processing_fps(self._get_video_fps(input_path))
         gop = int(round(fps))
         if gop < 1:
             gop = 30
