@@ -1158,6 +1158,28 @@ class ModVideoProcessor:
                 if _font_supports_required_chars(cand, required_cps):
                     fontfile = cand
 
+        # 7. التنزيل التلقائي لخط احتياطي إذا لم يتم العثور على أي خط
+        if not fontfile:
+            try:
+                import urllib.request
+                import tempfile
+                
+                fallback_dir = os.path.join(tempfile.gettempdir(), "automod_fonts")
+                os.makedirs(fallback_dir, exist_ok=True)
+                downloaded_font_path = os.path.join(fallback_dir, "Cairo-Regular.ttf")
+                
+                if not os.path.exists(downloaded_font_path):
+                    logger.info("⬇️ Downloading fallback font 'Cairo-Regular.ttf' from Google Fonts...")
+                    # رابط مباشر لخط Cairo من Google Fonts
+                    font_url = "https://github.com/googlefonts/cairo/raw/main/fonts/ttf/Cairo-Regular.ttf"
+                    urllib.request.urlretrieve(font_url, downloaded_font_path)
+                    logger.info("✅ Fallback font downloaded successfully.")
+                
+                if os.path.exists(downloaded_font_path):
+                    fontfile = downloaded_font_path
+            except Exception as e:
+                logger.warning(f"Failed to auto-download fallback font: {e}")
+
         if not fontfile:
             if required_cps:
                 raise RuntimeError(
