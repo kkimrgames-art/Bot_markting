@@ -833,21 +833,79 @@ async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎬 الفيديو: <code>{html.escape(str(results.get('preview_video_title') or 'بدون عنوان')[:80])}</code>\n"
                 "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
             )
-            with open(preview_path, "rb") as video_file:
-                telegram_video = BytesIO(video_file.read())
-                telegram_video.name = os.path.basename(preview_path) or "preview.mp4"
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=telegram_video,
-                    caption=caption,
-                    parse_mode="HTML",
-                    supports_streaming=True,
+            try:
+                with open(preview_path, "rb") as video_file:
+                    telegram_video = BytesIO(video_file.read())
+                    telegram_video.name = os.path.basename(preview_path) or "preview.mp4"
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=telegram_video,
+                        caption=caption,
+                        parse_mode="HTML",
+                        supports_streaming=True,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=120,
+                    )
+                    telegram_video.close()
+                result_text = (
+                    "✅ <b>تم إنشاء فيديو الاختبار وإرساله هنا في تيليجرام.</b>\n\n"
+                    "لم يتم رفع الفيديو إلى YouTube، ولم يتم تحديث حالة النشر أو الجدولة أو الأتمتة الرسمية."
                 )
-                telegram_video.close()
-            result_text = (
-                "✅ <b>تم إنشاء فيديو الاختبار وإرساله هنا في تيليجرام.</b>\n\n"
-                "لم يتم رفع الفيديو إلى YouTube، ولم يتم تحديث حالة النشر أو الجدولة أو الأتمتة الرسمية."
-            )
+            except Exception as send_e:
+                video_size_mb = os.path.getsize(preview_path) / (1024 * 1024)
+                if "413" in str(send_e) or "Entity Too Large" in str(send_e) or video_size_mb > 49.5:
+                    await query.edit_message_text(f"⚠️ الفيديو كبير جداً ({video_size_mb:.1f} MB) لإرساله عبر تيليجرام.\nجاري رفعه كفيديو خاص على يوتيوب للمعاينة...")
+                    
+                    try:
+                        from src.agent.config import load_config
+                        from src.bot.channel_manager import ChannelManager
+                        from src.agent.uploader import upload_video_with_token
+                        import asyncio
+                        
+                        cfg = load_config()
+                        cm = ChannelManager()
+                        channel = cm.get_channel(results.get("preview_channel_id", ""))
+                        
+                        if channel and channel.token_path and os.path.exists(channel.token_path):
+                            vid_title = f"[Test] {results.get('preview_video_title') or 'Video'} - AutoModBot"
+                            desc = "Private test video uploaded automatically because it exceeded Telegram's size limit."
+                            vid_id = await asyncio.to_thread(
+                                upload_video_with_token,
+                                cfg,
+                                channel.token_path,
+                                preview_path,
+                                vid_title[:100],
+                                desc,
+                                ["test"],
+                                "private"
+                            )
+                            if vid_id:
+                                yt_url = f"https://youtu.be/{vid_id}"
+                                result_text = (
+                                    f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
+                                    f"⚠️ <i>ملاحظة:</i> الفيديو كبير جداً ({video_size_mb:.1f} MB) لإرساله مباشرة في تيليجرام (الحد الأقصى للمعاينة 50 ميجابايت).\n"
+                                    f"🎬 <b>تم رفع الفيديو تلقائياً على يوتيوب (خاص) للمعاينة:</b>\n"
+                                    f"🔗 {yt_url}\n\n"
+                                    "عملية المعالجة تعمل بشكل سليم وهذا لا يؤثر على مسار النشر الرسمي."
+                                )
+                            else:
+                                raise Exception("فشل الحصول على رابط يوتيوب بعد الرفع.")
+                        else:
+                            result_text = (
+                                f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
+                                f"⚠️ <i>ملاحظة:</i> الفيديو كبير جداً ({video_size_mb:.1f} MB) لعرضه مباشرة في تيليجرام.\n"
+                                "لا يمكن رفعه كبديل على يوتيوب لعدم توفر التوكن أو القناة المحددة للمصدر.\n\n"
+                                "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
+                            )
+                    except Exception as up_err:
+                        result_text = (
+                            f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
+                            f"⚠️ الفيديو كبير جداً ({video_size_mb:.1f} MB) للإرسال عبر تيليجرام.\n"
+                            f"❌ حاول البوت رفعه على يوتيوب كبديل ولكنه فشل: <code>{html.escape(str(up_err)[:200])}</code>"
+                        )
+                else:
+                    raise send_e
         else:
             result_text = (
                 "⚠️ انتهى مسار الاختبار بدون ملف فيديو نهائي قابل للإرسال.\n"
