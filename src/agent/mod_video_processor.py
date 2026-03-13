@@ -57,6 +57,16 @@ def _get_random_volume_level(min_percent: int = 90, max_percent: int = 100) -> f
     return percent / 100.0
 
 
+def _is_low_resource_env() -> bool:
+    """Detect if running in a low-resource environment (Render free tier, etc.).
+    Uses multiple signals to avoid missing detection."""
+    render_explicit = str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}
+    render_platform = bool(os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
+    low_res = str(os.getenv("LOW_RESOURCE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    low_cpu = str(os.getenv("FFMPEG_LOW_CPU", "")).strip().lower() in {"1", "true", "yes", "on"}
+    return render_explicit or render_platform or low_res or low_cpu
+
+
 def _safe_processing_fps(raw_fps: Optional[float]) -> float:
     try:
         fps = float(raw_fps or 0.0)
@@ -64,13 +74,12 @@ def _safe_processing_fps(raw_fps: Optional[float]) -> float:
         fps = 0.0
     if fps <= 0:
         fps = 30.0
-    render_mode = str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}
-    low_cpu_mode = str(os.getenv("LOW_RESOURCE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"} or str(os.getenv("FFMPEG_LOW_CPU", "")).strip().lower() in {"1", "true", "yes", "on"}
+    is_low = _is_low_resource_env()
     try:
-        default_max = 30.0 if (render_mode or low_cpu_mode) else 60.0
+        default_max = 30.0 if is_low else 60.0
         max_fps = float((os.getenv("SHORTS_MAX_FPS", str(default_max)) or str(default_max)).strip())
     except Exception:
-        max_fps = 30.0 if (render_mode or low_cpu_mode) else 60.0
+        max_fps = 30.0 if is_low else 60.0
     max_fps = max(15.0, min(120.0, max_fps))
     return min(fps, max_fps)
 
@@ -421,18 +430,23 @@ class ModVideoProcessor:
                     intro_cfg = self._normalize_explicit_video_effect(explicit_effects.get("intro") or {})
                     outro_cfg = self._normalize_explicit_video_effect(explicit_effects.get("outro") or {})
                     if intro_cfg.get("enabled") or outro_cfg.get("enabled"):
-                        effects_path = self.temp_dir / f"{video_id}_effects.mp4"
-                        self._apply_configured_intro_outro_effects(current_path, effects_path, explicit_effects)
-                        current_path = str(effects_path)
+                        try:
+                            effects_path = self.temp_dir / f"{video_id}_effects.mp4"
+                            self._apply_configured_intro_outro_effects(current_path, effects_path, explicit_effects)
+                            current_path = str(effects_path)
+                        except Exception as effects_err:
+                            logger.warning(f"Configured effects failed and will be skipped: {effects_err}")
                 elif apply_processing_effects:
-                    # الحفاظ على السلوك الافتراضي القديم فقط عندما لا توجد إعدادات مصدر صريحة
-                    effects_path = self.temp_dir / f"{video_id}_effects.mp4"
-                    self.add_simple_intro_outro_effects(current_path, effects_path, seed=video_id, apply_outro=False)
-                    current_path = str(effects_path)
+                    try:
+                        effects_path = self.temp_dir / f"{video_id}_effects.mp4"
+                        self.add_simple_intro_outro_effects(current_path, effects_path, seed=video_id, apply_outro=False)
+                        current_path = str(effects_path)
 
-                    outro_path = self.temp_dir / f"{video_id}_outro.mp4"
-                    self._apply_outro_blur_black(current_path, outro_path, 1.0)
-                    current_path = str(outro_path)
+                        outro_path = self.temp_dir / f"{video_id}_outro.mp4"
+                        self._apply_outro_blur_black(current_path, outro_path, 1.0)
+                        current_path = str(outro_path)
+                    except Exception as effects_err:
+                        logger.warning(f"Default effects failed and will be skipped: {effects_err}")
             step_timings["effects"] = time.time() - effects_start
             if step_timings["effects"] > 0.1:
                 logger.info(f"✅ Step 4/5 (effects) completed in {step_timings['effects']:.2f}s")
@@ -544,29 +558,49 @@ class ModVideoProcessor:
 
         outro_start = max(0.0, duration_s - outro_d)
         vf_parts = ["setpts=PTS-STARTPTS"]
+        is_low = _is_low_resource_env()
+
+        # 🔧 On low-resource envs: use lighter blur radius, skip eq filter
+        blur_radius_heavy = 6 if is_low else 12
+        blur_radius_light = 4 if is_low else 8
 
         if intro_cfg.get("enabled") and intro_d > 0:
             vf_parts.append(f"fade=t=in:st=0:d={intro_d:.3f}")
-            vf_parts.append(f"boxblur=luma_radius={12 if intro_cfg.get('type') == 'black_blur' else 8}:enable='between(t,0,{intro_d:.3f})'")
-            if intro_cfg.get("type") == "black_blur":
+            radius = blur_radius_heavy if intro_cfg.get('type') == 'black_blur' else blur_radius_light
+            vf_parts.append(f"boxblur=luma_radius={radius}:enable='between(t,0,{intro_d:.3f})'")
+            if intro_cfg.get("type") == "black_blur" and not is_low:
+                # eq filter is expensive — skip on low-resource environments
                 vf_parts.append(f"eq=brightness=-0.18:saturation=0.92:enable='between(t,0,{intro_d:.3f})'")
 
         if outro_cfg.get("enabled") and outro_d > 0:
             vf_parts.append(f"fade=t=out:st={outro_start:.3f}:d={outro_d:.3f}")
-            vf_parts.append(f"boxblur=luma_radius={12 if outro_cfg.get('type') == 'black_blur' else 8}:enable='between(t,{outro_start:.3f},{duration_s:.3f})'")
-            if outro_cfg.get("type") == "black_blur":
+            radius = blur_radius_heavy if outro_cfg.get('type') == 'black_blur' else blur_radius_light
+            vf_parts.append(f"boxblur=luma_radius={radius}:enable='between(t,{outro_start:.3f},{duration_s:.3f})'")
+            if outro_cfg.get("type") == "black_blur" and not is_low:
                 vf_parts.append(f"eq=brightness=-0.18:saturation=0.92:enable='between(t,{outro_start:.3f},{duration_s:.3f})'")
 
         vf_parts.append("format=yuv420p")
         vf = ",".join(vf_parts)
         ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
-        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-        level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+
+        if is_low:
+            # 🔧 FORCE lightweight encoding on Render — env vars cannot override
+            preset = "ultrafast"
+            crf = 30
+            ff_threads = 1
+            logger.info(f"🔧 [Effects] Low-resource mode: preset={preset}, crf={crf}, threads={ff_threads}")
+        else:
+            default_effects_preset = base_preset
+            preset = str(os.getenv("SHORTS_EFFECTS_PRESET", default_effects_preset) or default_effects_preset).strip() or default_effects_preset
+            default_effects_crf = base_crf
+            crf = int(os.getenv("SHORTS_EFFECTS_CRF", str(default_effects_crf)) or str(default_effects_crf))
+
+        level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if is_low else "5.1") or "5.1").strip() or "5.1"
         has_audio = self._has_audio(input_path)
         fps = self._get_video_fps(input_path)
         fps = _safe_processing_fps(fps)
         gop = max(1, int(round(fps)))
+        audio_bitrate = "128k" if is_low else "384k"
 
         cmd = [
             ffmpeg_bin(),
@@ -589,16 +623,17 @@ class ModVideoProcessor:
             "-threads", str(ff_threads),
         ]
         if has_audio:
-            cmd += ["-map", "0:a?", "-c:a", "aac", "-b:a", "384k", "-ar", "48000"]
+            cmd += ["-map", "0:a?", "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000"]
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
         try:
-            default_timeout = "420" if (str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}) else "600"
+            default_timeout = "300" if is_low else "1800"
             timeout_s = int((os.getenv("SHORTS_EFFECTS_TIMEOUT_SECONDS", default_timeout) or default_timeout).strip())
         except Exception:
-            timeout_s = 420
+            timeout_s = 300 if is_low else 1800
         timeout_s = max(120, timeout_s)
+        logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s): {' '.join(cmd[-6:])}")
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         if res.returncode != 0:
             raise RuntimeError((res.stderr or "")[-2500:])
@@ -2039,10 +2074,11 @@ class ModVideoProcessor:
         crf_default = _env_int("FFMPEG_X264_CRF", 23)
         crf = max(18, min(28, _env_int("SHORTS_X264_CRF", crf_default)))
 
-        if _env_bool("LOW_RESOURCE_MODE", False) or _env_bool("FFMPEG_LOW_CPU", False) or _env_bool("RENDER", False):
+        if _is_low_resource_env():
+            # 🔧 On Render / low-resource: FORCE lightweight settings
+            # Do NOT read env vars here — they may contain desktop-quality values
             preset = "ultrafast"
-            crf_target = 28 if (_env_bool("RENDER", False) or _env_bool("LOW_RESOURCE_MODE", False)) else 26
-            crf = _env_int("SHORTS_X264_CRF", crf_target)
+            crf = 28
             ff_threads = 1
 
         return ff_threads, preset, crf

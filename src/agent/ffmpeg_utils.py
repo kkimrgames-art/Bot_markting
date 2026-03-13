@@ -106,7 +106,7 @@ def ffprobe_bin() -> str:
 
     return None
 
-def run_ffmpeg_command(cmd: List[str], timeout: int = 300) -> bool:
+def run_ffmpeg_command(cmd: List[str], timeout: int = 1800) -> bool:
     """
     Run an FFmpeg command with proper error handling and logging.
     
