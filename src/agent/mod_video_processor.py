@@ -5,6 +5,7 @@
 import os
 import subprocess
 import logging
+import time
 import re
 import uuid
 import hashlib
@@ -287,6 +288,18 @@ class ModVideoProcessor:
         logger.info(f"Processing mod video: {video_id} (Custom: {is_custom})")
         logger.info(f"Original duration: {duration}s, dimensions: {width}x{height}")
         
+        # Start timing for each step
+        step_timings = {
+            "total": time.time(),
+            "trim": None,
+            "flip": None,
+            "convert": None,
+            "overlay": None,
+            "effects": None,
+            "enhance": None,
+            "encode": None
+        }
+        
         # حساب المدة الجديدة
         new_duration = duration - trim_start - trim_end
         
@@ -312,12 +325,15 @@ class ModVideoProcessor:
             # 🔧 استخدام stream copy للحفاظ على الجودة الأصلية
             # سيتم الترميز لاحقاً في convert_to_shorts أو الترميز النهائي
             if trim_start > 0 or trim_end > 0:
+                step_start = time.time()
                 logger.info("✂️ Step 1/5: Trimming video...")
                 if progress_callback:
                     try: progress_callback("1/5 ✂️ قص الفيديو...")
                     except Exception: pass
                 self._trim_video(current_path, trimmed_path, trim_start, trim_end, force_encode=False)
                 current_path = str(trimmed_path)
+                step_timings["trim"] = time.time() - step_start
+                logger.info(f"✅ Step 1/5 completed in {step_timings['trim']:.2f}s")
             
             # الخطوة 1.5: قلب الفيديو أفقياً (إذا تم طلبه)
             if hflip:
@@ -327,23 +343,51 @@ class ModVideoProcessor:
             
             # الخطوة 2: تحويل لصيغة شورتس (9:16)
             if convert_to_shorts:
-                logger.info("📐 Step 2/5: Converting to shorts format...")
-                if progress_callback:
-                    try: progress_callback("2/5 📐 تحويل لصيغة شورتس...")
-                    except Exception: pass
-                self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format)
-                current_path = str(resized_path)
-                final_width, final_height = 1080, 1920
+                fmt = (shorts_format or "crop").strip().lower()
+                try:
+                    skip_if_vertical = str(os.getenv("AUTO_MOD_SKIP_SHORTS_CONVERT_IF_VERTICAL", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+                except Exception:
+                    skip_if_vertical = True
+
+                should_skip_conversion = False
+                if skip_if_vertical and fmt == "crop" and width > 0 and height > 0:
+                    try:
+                        should_skip_conversion = abs((width / height) - (9.0 / 16.0)) <= 0.02
+                    except Exception:
+                        should_skip_conversion = False
+
+                if should_skip_conversion:
+                    logger.info(f"📐 Step 2/5: Skipping shorts conversion (already 9:16: {width}x{height})")
+                    if progress_callback:
+                        try: progress_callback("2/5 📐 تخطي التحويل (الفيديو عمودي 9:16 مسبقاً)...")
+                        except Exception: pass
+                    step_timings["convert"] = 0.0
+                else:
+                    step_start = time.time()
+                    logger.info("📐 Step 2/5: Converting to shorts format...")
+                    if progress_callback:
+                        try: progress_callback("2/5 📐 تحويل لصيغة شورتس...")
+                        except Exception: pass
+                    self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format)
+                    current_path = str(resized_path)
+                    final_width, final_height = 1080, 1920
+                    step_timings["convert"] = time.time() - step_start
+                    logger.info(f"✅ Step 2/5 completed in {step_timings['convert']:.2f}s")
             
             # الخطوة 3: إضافة نص علوي (اختياري)
             if top_text:
+                step_start = time.time()
                 logger.info("📝 Step 3/5: Adding text overlay...")
                 if progress_callback:
                     try: progress_callback("3/5 📝 إضافة نص...")
                     except Exception: pass
                 self._add_top_overlay_text(current_path, overlay_path, top_text, custom_font, top_text_size, top_text_y, is_custom)
                 current_path = str(overlay_path)
+                step_timings["overlay"] = time.time() - step_start
+                logger.info(f"✅ Step 3/5 completed in {step_timings['overlay']:.2f}s")
 
+            # الخطوة 4: إضافة تأثيرات البداية/النهاية
+            effects_start = time.time()
             if convert_to_shorts:
                 explicit_effects = video_effects if isinstance(video_effects, dict) else None
                 if explicit_effects:
@@ -362,44 +406,34 @@ class ModVideoProcessor:
                     outro_path = self.temp_dir / f"{video_id}_outro.mp4"
                     self._apply_outro_blur_black(current_path, outro_path, 1.0)
                     current_path = str(outro_path)
+            step_timings["effects"] = time.time() - effects_start
+            if step_timings["effects"] > 0.1:
+                logger.info(f"✅ Step 4/5 (effects) completed in {step_timings['effects']:.2f}s")
             
-            # الخطوة 4: تحسين سينمائي (اختياري)
+            # الخطوة 5: تحسين سينمائي (اختياري)
             if enhance:
+                step_start = time.time()
                 enhance_path = self.temp_dir / f"{video_id}_enhanced.mp4"
                 ok = self._apply_cinematic_teal_boost(current_path, enhance_path)
                 if ok:
                     current_path = str(enhance_path)
+                step_timings["enhance"] = time.time() - step_start
+                logger.info(f"✅ Step 5/5 (enhance) completed in {step_timings['enhance']:.2f}s")
             
-            # الخطوة 5: إضافة نص الدعوة (تم إيقافه بناءً على طلب المستخدم)
-            if False:  # تم تعطيل إضافة نص تسويقي بناء على طلب المستخدم
-                # مسار مؤقت قبل التحسين النهائي
-                pre_final_path = self.temp_dir / f"{video_id}_pre_final.mp4"
-                cta_duration = self._get_video_duration(current_path) or new_duration
-                pos = (cta_position or "").strip().lower()
-                if pos == "center":
-                    self._add_cta_text(current_path, pre_final_path, cta_text, cta_duration, custom_font)
-                else:
-                    self._add_cta_text_reliable(current_path, pre_final_path, cta_text, cta_duration, custom_font)
-                
-                # التحسين النهائي قبل الحفظ
-                if convert_to_shorts:
-                    ok_final = self._encode_final_shorts(str(pre_final_path), str(final_path), target_fps)
-                    if not ok_final:
-                        raise RuntimeError(f"Failed to encode final shorts: {final_path}")
-                else:
-                    self._optimize_for_youtube(str(pre_final_path), str(final_path))
+            # الخطوة 6: الترميز النهائي
+            encode_start = time.time()
+            logger.info("🎬 Step 6/6: Final encoding...")
+            if progress_callback:
+                try: progress_callback("6/6 🎬 الترميز النهائي...")
+                except Exception: pass
+            if convert_to_shorts:
+                ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
+                if not ok_final:
+                    raise RuntimeError(f"Failed to encode final shorts: {final_path}")
             else:
-                # التحسين النهائي مباشرة
-                logger.info("🎬 Step 5/5: Final encoding...")
-                if progress_callback:
-                    try: progress_callback("5/5 🎬 الترميز النهائي...")
-                    except Exception: pass
-                if convert_to_shorts:
-                    ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
-                    if not ok_final:
-                        raise RuntimeError(f"Failed to encode final shorts: {final_path}")
-                else:
-                    self._optimize_for_youtube(current_path, str(final_path))
+                self._optimize_for_youtube(current_path, str(final_path))
+            step_timings["encode"] = time.time() - encode_start
+            logger.info(f"✅ Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
             
             # معلومات الفيديو المعالج
             info = {
@@ -2111,6 +2145,20 @@ class ModVideoProcessor:
         target_ratio = target_width / target_height
         
         fmt = (shorts_format or "crop").strip().lower()
+
+        try:
+            skip_if_vertical = str(os.getenv("AUTO_MOD_SKIP_SHORTS_CONVERT_IF_VERTICAL", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        except Exception:
+            skip_if_vertical = True
+        if skip_if_vertical and fmt == "crop" and orig_width > 0 and orig_height > 0:
+            try:
+                if abs((orig_width / orig_height) - (9.0 / 16.0)) <= 0.02:
+                    import shutil
+                    shutil.copy2(input_path, output_path)
+                    logger.info(f"✅ Video already 9:16 ({orig_width}x{orig_height}); skipped shorts conversion.")
+                    return
+            except Exception:
+                pass
 
         cmd = [
             ffmpeg_bin(),
