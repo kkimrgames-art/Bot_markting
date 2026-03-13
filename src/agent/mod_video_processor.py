@@ -133,30 +133,51 @@ def _get_shorts_encoder_settings() -> dict:
             except Exception:
                 pass
     
-    is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1" or os.getenv("RENDER") in ("1", "true")
+    is_low_res = _is_low_resource_env()
     # YouTube-optimized settings for shorts
-    # Defaults tailored for speed on mobile/low-end devices while maintaining good quality
-    settings = {
-        "encoder": "libx264",
-        "preset": _env_str("SHORTS_X264_PRESET", "ultrafast" if is_low_res else "medium"),
-        "crf": _env_str("SHORTS_X264_CRF", "28" if is_low_res else "20"),
-        "threads": _env_int("FFMPEG_THREADS", 1 if is_low_res else 0),
-        "extra_args": [
-            "-profile:v", "high",
-            "-level", _env_str("SHORTS_H264_LEVEL", "4.2"), # 4.2 is safer for mobile/TikTok/Shorts
-            "-bf", "2",
-            "-g", "30",
-            "-pix_fmt", "yuv420p",
-            # YouTube Critical
-            "-movflags", "+faststart",
-            "-use_editlist", "0",
-            "-map_metadata", "-1",
-        ],
-        "min_bitrate": _env_str("SHORTS_MIN_BITRATE", "5M"),
-        "audio_bitrate": _env_str("AUDIO_BITRATE", "256k"),
-        "audio_sample_rate": _env_int("AUDIO_SAMPLE_RATE", 44100),
-        "is_gpu": False
-    }
+    if is_low_res:
+        # 🔧 FORCE lightweight settings on Render — env vars CANNOT override
+        settings = {
+            "encoder": "libx264",
+            "preset": "ultrafast",
+            "crf": "28",
+            "threads": 1,
+            "extra_args": [
+                "-profile:v", "high",
+                "-level", "4.2",
+                "-bf", "2",
+                "-g", "30",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-use_editlist", "0",
+                "-map_metadata", "-1",
+            ],
+            "min_bitrate": "3M",
+            "audio_bitrate": "128k",
+            "audio_sample_rate": 44100,
+            "is_gpu": False
+        }
+    else:
+        settings = {
+            "encoder": "libx264",
+            "preset": _env_str("SHORTS_X264_PRESET", "medium"),
+            "crf": _env_str("SHORTS_X264_CRF", "20"),
+            "threads": _env_int("FFMPEG_THREADS", 0),
+            "extra_args": [
+                "-profile:v", "high",
+                "-level", _env_str("SHORTS_H264_LEVEL", "4.2"),
+                "-bf", "2",
+                "-g", "30",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-use_editlist", "0",
+                "-map_metadata", "-1",
+            ],
+            "min_bitrate": _env_str("SHORTS_MIN_BITRATE", "5M"),
+            "audio_bitrate": _env_str("AUDIO_BITRATE", "256k"),
+            "audio_sample_rate": _env_int("AUDIO_SAMPLE_RATE", 44100),
+            "is_gpu": False
+        }
     
     hwaccel_mode = _env_str("FFMPEG_USE_HWACCEL", "auto")
     if hwaccel_mode.lower() in {"false", "0", "no", "off", "disabled"}:
@@ -766,7 +787,8 @@ class ModVideoProcessor:
                     str(tmp_out),
                 ]
 
-                result = subprocess.run(cmd, capture_output=True, timeout=600)
+                _timeout = 300 if _is_low_resource_env() else 600
+                result = subprocess.run(cmd, capture_output=True, timeout=_timeout)
                 stderr = (result.stderr or b"").decode(errors="ignore")
                 if result.returncode != 0:
                     return False, stderr
@@ -809,7 +831,7 @@ class ModVideoProcessor:
                     "crf": str(crf),
                     "threads": ff_threads,
                     "extra_args": ["-profile:v", "high", "-level", lvl],
-                    "audio_bitrate": settings.get("audio_bitrate") or "384k",
+                    "audio_bitrate": "128k" if _is_low_resource_env() else (settings.get("audio_bitrate") or "384k"),
                     "audio_sample_rate": settings.get("audio_sample_rate") or 48000,
                 }
                 ok2, err2 = _run_encode(fallback)
@@ -870,10 +892,14 @@ class ModVideoProcessor:
                     v_profile = "high444"
                     v_pix_fmt = "yuv444p"
                 else:
-                    # 🆕 إعدادات محسّنة لبيئات الموارد المنخفضة
+                    # 🔧 Use _shorts_x264_settings() directly — already respects RENDER
                     _, base_preset, base_crf = self._shorts_x264_settings()
-                    preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
-                    crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+                    if _is_low_resource_env():
+                        preset = base_preset  # Already forced to ultrafast
+                        crf = base_crf        # Already forced to 28
+                    else:
+                        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
                     v_profile = None
                     v_pix_fmt = "yuv420p"
                 # 🆕 استخدام مستوى صوت عشوائي (90-100%) لتنويع المحتوى
@@ -889,7 +915,7 @@ class ModVideoProcessor:
                     cmd += [
                         "-map", "0:a?",
                         "-c:a", "aac",
-                        "-b:a", "384k",  # YouTube recommended: 384kbps stereo
+                        "-b:a", "128k" if _is_low_resource_env() else "384k",
                         "-af", f"volume={shorts_vol}",
                     ]
                 cmd += [
@@ -907,7 +933,7 @@ class ModVideoProcessor:
                     # x264 lossless is not supported with profile=high/yuv420p
                     # use high444 for intermediates
                     cmd[cmd.index("-c:v") + 2:cmd.index("-c:v") + 2] = ["-profile:v", v_profile]
-                result = subprocess.run(cmd, capture_output=True, timeout=600)
+                result = subprocess.run(cmd, capture_output=True, timeout=300 if _is_low_resource_env() else 600)
                 stderr = (result.stderr or b"").decode(errors="ignore")
                 ok = (result.returncode == 0) and os.path.exists(output_path) and os.path.getsize(output_path) > 0
                 return ok, stderr
@@ -1214,9 +1240,13 @@ class ModVideoProcessor:
 
             # 🔧 استخدام إعدادات وسيط محسّنة (تحترم RENDER / LOW_RESOURCE_MODE)
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
-            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-            level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+            if _is_low_resource_env():
+                preset = base_preset  # Already forced to ultrafast
+                crf = base_crf        # Already forced to 28
+            else:
+                preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+            level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
             fps = self._get_video_fps(input_path)
             if not fps or fps <= 0:
                 fps = 30.0
@@ -1409,9 +1439,13 @@ class ModVideoProcessor:
             logger.debug(f"Custom overlay VF filter: {drawtext_filter}")
 
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
-            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-            level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+            if _is_low_resource_env():
+                preset = base_preset  # Already forced to ultrafast
+                crf = base_crf        # Already forced to 28
+            else:
+                preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+            level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
             fps = self._get_video_fps(input_path)
             if not fps or fps <= 0:
                 fps = 30.0
