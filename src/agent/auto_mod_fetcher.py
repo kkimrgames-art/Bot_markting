@@ -104,6 +104,23 @@ _COBALT_MISSING_AUTH_HINT_SHOWN = False
 _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 _RUN_CYCLE_LOCK = threading.Lock()
 
+
+def _processing_lock_stale_minutes(default_minutes: int = 90) -> int:
+    try:
+        raw = (os.getenv("AUTO_MOD_PROCESSING_STALE_MINUTES", str(default_minutes)) or str(default_minutes)).strip()
+        minutes = int(float(raw))
+    except Exception:
+        minutes = default_minutes
+    return max(5, minutes)
+
+
+def _should_force_reset_processing_on_boot() -> bool:
+    raw = (os.getenv("AUTO_MOD_FORCE_RESET_PROCESSING_ON_BOOT", "true") or "true").strip().lower()
+    force_reset = raw in {"1", "true", "yes", "on"}
+    multi_instance_raw = (os.getenv("AUTOMODBOT_ALLOW_MULTI_INSTANCE", "") or "").strip().lower()
+    multi_instance = multi_instance_raw in {"1", "true", "yes", "on"}
+    return force_reset and not multi_instance
+
 _OVERLAY_POSITIONS = {
     "top": "top",
     "top_center": "top",
@@ -2047,14 +2064,15 @@ class AutoModDB:
         status, _ = self.get_video_process_state(source_video_id, channel_id)
         return status == "published"
 
-    def is_video_locked(self, source_video_id: str, channel_id: str, *, stale_minutes: int = 30) -> bool:
+    def is_video_locked(self, source_video_id: str, channel_id: str, *, stale_minutes: Optional[int] = None) -> bool:
         status, updated_at = self.get_video_process_state(source_video_id, channel_id)
         if status != "processing":
             return False
         if not updated_at:
             return True
+        active_minutes = _processing_lock_stale_minutes() if stale_minutes is None else max(5, int(stale_minutes))
         try:
-            return (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=int(stale_minutes))
+            return (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=active_minutes)
         except Exception:
             return True
 
@@ -2214,10 +2232,54 @@ class AutoModDB:
             logger.error(f"Failed to release processing: {e}")
             return False
 
-    def reset_stale_processing(self) -> int:
+    def touch_video_processing(self, source_video_id: str, channel_id: str) -> bool:
+        """تحديث نبضة فيديو قيد المعالجة لمنع اعتباره متوقفاً أثناء مهام FFmpeg الطويلة."""
+        try:
+            from src.agent.supabase_client import supabase_select, supabase_upsert
+            records = supabase_select("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "source_video_id": source_video_id,
+                "channel_id": channel_id,
+            }))
+            rec = records[0] if records else None
+            if not rec:
+                return False
+            if (rec.get("status") or "").strip().lower() != "processing":
+                return False
+            rec["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _local_upsert_row(
+                "auto_mod_processed",
+                rec,
+                key_field="id",
+                on_conflict="source_video_id,channel_id",
+            )
+            ok = supabase_upsert(
+                "auto_mod_processed",
+                rec,
+                key_field="id",
+                fallback_local=lambda data: _local_upsert_row(
+                    "auto_mod_processed",
+                    data,
+                    key_field="id",
+                    on_conflict="source_video_id,channel_id",
+                ),
+                on_conflict="source_video_id,channel_id",
+            )
+            if ok:
+                self._clear_cache()
+            return bool(ok)
+        except Exception as e:
+            logger.debug(f"Failed to touch processing heartbeat: {e}")
+            return False
+
+    def reset_stale_processing(self, *, stale_minutes: Optional[int] = None, force_reset_all: bool = False) -> int:
         """إعادة تعيين أي فيديوهات 'قيد المعالجة' تابعة لهذه النسخة تم مقاطعتها"""
         try:
             from src.agent.supabase_client import supabase_select, supabase_delete
+            stale_threshold_minutes = _processing_lock_stale_minutes() if stale_minutes is None else max(5, int(stale_minutes))
+            now_utc = datetime.now(timezone.utc)
             records = supabase_select("auto_mod_processed", {
                 "instance_id": self.instance_id,
                 "status": "processing"
@@ -2226,7 +2288,13 @@ class AutoModDB:
                 "status": "processing",
             }))
             count = 0
+            kept_recent = 0
             for rec in records:
+                if not force_reset_all:
+                    updated_at = _parse_datetime_utc(rec.get("updated_at"))
+                    if updated_at and (now_utc - updated_at) <= timedelta(minutes=stale_threshold_minutes):
+                        kept_recent += 1
+                        continue
                 _local_delete_row("auto_mod_processed", "id", rec["id"])
                 supabase_delete(
                     "auto_mod_processed",
@@ -2236,8 +2304,15 @@ class AutoModDB:
                 )
                 count += 1
             if count > 0:
-                logger.info(f"🔄 Reset {count} stale processing locks for instance {self.instance_id}")
+                if force_reset_all:
+                    logger.info(f"🔄 Force-reset {count} processing locks on boot for instance {self.instance_id}")
+                else:
+                    logger.info(f"🔄 Reset {count} stale processing locks for instance {self.instance_id}")
                 self._clear_cache()
+            if kept_recent > 0 and not force_reset_all:
+                logger.info(
+                    f"⏸ Kept {kept_recent} active processing locks (stale threshold: {stale_threshold_minutes} min) for instance {self.instance_id}"
+                )
             return count
         except Exception as e:
             logger.error(f"Failed to reset stale processing: {e}")
@@ -3348,13 +3423,18 @@ class AutoModFetcher:
                 # stream copy فقط (بدون إعادة ترميز = 0 فقدان جودة)
                 final_path = os.path.join(output_dir, f"{video_id}_mod.mp4")
                 loop = asyncio.get_running_loop()
+                try:
+                    process_timeout_s = int((os.getenv("AUTO_MOD_PROCESS_TIMEOUT_SECONDS", "1800") or "1800").strip())
+                except Exception:
+                    process_timeout_s = 1800
+                process_timeout_s = max(120, process_timeout_s)
                 import functools
                 opt_func = functools.partial(
                     mvp._optimize_for_youtube,
                     input_path=input_path,
                     output_path=final_path,
                 )
-                ok = await loop.run_in_executor(None, opt_func)
+                ok = await asyncio.wait_for(loop.run_in_executor(None, opt_func), timeout=process_timeout_s)
                 if ok and ResilientFS.exists(final_path):
                     return final_path
                 # fallback: نسخ مباشر
@@ -3363,6 +3443,11 @@ class AutoModFetcher:
             else:
                 # --- مسار الشورتس ---
                 loop = asyncio.get_running_loop()
+                try:
+                    process_timeout_s = int((os.getenv("AUTO_MOD_PROCESS_TIMEOUT_SECONDS", "1800") or "1800").strip())
+                except Exception:
+                    process_timeout_s = 1800
+                process_timeout_s = max(120, process_timeout_s)
                 import functools
                 process_func = functools.partial(
                     mvp.process_mod_video,
@@ -3378,8 +3463,11 @@ class AutoModFetcher:
                     video_effects=video_effects,
                     hflip=hflip,
                 )
-                out_path, info = await loop.run_in_executor(None, process_func)
+                out_path, info = await asyncio.wait_for(loop.run_in_executor(None, process_func), timeout=process_timeout_s)
                 return out_path
+        except asyncio.TimeoutError:
+            logger.error(f"Failed to process video {video_id}: processing timed out")
+            return None
         except Exception as e:
             logger.error(f"Failed to process video {video_id}: {e}")
             return None
@@ -3746,11 +3834,12 @@ class AutoModFetcher:
                                         published_count += 1
                                         continue
                                     if status == "processing":
+                                        processing_lock_minutes = _processing_lock_stale_minutes()
                                         if not updated_at:
                                             locked_count += 1
                                             continue
                                         try:
-                                            if (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=30):
+                                            if (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=processing_lock_minutes):
                                                 locked_count += 1
                                                 continue
                                         except Exception:
@@ -3830,6 +3919,8 @@ class AutoModFetcher:
                             current_out_path = None
                             current_yt_url = ""
                             claimed_processing = False
+                            processing_touch_task: Optional[asyncio.Task] = None
+                            processing_touch_stop: Optional[asyncio.Event] = None
                             await _notify(
                                 f"🎬 *فيديو جديد مختار:* `{vid_title}`\n"
                                 f"   🆔 `{vid_id[:20]}`"
@@ -4045,6 +4136,25 @@ class AutoModFetcher:
                                         dl_path = trimmed_dl_path
                                         current_dl_path = trimmed_dl_path
 
+                                if claimed_processing and not preview_mode:
+                                    processing_touch_stop = asyncio.Event()
+
+                                    async def _processing_touch_loop():
+                                        try:
+                                            raw_touch = (os.getenv("AUTO_MOD_PROCESSING_TOUCH_SECONDS", "45") or "45").strip()
+                                            touch_seconds = int(float(raw_touch))
+                                        except Exception:
+                                            touch_seconds = 45
+                                        touch_seconds = max(15, min(180, touch_seconds))
+                                        while not processing_touch_stop.is_set():
+                                            try:
+                                                await asyncio.wait_for(processing_touch_stop.wait(), timeout=touch_seconds)
+                                            except asyncio.TimeoutError:
+                                                if not processing_touch_stop.is_set():
+                                                    self.db.touch_video_processing(vid_id, channel_id)
+
+                                    processing_touch_task = asyncio.create_task(_processing_touch_loop())
+
                                 out_path = await self.process_video(
                                     dl_path, vid_id,
                                     shorts_format=config.get("shorts_format", "crop"),
@@ -4056,6 +4166,11 @@ class AutoModFetcher:
                                     trim_end=0.0 if (vid_type == "shorts" and tail_trim_seconds > 0) else 1.0,
                                 )
                                 current_out_path = out_path
+                                if processing_touch_stop:
+                                    processing_touch_stop.set()
+                                if processing_touch_task:
+                                    with suppress(Exception):
+                                        await asyncio.wait_for(processing_touch_task, timeout=3)
 
                                 if not out_path:
                                     err_msg = f"❌ *فشل المعالجة:* `{vid_title}`"
@@ -4247,6 +4362,11 @@ class AutoModFetcher:
 
                     except Exception as e:
                         from src.agent.uploader import is_youtube_quota_error, AuthenticationRequiredError
+                        if processing_touch_stop:
+                            processing_touch_stop.set()
+                        if processing_touch_task:
+                            with suppress(Exception):
+                                await asyncio.wait_for(processing_touch_task, timeout=3)
 
                         if claimed_processing and current_vid_id and not preview_mode:
                             try:
@@ -4635,7 +4755,10 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
             db.save_config(config)
             
         # تنظيف أي فيديوهات علقت قيد المعالجة بسبب انهيار سابق
-        stale_count = db.reset_stale_processing()
+        stale_count = db.reset_stale_processing(
+            stale_minutes=_processing_lock_stale_minutes(),
+            force_reset_all=_should_force_reset_processing_on_boot(),
+        )
         if stale_count > 0:
             logger.info(f"🧹 Cleaned up {stale_count} stale processing locks for instance {instance_id}")
 
