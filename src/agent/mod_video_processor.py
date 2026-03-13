@@ -184,18 +184,22 @@ def _get_shorts_encoder_settings() -> dict:
         
         # 3. Intel QuickSync
         if "h264_qsv" in out:
-            settings["encoder"] = "h264_qsv"
-            settings["preset"] = "faster"
-            settings["extra_args"] = [
+            qsv_preset = "faster"
+            qsv_args = [
                 "-global_quality", _env_str("SHORTS_X264_CRF", "23"),
                 "-look_ahead", "0",
                 "-movflags", "+faststart",
                 "-map_metadata", "-1",
             ]
-            settings["crf"] = None
-            settings["is_gpu"] = True
-            logger.info("✅ Shorts GPU: Intel QuickSync")
-            return settings
+            if _test_encoder("h264_qsv", qsv_preset, qsv_args):
+                settings["encoder"] = "h264_qsv"
+                settings["preset"] = qsv_preset
+                settings["extra_args"] = qsv_args
+                settings["crf"] = None
+                settings["is_gpu"] = True
+                logger.info("✅ Shorts GPU: Intel QuickSync")
+                return settings
+            logger.warning("⚠️ Shorts Intel QuickSync listed but self-test failed; falling back to CPU encoder")
             
         # 4. Apple VideoToolbox (Mac)
         if "h264_videotoolbox" in out:
