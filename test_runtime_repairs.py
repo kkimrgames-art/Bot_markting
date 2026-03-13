@@ -3,6 +3,7 @@ import asyncio
 import unittest
 import tempfile
 import sys
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2556,6 +2557,38 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record["status"], "published")
         self.assertEqual(record["youtube_url"], "https://youtu.be/x")
+
+    def test_reset_stale_processing_keeps_recent_processing_locks(self):
+        def _table_path(table):
+            return os.path.join(self.tempdir.name, f"{table}.json")
+
+        with patch("src.agent.auto_mod_fetcher._auto_mod_local_table_path", side_effect=_table_path), \
+             patch("src.agent.supabase_client.USE_SUPABASE", False):
+            db = AutoModDB("inst-stale-recent")
+            self.assertTrue(db.mark_video_processing("vid-keep", "ch-1"))
+            cleaned = db.reset_stale_processing(stale_minutes=90)
+            self.assertEqual(cleaned, 0)
+            self.assertTrue(db.is_video_locked("vid-keep", "ch-1", stale_minutes=90))
+
+    def test_reset_stale_processing_removes_old_processing_locks(self):
+        def _table_path(table):
+            return os.path.join(self.tempdir.name, f"{table}.json")
+
+        with patch("src.agent.auto_mod_fetcher._auto_mod_local_table_path", side_effect=_table_path), \
+             patch("src.agent.supabase_client.USE_SUPABASE", False):
+            db = AutoModDB("inst-stale-old")
+            self.assertTrue(db.mark_video_processing("vid-old", "ch-1"))
+
+            processed_path = _table_path("auto_mod_processed")
+            with open(processed_path, "r", encoding="utf-8") as fh:
+                rows = json.load(fh)
+            rows[0]["updated_at"] = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+            with open(processed_path, "w", encoding="utf-8") as fh:
+                json.dump(rows, fh, ensure_ascii=False, indent=2)
+
+            cleaned = db.reset_stale_processing(stale_minutes=30)
+            self.assertEqual(cleaned, 1)
+            self.assertFalse(db.is_video_locked("vid-old", "ch-1", stale_minutes=30))
 
     # ────────────────────────────────────────────────
     # FFmpeg Low-Resource Settings Tests

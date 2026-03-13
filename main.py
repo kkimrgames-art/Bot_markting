@@ -78,6 +78,44 @@ def _pid_exists(pid: int) -> bool:
         return False
 
 
+def _is_same_bot_process_running(pid: int) -> bool:
+    if not _pid_exists(pid):
+        return False
+
+    current_script = os.path.normcase(os.path.abspath(__file__))
+    current_name = os.path.normcase(os.path.basename(current_script))
+
+    try:
+        if os.name == "nt":
+            import subprocess
+            cmd = (
+                "$p = Get-CimInstance Win32_Process -Filter "
+                f"\"ProcessId = {pid}\"; if ($p) {{ $p.CommandLine }}"
+            )
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            command_line = os.path.normcase((res.stdout or "").strip().replace('"', ""))
+            if not command_line:
+                return True
+            is_python = "python" in command_line or "py.exe" in command_line
+            return is_python and (current_script in command_line or current_name in command_line)
+
+        proc_cmdline_path = f"/proc/{pid}/cmdline"
+        if os.path.exists(proc_cmdline_path):
+            with open(proc_cmdline_path, "rb") as f:
+                raw = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+            command_line = os.path.normcase(raw)
+            return current_script in command_line or current_name in command_line
+    except Exception:
+        return True
+
+    return True
+
+
 def _multi_instance_allowed() -> bool:
     raw = (os.environ.get("AUTOMODBOT_ALLOW_MULTI_INSTANCE") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -104,7 +142,7 @@ def _acquire_single_instance_lock() -> bool:
             except Exception:
                 old_pid = 0
 
-            if old_pid and old_pid != pid and _pid_exists(old_pid):
+            if old_pid and old_pid != pid and _is_same_bot_process_running(old_pid):
                 logger.error(
                     f"❌ Another AutoModBot instance is already running (PID={old_pid}). "
                     "Stop it first or set AUTOMODBOT_ALLOW_MULTI_INSTANCE=true intentionally."
