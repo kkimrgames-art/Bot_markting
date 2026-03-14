@@ -603,7 +603,7 @@ def _generate_local_platform_metadata(
     content_type: Optional[str] = None,
     source_context: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, list[str], str, bool]:
-    target_lang = (lang or "ar").strip() or "ar"
+    target_lang = _normalize_lang_code(lang)
     topic = hint_title or source_description or str(content_type or "").replace("_", " ")
     try:
         history = _get_meta_history(cfg, channel_key, target_lang) if channel_key else []
@@ -1223,7 +1223,7 @@ def _style_index(seed: str, n: int = 8) -> int:
 def generate_title_and_hashtags(cfg: Config, video_path: str, hint_title: Optional[str] = None, lang: Optional[str] = None, override_key: Optional[str] = None) -> tuple[str, list[str], bool]:
     base_title, base_tags = _fallback_title_and_tags(hint_title)
 
-    target_lang = (lang or os.getenv("GEN_LANG", "ar")).strip()
+    target_lang = _normalize_lang_code(lang or os.getenv("GEN_LANG", "ar"))
     seed = f"{os.path.basename(video_path)}|{base_title}|{target_lang}"
     sidx = _style_index(seed, 8)
     # Content mode context (games/minecraft)
@@ -1318,6 +1318,15 @@ def _is_mostly_english(text: str) -> bool:
     # Count ascii letters
     ascii_count = sum(1 for c in cleaned if ord(c) < 128)
     return (ascii_count / len(cleaned)) > 0.8
+
+
+def _normalize_lang_code(lang: Optional[str]) -> str:
+    raw = (lang or "").strip().lower()
+    if not raw:
+        return "ar"
+    raw = raw.replace("_", "-")
+    primary = raw.split("-", 1)[0].strip()
+    return primary or "ar"
 
 
 def _normalize_meta_text(text: Optional[str]) -> str:
@@ -1421,7 +1430,7 @@ def _append_meta_history(cfg: Config, channel_key: str, lang: str, title: str, d
 
 def generate_title_desc_hashtags(cfg: Config, video_path: str, hint_title: Optional[str] = None, lang: Optional[str] = None, override_key: Optional[str] = None) -> tuple[str, list[str], str, bool]:
     base_title, base_tags = _fallback_title_and_tags(hint_title)
-    target_lang = (lang or os.getenv("GEN_LANG", "ar")).strip()
+    target_lang = _normalize_lang_code(lang or os.getenv("GEN_LANG", "ar"))
     fallback_title, fallback_tags, fallback_desc = _fallback_metadata_bundle(base_title, target_lang)
     seed = f"{os.path.basename(video_path)}|{base_title}|{target_lang}|{(override_key or '').strip()}"
     sidx = _style_index(seed, 8)
@@ -1495,19 +1504,24 @@ def generate_title_desc_hashtags(cfg: Config, video_path: str, hint_title: Optio
             except Exception:
                 pass
                 
-    # 2. If target is NOT English (e.g. Thai, Spanish) but output is mostly English OR Arabic -> Fix to Target Lang
+    # 2. If target is NOT English and output doesn't match language/script -> Fix to Target Lang
     elif len(tl) >= 2 and not tl.startswith("en"):
         title_is_eng = _is_mostly_english(title)
         desc_is_eng = _is_mostly_english(desc)
         title_has_ar = _contains_arabic(title)
         desc_has_ar = _contains_arabic(desc)
         tags_have_ar = any(_contains_arabic(t) for t in (tags or []))
-        need_fix = title_is_eng or desc_is_eng or title_has_ar or desc_has_ar or tags_have_ar
-        if need_fix and tl not in {"ar", "fa", "ur"}:
+        if tl in {"ar", "fa", "ur"}:
+            title_missing_expected_script = not title_has_ar
+            desc_missing_expected_script = not desc_has_ar
+            need_fix = title_is_eng or desc_is_eng or title_missing_expected_script or desc_missing_expected_script
+        else:
+            need_fix = title_is_eng or desc_is_eng or title_has_ar or desc_has_ar or tags_have_ar
+        if need_fix:
             try:
-                if title_is_eng or title_has_ar:
+                if title_is_eng or title_has_ar or (tl in {"ar", "fa", "ur"} and not title_has_ar):
                     title = translate_text(cfg, title, tl) or title
-                if desc_is_eng or desc_has_ar:
+                if desc_is_eng or desc_has_ar or (tl in {"ar", "fa", "ur"} and not desc_has_ar):
                     desc = translate_text(cfg, desc, tl) or desc
                 key_wo_hash = [t[1:] if t.startswith("#") else t for t in (tags or [])]
                 tr_keys = translate_keywords(cfg, key_wo_hash, tl) if 'translate_keywords' in globals() else key_wo_hash
@@ -1574,7 +1588,7 @@ def generate_platform_metadata(
     - Facebook/Instagram: عنوان فقط
     """
     platform = (platform or "youtube").strip().lower()
-    target_lang = (lang or "ar").strip()
+    target_lang = _normalize_lang_code(lang)
 
     cached = _get_cached_platform_metadata(cfg, platform, channel_key, target_lang, video_path, hint_title)
     if cached:
@@ -2419,4 +2433,3 @@ def _generate_fallback_hashtags(
                     hashtags.append(tag)
     
     return hashtags[:count]
-
