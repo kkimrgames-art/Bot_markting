@@ -855,55 +855,12 @@ async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as send_e:
                 video_size_mb = os.path.getsize(preview_path) / (1024 * 1024)
                 if "413" in str(send_e) or "Entity Too Large" in str(send_e) or video_size_mb > 49.5:
-                    await query.edit_message_text(f"⚠️ الفيديو كبير جداً ({video_size_mb:.1f} MB) لإرساله عبر تيليجرام.\nجاري رفعه كفيديو خاص على يوتيوب للمعاينة...")
-                    
-                    try:
-                        from src.agent.config import load_config
-                        from src.bot.channel_manager import ChannelManager
-                        from src.agent.uploader import upload_video_with_token
-                        import asyncio
-                        
-                        cfg = load_config()
-                        cm = ChannelManager()
-                        channel = cm.get_channel(results.get("preview_channel_id", ""))
-                        
-                        if channel and channel.token_path and os.path.exists(channel.token_path):
-                            vid_title = f"[Test] {results.get('preview_video_title') or 'Video'} - AutoModBot"
-                            desc = "Private test video uploaded automatically because it exceeded Telegram's size limit."
-                            vid_id = await asyncio.to_thread(
-                                upload_video_with_token,
-                                cfg,
-                                channel.token_path,
-                                preview_path,
-                                vid_title[:100],
-                                desc,
-                                ["test"],
-                                "private"
-                            )
-                            if vid_id:
-                                yt_url = f"https://youtu.be/{vid_id}"
-                                result_text = (
-                                    f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
-                                    f"⚠️ <i>ملاحظة:</i> الفيديو كبير جداً ({video_size_mb:.1f} MB) لإرساله مباشرة في تيليجرام (الحد الأقصى للمعاينة 50 ميجابايت).\n"
-                                    f"🎬 <b>تم رفع الفيديو تلقائياً على يوتيوب (خاص) للمعاينة:</b>\n"
-                                    f"🔗 {yt_url}\n\n"
-                                    "عملية المعالجة تعمل بشكل سليم وهذا لا يؤثر على مسار النشر الرسمي."
-                                )
-                            else:
-                                raise Exception("فشل الحصول على رابط يوتيوب بعد الرفع.")
-                        else:
-                            result_text = (
-                                f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
-                                f"⚠️ <i>ملاحظة:</i> الفيديو كبير جداً ({video_size_mb:.1f} MB) لعرضه مباشرة في تيليجرام.\n"
-                                "لا يمكن رفعه كبديل على يوتيوب لعدم توفر التوكن أو القناة المحددة للمصدر.\n\n"
-                                "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
-                            )
-                    except Exception as up_err:
-                        result_text = (
-                            f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
-                            f"⚠️ الفيديو كبير جداً ({video_size_mb:.1f} MB) للإرسال عبر تيليجرام.\n"
-                            f"❌ حاول البوت رفعه على يوتيوب كبديل ولكنه فشل: <code>{html.escape(str(up_err)[:200])}</code>"
-                        )
+                    result_text = (
+                        f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
+                        f"⚠️ <i>ملاحظة:</i> الفيديو كبير جداً ({video_size_mb:.1f} MB) لعرضه مباشرة في تيليجرام (الحد الأقصى للمعاينة 50 ميجابايت).\n\n"
+                        f"عملية المعالجة تعمل بشكل سليم وهذا لا يؤثر على الرفع الفعلي لليوتيوب.\n\n"
+                        "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
+                    )
                 else:
                     raise send_e
         else:
@@ -2876,20 +2833,47 @@ async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
             f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
             f"🏁 تأثير النهاية: <code>{html.escape(outro_effect_status)}</code>\n"
-            f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>"
+            f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>\n\n"
+            f"⏱ <b>إعداد الأتمتة التلقائية:</b>\n"
+            f"يرجى تحديد الفترة الزمنية للنشر التلقائي لهذا المصدر، أو الضغط على تخطي للعودة."
         )
+
+        intervals = [
+            ("⚡ 1د", 1), ("⚡ 5د", 5), ("🕙 10د", 10), ("🕙 15د", 15),
+            ("🕒 30د", 30), ("🕓 1س", 60), ("🕓 2س", 120), ("🕓 3س", 180),
+            ("🕘 4س", 240), ("🕘 6س", 360), ("🕗 8س", 480), ("🕗 12س", 720),
+            ("📅 1يوم", 1440), ("📅 2يوم", 2880), ("📅 3يوم", 4320), ("📅 1أسبوع", 10080),
+        ]
+
+        keyboard = []
+        for i in range(0, len(intervals), 4):
+            row = []
+            for label, mins in intervals[i:i+4]:
+                row.append(InlineKeyboardButton(label, callback_data=f"am_sch_int:{mins}"))
+            keyboard.append(row)
+
+        keyboard.append([InlineKeyboardButton("⏭️ تخطي / للمصادر", callback_data="am_sources")])
+
+        context.user_data["am_new_schedule"] = {
+            "channel_id": source_data.get("channel_id", ""),
+            "content_type": source_data.get("content_type", "minecraft_mods"),
+            "source_name": name
+        }
+
+        context.user_data.pop("am_new_source", None)
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_SCHEDULE_LIMIT
+
     else:
         text = "❌ فشل إضافة المصدر. قد يكون مكررًا."
 
-    keyboard = [
-        [InlineKeyboardButton("➕ إضافة مصدر آخر", callback_data="am_add_source")],
-        [InlineKeyboardButton("🔙 المصادر", callback_data="am_sources")],
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-
-    # تنظيف بيانات المستخدم المؤقتة
-    context.user_data.pop("am_new_source", None)
-    return AM_SOURCES
+        keyboard = [
+            [InlineKeyboardButton("➕ إضافة مصدر آخر", callback_data="am_add_source")],
+            [InlineKeyboardButton("🔙 المصادر", callback_data="am_sources")],
+        ]
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        context.user_data.pop("am_new_source", None)
+        return AM_SOURCES
 
 
 async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3108,29 +3092,24 @@ async def schedule_pick_interval(update: Update, context: ContextTypes.DEFAULT_T
         "ما هي المدة التي تريدها بين كل عملية نشر تلقائية؟"
     )
 
-    # أزرار الفترات المحددة مسبقًا كما طلب المستخدم
     intervals = [
-        ("⚡ كل دقيقة", 1),
-        ("🕙 كل 10 دقائق", 10),
-        ("🕒 كل 30 دقيقة", 30),
-        ("🕓 كل ساعة", 60),
-        ("🕓 كل ساعتين", 120),
-        ("🕘 كل 4 ساعات", 240),
-        ("🕗 كل 8 ساعات", 480),
-        ("📅 مرة يوميًا (24س)", 1440),
+        ("⚡ 1د", 1), ("⚡ 5د", 5), ("🕙 10د", 10), ("🕙 15د", 15),
+        ("🕒 30د", 30), ("🕓 1س", 60), ("🕓 2س", 120), ("🕓 3س", 180),
+        ("🕘 4س", 240), ("🕘 6س", 360), ("🕗 8س", 480), ("🕗 12س", 720),
+        ("📅 1يوم", 1440), ("📅 2يوم", 2880), ("📅 3يوم", 4320), ("📅 1أسبوع", 10080),
     ]
 
     keyboard = []
-    # ترتيب زرين في كل صف
-    for i in range(0, len(intervals), 2):
+    # ترتيب 4 أزرار في كل صف
+    for i in range(0, len(intervals), 4):
         row = []
-        for label, mins in intervals[i:i+2]:
+        for label, mins in intervals[i:i+4]:
             row.append(InlineKeyboardButton(label, callback_data=f"am_sch_int:{mins}"))
         keyboard.append(row)
 
     keyboard.append([InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="am_schedule")])
 
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SCHEDULE_LIMIT
 
 async def schedule_pick_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3144,10 +3123,11 @@ async def schedule_pick_limit(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # تحويل الفترة لنص مقروء
     interval_labels = {
-        1: "كل دقيقة", 5: "كل 5 دقائق", 15: "كل 15 دقيقة",
+        1: "كل دقيقة", 5: "كل 5 دقائق", 10: "كل 10 دقائق", 15: "كل 15 دقيقة",
         30: "كل 30 دقيقة", 60: "كل ساعة", 120: "كل ساعتين",
         180: "كل 3 ساعات", 240: "كل 4 ساعات", 360: "كل 6 ساعات",
         480: "كل 8 ساعات", 720: "كل 12 ساعة", 1440: "مرة يوميًا",
+        2880: "كل يومين", 4320: "كل 3 أيام", 10080: "كل أسبوع"
     }
     interval_text = interval_labels.get(interval, f"كل {interval} دقيقة")
 
