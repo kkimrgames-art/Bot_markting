@@ -355,13 +355,23 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
         else:
             normalized["privacy"] = None
     
-    # Horizontal flip setting: true/false (default to None to use global config)
+    # Horizontal flip setting: true/false (None to use global config)
     if "hflip" in settings:
-        normalized["hflip"] = _to_bool(settings.get("hflip"))
+        raw_hflip = settings.get("hflip")
+        if raw_hflip is None:
+            normalized["hflip"] = None
+        elif isinstance(raw_hflip, str) and raw_hflip.strip().lower() in {"default", "inherit", "global", "auto"}:
+            normalized["hflip"] = None
+        else:
+            normalized["hflip"] = _to_bool(raw_hflip)
     
     # Backward compatibility: support hflip_enabled as alias for hflip
-    if "hflip_enabled" in settings:
-        normalized["hflip"] = _to_bool(settings.get("hflip_enabled"))
+    if "hflip_enabled" in settings and "hflip" not in settings:
+        raw_hflip_enabled = settings.get("hflip_enabled")
+        if raw_hflip_enabled is None:
+            normalized["hflip"] = None
+        else:
+            normalized["hflip"] = _to_bool(raw_hflip_enabled)
 
     def _normalize_overlay_animation_config(raw_animation: Any) -> Dict[str, Any]:
         animation_type = "none"
@@ -4247,12 +4257,15 @@ class AutoModFetcher:
 
                                     processing_touch_task = asyncio.create_task(_processing_touch_loop())
 
+                                source_hflip = source_settings.get("hflip")
+                                resolved_hflip = config.get("hflip_enabled", False) if source_hflip is None else bool(source_hflip)
+
                                 out_path = await self.process_video(
                                     dl_path, vid_id,
                                     shorts_format=config.get("shorts_format", "crop"),
                                     enhance=config.get("enhance_enabled", False),
                                     add_cta=config.get("add_cta", True),
-                                    hflip=source_settings.get("hflip", config.get("hflip_enabled", False)),
+                                    hflip=resolved_hflip,
                                     video_type=vid_type,
                                     video_effects=pick_source_video_effects(source_settings),
                                     trim_end=0.0 if (vid_type == "shorts" and tail_trim_seconds > 0) else 1.0,
@@ -4823,6 +4836,7 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
     from src.agent.disk_guard import cleanup_old_files, should_allow_download
     from src.agent.memory_guard import periodic_maintenance as mem_maintenance, should_defer_heavy_work
     from src.agent.error_tracker import get_error_tracker
+    from src.agent.alert_system import get_alert_system
     import asyncio
     import logging
     
@@ -4840,6 +4854,26 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
     db = AutoModDB(instance_id)
     consecutive_loop_errors = 0
     config = _normalize_auto_fetch_loop_config(None, interval_seconds)
+    last_notify_probe_log = 0.0
+
+    async def _loop_notify(msg: str):
+        nonlocal last_notify_probe_log
+        try:
+            alert_system = get_alert_system()
+            bot_app = alert_system.get_bot_app()
+            admin_chat_id = alert_system.get_admin_chat_id()
+            if not bot_app or not admin_chat_id:
+                now = time.time()
+                if now - last_notify_probe_log >= 300:
+                    logger.warning("⚠️ Telegram automation notifications are disabled: admin chat is not configured yet.")
+                    last_notify_probe_log = now
+                return
+            await bot_app.bot.send_message(
+                chat_id=admin_chat_id,
+                text=f"🤖 تحديث الأتمتة:\n\n{msg}",
+            )
+        except Exception as notify_exc:
+            logger.warning(f"⚠️ Failed to send automation notification: {notify_exc}")
     
     # التأكد من وجود الإعدادات في Supabase للنسخة الحالية
     try:
@@ -4899,7 +4933,7 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
                     await asyncio.sleep(extra_wait)
                 
                 logger.info("🔄 [AutoMod] Starting scheduled cycle...")
-                cycle_result = await fetcher.run_cycle()
+                cycle_result = await fetcher.run_cycle(notify_func=_loop_notify)
                 if isinstance(cycle_result, dict) and cycle_result.get("status") == "busy":
                     busy_for = int(cycle_result.get("running_for_seconds") or 0)
                     logger.info(
