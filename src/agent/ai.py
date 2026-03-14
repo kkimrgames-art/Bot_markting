@@ -6,6 +6,7 @@ import re
 import random
 import time
 import threading
+import unicodedata
 from typing import Optional, Tuple, List, Dict, Any
 
 from .config import Config
@@ -74,6 +75,106 @@ def _contains_arabic(text: Optional[str]) -> bool:
     if not text:
         return False
     return bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]", text))
+
+
+_LANG_SCRIPT_RANGES: Dict[str, List[Tuple[int, int]]] = {
+    "ar": [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)],
+    "fa": [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)],
+    "ur": [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)],
+    "th": [(0x0E00, 0x0E7F)],
+    "hi": [(0x0900, 0x097F)],
+    "bn": [(0x0980, 0x09FF)],
+    "ta": [(0x0B80, 0x0BFF)],
+    "te": [(0x0C00, 0x0C7F)],
+    "kn": [(0x0C80, 0x0CFF)],
+    "ml": [(0x0D00, 0x0D7F)],
+    "mr": [(0x0900, 0x097F)],
+    "gu": [(0x0A80, 0x0AFF)],
+    "pa": [(0x0A00, 0x0A7F)],
+    "ne": [(0x0900, 0x097F)],
+    "si": [(0x0D80, 0x0DFF)],
+    "my": [(0x1000, 0x109F), (0xA9E0, 0xA9FF), (0xAA60, 0xAA7F)],
+    "km": [(0x1780, 0x17FF)],
+    "lo": [(0x0E80, 0x0EFF)],
+    "he": [(0x0590, 0x05FF)],
+    "am": [(0x1200, 0x137F)],
+    "ru": [(0x0400, 0x04FF)],
+    "uk": [(0x0400, 0x04FF)],
+    "bg": [(0x0400, 0x04FF)],
+    "sr": [(0x0400, 0x04FF)],
+    "mk": [(0x0400, 0x04FF)],
+    "el": [(0x0370, 0x03FF)],
+    "ka": [(0x10A0, 0x10FF), (0x2D00, 0x2D2F)],
+    "hy": [(0x0530, 0x058F)],
+    "ja": [(0x3040, 0x30FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)],
+    "zh": [(0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF)],
+    "ko": [(0x1100, 0x11FF), (0x3130, 0x318F), (0xAC00, 0xD7AF)],
+}
+
+
+def _char_in_ranges(ch: str, ranges: List[Tuple[int, int]]) -> bool:
+    cp = ord(ch)
+    for lo, hi in ranges:
+        if lo <= cp <= hi:
+            return True
+    return False
+
+
+def _lang_primary(lang: Optional[str]) -> str:
+    raw = (lang or "").strip().lower().replace("_", "-")
+    return raw.split("-", 1)[0].strip() or "ar"
+
+
+def _lang_requires_script_lock(lang: Optional[str]) -> bool:
+    return _lang_primary(lang) in _LANG_SCRIPT_RANGES
+
+
+def _is_allowed_hashtag_char(ch: str) -> bool:
+    if ch == "_":
+        return True
+    if ch.isalnum():
+        return True
+    return unicodedata.category(ch).startswith("M")
+
+
+def _tag_matches_target_script(tag: str, lang: str) -> bool:
+    primary = _lang_primary(lang)
+    ranges = _LANG_SCRIPT_RANGES.get(primary)
+    if not ranges:
+        return True
+    body = (tag or "").lstrip("#")
+    has_target_letter = False
+    for ch in body:
+        if ch == "_" or ch.isdigit():
+            continue
+        cat = unicodedata.category(ch)
+        if cat.startswith("M"):
+            continue
+        if ch.isalpha():
+            if _char_in_ranges(ch, ranges):
+                has_target_letter = True
+                continue
+            return False
+    return has_target_letter
+
+
+def _filter_hashtags_by_target_language(tags: List[str], lang: str) -> List[str]:
+    if not _lang_requires_script_lock(lang):
+        return list(tags or [])
+    required_tag = (os.getenv("SHORTS_REQUIRED_TAG") or "").strip()
+    if required_tag and not required_tag.startswith("#"):
+        required_tag = "#" + required_tag
+    required_key = _hashtag_key(required_tag) if required_tag else ""
+    out: List[str] = []
+    for tag in tags or []:
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+        if required_key and _hashtag_key(tag) == required_key:
+            out.append(tag)
+            continue
+        if _tag_matches_target_script(tag, lang):
+            out.append(tag)
+    return out
 
 
 _AR_HASHTAG_TOKENS = [
@@ -163,13 +264,14 @@ def _sanitize_hashtag(tag: str, lang: str) -> str:
     if is_ar:
         body = _fix_arabic_concatenated_hashtag_body(body)
         body = body.replace(" ", "_")
-        body = re.sub(r"[^0-9A-Za-z_\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+", "", body)
+        body = "".join(ch if _is_allowed_hashtag_char(ch) else "_" for ch in body)
+        body = re.sub(r"_+", "_", body)
         max_len = 32
     else:
         body = body.replace(" ", "_")
-        body = re.sub(r"[^0-9A-Za-z_]+", "", body)
+        body = "".join(ch if _is_allowed_hashtag_char(ch) else "_" for ch in body)
         body = re.sub(r"_+", "_", body)
-        max_len = 26
+        max_len = 32
 
     body = body.strip("_")
     if not body or len(body) < 2:
@@ -289,6 +391,8 @@ def optimize_hashtags(
     limit_desc = max(limit_title, min(int(limit_desc or 24), 40))
 
     cleaned = _sanitize_hashtag_list(tags or [], tl, 60)
+    cleaned = _filter_hashtags_by_target_language(cleaned, tl)
+    allow_global_english_core = not _lang_requires_script_lock(tl)
     topic_plain = _topic_to_plain_text(topic)
     topic_words = {
         part.lower()
@@ -300,11 +404,11 @@ def optimize_hashtags(
 
     # Core tags are allowed only when present in the input or clearly supported by the topic.
     core: List[str] = []
-    if any(_hashtag_key(tag) == "shorts" for tag in cleaned):
+    if allow_global_english_core and any(_hashtag_key(tag) == "shorts" for tag in cleaned):
         ht = _sanitize_hashtag("#shorts", tl)
         if ht and ht not in core:
             core.append(ht)
-    if any(tok in topic_plain.lower() for tok in ["minecraft"]) or any(tok in topic_plain for tok in ["ماين", "كرافت"]):
+    if allow_global_english_core and (any(tok in topic_plain.lower() for tok in ["minecraft"]) or any(tok in topic_plain for tok in ["ماين", "كرافت"])):
         ht = _sanitize_hashtag("#minecraft", tl)
         if ht and ht not in core:
             core.append(ht)
@@ -371,15 +475,24 @@ def optimize_hashtags(
         return (generic_penalty, core_bonus - matches_topic, len(ht), low)
 
     uniq_sorted = sorted(uniq, key=_rank)
+    uniq_sorted = _filter_hashtags_by_target_language(uniq_sorted, tl)
     title_tags = uniq_sorted[:limit_title]
     desc_tags = uniq_sorted[:limit_desc]
     return title_tags, desc_tags
 
-def _fallback_title_and_tags(hint_title: Optional[str]) -> Tuple[str, List[str]]:
-    base = (hint_title or "Short Reaction").strip()
+def _fallback_title_and_tags(hint_title: Optional[str], lang: str = "ar") -> Tuple[str, List[str]]:
+    tl = _lang_primary(lang)
+    base = (hint_title or ("رد فعل قصير" if tl == "ar" else "Short Reaction")).strip()
     if len(base) > 80:
         base = base[:77] + "…"
-    hashtags = ["#shorts", "#reaction"]
+    if tl == "th":
+        hashtags = ["#คลิปสั้น", "#รีแอคชั่น"]
+    elif tl == "ar":
+        hashtags = ["#شورتس", "#رد_فعل"]
+    elif _lang_requires_script_lock(tl):
+        hashtags = [f"#{kw.replace(' ', '_')}" for kw in _fallback_keywords(base, tl)[:2]]
+    else:
+        hashtags = ["#shorts", "#reaction"]
     return base, hashtags
 
 
@@ -410,7 +523,7 @@ def _is_hashtag_only_text(text: Optional[str]) -> bool:
 
 def _topic_to_plain_text(topic: Optional[str]) -> str:
     text = (topic or "").replace("#", " ").replace("_", " ")
-    text = re.sub(r"[^0-9A-Za-z\s\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", " ", text)
+    text = "".join(ch if (ch.isspace() or ch.isalnum() or unicodedata.category(ch).startswith("M")) else " " for ch in text)
     return _collapse_ws(text)
 
 
@@ -1221,7 +1334,7 @@ def _style_index(seed: str, n: int = 8) -> int:
 
 
 def generate_title_and_hashtags(cfg: Config, video_path: str, hint_title: Optional[str] = None, lang: Optional[str] = None, override_key: Optional[str] = None) -> tuple[str, list[str], bool]:
-    base_title, base_tags = _fallback_title_and_tags(hint_title)
+    base_title, base_tags = _fallback_title_and_tags(hint_title, lang or os.getenv("GEN_LANG", "ar"))
 
     target_lang = _normalize_lang_code(lang or os.getenv("GEN_LANG", "ar"))
     seed = f"{os.path.basename(video_path)}|{base_title}|{target_lang}"
@@ -1241,7 +1354,7 @@ def generate_title_and_hashtags(cfg: Config, video_path: str, hint_title: Option
     extra_guidance = ("\n- " + "\n- ".join(extra)) if extra else ""
     prompt = (
         f"TargetLanguage: {target_lang}\n"
-        "Task: Create a high-SEO set of 8-12 UNIQUE hashtags to be used as the YouTube Shorts TITLE. The title MUST be only hashtags separated by spaces (no normal words). Use mainly the target language, but you may mix in 1-3 global English tags like #shorts, #minecraft, #gaming if relevant.\n"
+        "Task: Create a high-SEO set of 8-12 UNIQUE hashtags to be used as the YouTube Shorts TITLE. The title MUST be only hashtags separated by spaces (no normal words). Use ONLY the target language hashtags and do NOT mix hashtags from any other language.\n"
         f"InputHint: {base_title}\n"
         "Constraints:\n"
         "- Title line: ONLY hashtags, no plain text, no quotes.\n"
@@ -1337,7 +1450,7 @@ def _normalize_meta_text(text: Optional[str]) -> str:
         # Preserve hashtag bodies so hashtag-only titles/descriptions can be compared for similarity.
         # Example: "#MinecraftShorts #Funny" -> "minecraftshorts funny"
         s = re.sub(r"#([^\s]+)", r"\1", s)
-        s = re.sub(r"[^\w\s\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", " ", s)
+        s = "".join(ch if (ch.isspace() or ch.isalnum() or ch == "_" or unicodedata.category(ch).startswith("M")) else " " for ch in s)
         s = re.sub(r"\s+", " ", s).strip()
         return s
     except Exception:
@@ -1429,7 +1542,7 @@ def _append_meta_history(cfg: Config, channel_key: str, lang: str, title: str, d
             pass
 
 def generate_title_desc_hashtags(cfg: Config, video_path: str, hint_title: Optional[str] = None, lang: Optional[str] = None, override_key: Optional[str] = None) -> tuple[str, list[str], str, bool]:
-    base_title, base_tags = _fallback_title_and_tags(hint_title)
+    base_title, base_tags = _fallback_title_and_tags(hint_title, lang or os.getenv("GEN_LANG", "ar"))
     target_lang = _normalize_lang_code(lang or os.getenv("GEN_LANG", "ar"))
     fallback_title, fallback_tags, fallback_desc = _fallback_metadata_bundle(base_title, target_lang)
     seed = f"{os.path.basename(video_path)}|{base_title}|{target_lang}|{(override_key or '').strip()}"
@@ -1503,6 +1616,7 @@ def generate_title_desc_hashtags(cfg: Config, video_path: str, hint_title: Optio
                 tags = [f"#{k.strip().replace(' ', '')}" for k in tr_keys if k and k.strip()]
             except Exception:
                 pass
+        tags = _filter_hashtags_by_target_language(_sanitize_hashtag_list(tags or [], tl, 24), tl)
                 
     # 2. If target is NOT English and output doesn't match language/script -> Fix to Target Lang
     elif len(tl) >= 2 and not tl.startswith("en"):
@@ -1530,6 +1644,7 @@ def generate_title_desc_hashtags(cfg: Config, video_path: str, hint_title: Optio
                 tags = [f"#{k.strip().replace(' ', '')}" for k in tr_keys if k and k.strip()]
             except Exception:
                 pass
+        tags = _filter_hashtags_by_target_language(_sanitize_hashtag_list(tags or [], tl, 24), tl)
 
     # Validate format: if model didn't follow expected schema, treat as failure so callers can fallback
     title = (title or "").replace("*", "").strip()
@@ -1826,6 +1941,42 @@ def _fallback_keywords(topic: str, lang: str = "ar") -> List[str]:
 
     if lang in ["ar", "arabic"]:
         return ["موضوع", "لقطة", "فيديو"]
+    if lang in ["th", "thai"]:
+        return ["หัวข้อ", "คลิป", "วิดีโอ"]
+    if lang in ["hi", "hindi", "mr", "marathi", "ne", "nepali"]:
+        return ["विषय", "क्लिप", "वीडियो"]
+    if lang in ["bn", "bengali"]:
+        return ["বিষয়", "ক্লিপ", "ভিডিও"]
+    if lang in ["ta", "tamil"]:
+        return ["தலைப்பு", "கிளிப்", "வீடியோ"]
+    if lang in ["te", "telugu"]:
+        return ["విషయం", "క్లిప్", "వీడియో"]
+    if lang in ["kn", "kannada"]:
+        return ["ವಿಷಯ", "ಕ್ಲಿಪ್", "ವೀಡಿಯೊ"]
+    if lang in ["ml", "malayalam"]:
+        return ["വിഷയം", "ക്ലിപ്പ്", "വീഡിയോ"]
+    if lang in ["gu", "gujarati"]:
+        return ["વિષય", "ક્લિપ", "વિડિઓ"]
+    if lang in ["pa", "punjabi"]:
+        return ["ਵਿਸ਼ਾ", "ਕਲਿੱਪ", "ਵੀਡੀਓ"]
+    if lang in ["my", "burmese"]:
+        return ["ခေါင်းစဉ်", "ကလစ်", "ဗီဒီယို"]
+    if lang in ["km", "khmer"]:
+        return ["ប្រធានបទ", "វីដេអូខ្លី", "វីដេអូ"]
+    if lang in ["lo", "lao"]:
+        return ["ຫົວຂໍ້", "ຄລິບ", "ວິດີໂອ"]
+    if lang in ["am", "amharic"]:
+        return ["ርዕስ", "ክሊፕ", "ቪዲዮ"]
+    if lang in ["he", "hebrew"]:
+        return ["נושא", "קליפ", "וידאו"]
+    if lang in ["el", "greek"]:
+        return ["θέμα", "κλιπ", "βίντεο"]
+    if lang in ["ru", "uk", "bg", "sr", "mk"]:
+        return ["тема", "клип", "видео"]
+    if lang in ["hy", "armenian"]:
+        return ["թեմա", "կլիպ", "տեսանյութ"]
+    if lang in ["ka", "georgian"]:
+        return ["თემა", "კლიპი", "ვიდეო"]
     if lang in ["fr", "french"]:
         return ["sujet", "clip", "video"]
     return ["topic", "clip", "video"]
@@ -1915,7 +2066,7 @@ def generate_seo_keywords(
 
 def _normalize_keyword_kw(s: str) -> str:
     s = (s or "").strip().lower()
-    s = re.sub(r"[^\w\s\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", " ", s)
+    s = "".join(ch if (ch.isspace() or ch.isalnum() or ch == "_" or unicodedata.category(ch).startswith("M")) else " " for ch in s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 

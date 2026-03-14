@@ -828,7 +828,7 @@ def _build_hashtag_only_upload_metadata(
     source_description: str = "",
     source_settings: Any = None,
 ) -> Tuple[str, str, List[str]]:
-    from src.agent.ai import _extract_hashtags_from_text, _keywords_from_hashtags, _sanitize_hashtag_list, optimize_hashtags
+    from src.agent.ai import _extract_hashtags_from_text, _keywords_from_hashtags, _sanitize_hashtag_list, _lang_requires_script_lock, optimize_hashtags
     from src.agent.local_metadata import extract_source_metadata_context
 
     merged_description = merge_source_extra_description(
@@ -862,7 +862,8 @@ def _build_hashtag_only_upload_metadata(
         if clean:
             hashtag_candidates.append(f"#{clean}")
 
-    if is_shorts:
+    strict_local_script = _lang_requires_script_lock(target_lang)
+    if is_shorts and not strict_local_script:
         hashtag_candidates.append("#shorts")
 
     title_tags, description_tags = optimize_hashtags(
@@ -873,21 +874,25 @@ def _build_hashtag_only_upload_metadata(
         limit_desc=18,
     )
 
-    if is_shorts:
+    if is_shorts and not strict_local_script:
         required_title_tags = _sanitize_hashtag_list(["#shorts"], target_lang, 1)
         title_tags = required_title_tags + [tag for tag in title_tags if tag.lower() not in {req.lower() for req in required_title_tags}]
 
     if not title_tags:
         fallback_candidates = list(source_signals.get("hashtags") or [])
-        if is_shorts:
+        if is_shorts and not strict_local_script:
             fallback_candidates.append("#shorts")
-        title_tags = _sanitize_hashtag_list(fallback_candidates or (["#shorts"] if is_shorts else ["#video"]), target_lang, 6)
+        title_tags = _sanitize_hashtag_list(
+            fallback_candidates or (["#shorts"] if (is_shorts and not strict_local_script) else ["#video"]),
+            target_lang,
+            6,
+        )
     if not description_tags:
         description_tags = list(title_tags)
 
     final_title = _join_hashtags(title_tags, 95)
     if not final_title:
-        final_title = "#shorts" if is_shorts else "#video"
+        final_title = "#shorts" if (is_shorts and not strict_local_script) else "#video"
 
     final_description = _join_hashtags(description_tags, 4900)
     if not final_description:
@@ -3694,13 +3699,15 @@ class AutoModFetcher:
 
         try:
             _mark_run_cycle_started()
+            meta_notifications_enabled = bool(force or preview_mode)
             # ========== بدء الدورة ==========
             cycle_start = time.time()
-            await _notify(
-                "🔄 *بدء دورة الجلب التلقائي*\n"
-                f"🆔 النسخة: `{self.instance_id[:20]}`\n"
-                f"🕐 الوقت: `{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}`"
-            )
+            if meta_notifications_enabled:
+                await _notify(
+                    "🔄 *بدء دورة الجلب التلقائي*\n"
+                    f"🆔 النسخة: `{self.instance_id[:20]}`\n"
+                    f"🕐 الوقت: `{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}`"
+                )
 
             # ========== فحص الإعدادات ==========
             config = self.db.get_config()
@@ -3734,15 +3741,18 @@ class AutoModFetcher:
                     schedule_total = max(schedule_total, 1)
                 if target_channel_id or target_content_type:
                     if not active:
-                        await _notify("⚠️ لم يتم العثور على جدول نشر نشط يطابق الاستهداف المطلوب.")
+                        if meta_notifications_enabled:
+                            await _notify("⚠️ لم يتم العثور على جدول نشر نشط يطابق الاستهداف المطلوب.")
                         return {"status": "no_target_schedule", "message": "No matching active schedule"}
                 elif not active:
-                    await _notify("⚠️ لا توجد *جداول نشر نشطة*. أضف جدول نشر أولاً.")
+                    if meta_notifications_enabled:
+                        await _notify("⚠️ لا توجد *جداول نشر نشطة*. أضف جدول نشر أولاً.")
                     return {"status": "no_schedules", "message": "No active schedules"}
 
-            await _notify(
-                f"📋 تم العثور على *{len(active)}* جدول نشر نشط من أصل {max(schedule_total, len(active))}."
-            )
+            if meta_notifications_enabled:
+                await _notify(
+                    f"📋 تم العثور على *{len(active)}* جدول نشر نشط من أصل {max(schedule_total, len(active))}."
+                )
 
             results = {"processed": 0, "published": 0, "failed": 0, "skipped": 0, "waiting_raw_review": 0, "previewed": 0}
             errors_log = []
@@ -3776,20 +3786,22 @@ class AutoModFetcher:
                 if not schedule_force and not self._is_publish_time(schedule):
                     results["skipped"] += 1
                     logger.info(f"⏭ [AutoMod] Skipping schedule {sch_idx}: Not publish time yet (Channel: {channel_id[:10]}...)")
-                    await _notify(
-                        f"⏭ الجدول {sch_idx}: *تخطي* — لم يحن وقت النشر بعد.\n"
-                        f"   📺 القناة: `{channel_id[:20]}...`"
-                    )
+                    if meta_notifications_enabled:
+                        await _notify(
+                            f"⏭ الجدول {sch_idx}: *تخطي* — لم يحن وقت النشر بعد.\n"
+                            f"   📺 القناة: `{channel_id[:20]}...`"
+                        )
                     continue
 
                 # فحص الحد اليومي
                 if not schedule_force and self._reached_daily_limit(schedule):
                     results["skipped"] += 1
                     logger.info(f"⏭ [AutoMod] Skipping schedule {sch_idx}: Daily limit reached (Channel: {channel_id[:10]}...)")
-                    await _notify(
-                        f"⏭ الجدول {sch_idx}: *تخطي* — تم بلوغ الحد اليومي.\n"
-                        f"   📺 القناة: `{channel_id[:20]}...`"
-                    )
+                    if meta_notifications_enabled:
+                        await _notify(
+                            f"⏭ الجدول {sch_idx}: *تخطي* — تم بلوغ الحد اليومي.\n"
+                            f"   📺 القناة: `{channel_id[:20]}...`"
+                        )
                     continue
 
                 logger.info(f"📡 [AutoMod] Processing schedule {sch_idx}... (Channel: {channel_id[:10]}...)")
@@ -3813,12 +3825,14 @@ class AutoModFetcher:
                     ]
                 if not sources_list:
                     logger.info(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
-                    await _notify(
-                        f"⚠️ الجدول {sch_idx}: لا توجد مصادر للقناة `{channel_id[:20]}...`"
-                    )
+                    if meta_notifications_enabled:
+                        await _notify(
+                            f"⚠️ الجدول {sch_idx}: لا توجد مصادر للقناة `{channel_id[:20]}...`"
+                        )
                     continue
 
-                await _notify(f"🔍 تم العثور على *{len(sources_list)}* مصدر للبحث.")
+                if meta_notifications_enabled:
+                    await _notify(f"🔍 تم العثور على *{len(sources_list)}* مصدر للبحث.")
 
                 schedule_done = False
                 for source in sources_list:
@@ -4590,7 +4604,13 @@ class AutoModFetcher:
             elif preview_mode and results.get("previewed"):
                 summary += "\n🧪 تم إنشاء فيديو اختبار نهائي دون أي نشر أو تعديل للحالة الرسمية."
 
-            await _notify(summary)
+            should_send_summary = (
+                meta_notifications_enabled
+                or bool(results["processed"] or results["published"] or results["failed"] or results["waiting_raw_review"])
+                or bool(errors_log)
+            )
+            if should_send_summary:
+                await _notify(summary)
 
             # Mandatory Render cooldown: Stay active but don't start a new cycle for 5 mins
             # This prevents "back-to-back" heavy processing which causes memory leaks/exhaustion

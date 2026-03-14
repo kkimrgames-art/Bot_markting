@@ -133,7 +133,12 @@ _BLOCKED_BRAND_TERMS = {"modetaris"}
 
 
 def _tokenize_text(text: Optional[str]) -> List[str]:
-    return re.findall(r"[0-9A-Za-z\u0600-\u06FF]{2,}", _clean_text(text))
+    tokens = re.findall(r"\w{2,}", _clean_text(text), flags=re.UNICODE)
+    out: List[str] = []
+    for token in tokens:
+        if any(ch.isalpha() for ch in token):
+            out.append(token)
+    return out
 
 
 def _is_stopword(token: Optional[str]) -> bool:
@@ -396,7 +401,9 @@ def _extract_keywords(*parts: Optional[str]) -> List[str]:
     out: List[str] = []
     seen = set()
     raw = " ".join(_clean_text(p) for p in parts if p)
-    for word in re.findall(r"[0-9A-Za-z\u0600-\u06FF]{3,}", raw):
+    for word in re.findall(r"\w{3,}", raw, flags=re.UNICODE):
+        if not any(ch.isalpha() for ch in word):
+            continue
         key = word.casefold()
         if key in common or key in seen:
             continue

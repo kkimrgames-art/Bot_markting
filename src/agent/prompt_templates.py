@@ -171,10 +171,10 @@ class PromptTemplates:
             rules.append(
                 f"2. **LANGUAGE**: Use ONLY {lang} for ALL other hashtags and keywords. The ONLY allowed exception is `{required_tag}`."
             )
-            title_example = f"#Minecraft #Mods {required_tag}"
+            title_example = f"#<tag_in_{lang}_1> #<tag_in_{lang}_2> {required_tag}"
         else:
             rules.append(f"1. **LANGUAGE**: Use ONLY {lang} for ALL hashtags and keywords. Do NOT use any other language.")
-            title_example = "#Minecraft #Mods #Shorts"
+            title_example = f"#<tag_in_{lang}_1> #<tag_in_{lang}_2> #<tag_in_{lang}_3>"
         
         prompt = (
             f"Target Language: {lang}\n"
