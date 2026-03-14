@@ -1405,7 +1405,12 @@ async def _show_description_editor(update: Update, context: ContextTypes.DEFAULT
         keyboard.append([InlineKeyboardButton(f"🗑 حذف: {label}", callback_data=f"am_edit_desc_del:{idx}")])
     keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
     if query:
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        except Exception as e:
+            # Ignore "Message is not modified" error
+            if "Message is not modified" not in str(e):
+                logger.error(f"Error editing message: {e}")
     else:
         await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_EDIT_SOURCE_CHANNEL

@@ -56,23 +56,26 @@ async def edit_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """حفظ اللغة الجديدة"""
     query = update.callback_query
-    await query.answer()
-    
-    _, lang_code, channel_id = query.data.split(':')
-    
-    manager = ChannelManager()
-    manager.update_channel(channel_id, language=lang_code)
-    
-    lang_display = LanguageManager.format_language_display(lang_code)
-    await query.answer(f"✅ تم تغيير اللغة إلى: {lang_display}")
-    
-    # إعادة عرض صفحة القناة
-    from .channel_handlers import view_channel
     try:
-        update.callback_query.data = f"view_channel:{channel_id}"
-    except Exception:
-        pass
-    await view_channel(update, context)
+        _, lang_code, channel_id = query.data.split(':')
+        
+        manager = ChannelManager()
+        manager.update_channel(channel_id, language=lang_code)
+        
+        lang_display = LanguageManager.format_language_display(lang_code)
+        # Answer with short text to avoid timeout
+        await query.answer("✅ تم تغيير اللغة")
+        
+        # إعادة عرض صفحة القناة
+        from .channel_handlers import view_channel
+        try:
+            update.callback_query.data = f"view_channel:{channel_id}"
+        except Exception:
+            pass
+        await view_channel(update, context)
+    except Exception as e:
+        logger.error(f"Error setting language: {e}")
+        await query.answer("❌ حدث خطأ أثناء تغيير اللغة")
 
 
 async def show_more_languages_for_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
