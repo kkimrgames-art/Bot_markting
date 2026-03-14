@@ -346,6 +346,22 @@ def _to_bool(value: Any, default: bool = False) -> bool:
 def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     settings = parse_source_settings(raw_settings)
     normalized = dict(settings)
+    
+    # Privacy setting: public/unlisted/private (default to None to use global config)
+    if "privacy" in settings:
+        privacy = str(settings.get("privacy", "")).strip().lower()
+        if privacy in ["public", "unlisted", "private"]:
+            normalized["privacy"] = privacy
+        else:
+            normalized["privacy"] = None
+    
+    # Horizontal flip setting: true/false (default to None to use global config)
+    if "hflip" in settings:
+        normalized["hflip"] = _to_bool(settings.get("hflip"))
+    
+    # Backward compatibility: support hflip_enabled as alias for hflip
+    if "hflip_enabled" in settings:
+        normalized["hflip"] = _to_bool(settings.get("hflip_enabled"))
 
     def _normalize_overlay_animation_config(raw_animation: Any) -> Dict[str, Any]:
         animation_type = "none"
@@ -1771,6 +1787,50 @@ class AutoModDB:
             return True
         except Exception as e:
             logger.error(f"Failed to remove source: {e}")
+            return False
+    
+    def delete_processed_videos_for_source(self, source_id: str) -> bool:
+        """حذف جميع سجلات الفيديوهات المعالجة لمصدر معين"""
+        try:
+            from src.agent.supabase_client import supabase_select, supabase_delete
+            
+            # Get all sources to find which channel(s) this source belongs to
+            sources = self.get_sources()
+            source = next((s for s in sources if s.get("id") == source_id), None)
+            
+            if not source:
+                logger.warning(f"Source {source_id} not found, skipping processed videos deletion")
+                return False
+                
+            channel_id = source.get("channel_id")
+            
+            # Delete all processed videos for this channel (since we don't track source_id in processed table)
+            records = supabase_select("auto_mod_processed", {
+                "instance_id": self.instance_id,
+                "channel_id": channel_id,
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "instance_id": self.instance_id,
+                "channel_id": channel_id,
+            })) or []
+            
+            deleted_count = 0
+            for rec in records:
+                _local_delete_row("auto_mod_processed", "id", rec["id"])
+                supabase_delete(
+                    "auto_mod_processed",
+                    "id",
+                    rec["id"],
+                    fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
+                )
+                deleted_count += 1
+                
+            if deleted_count > 0:
+                logger.info(f"Deleted {deleted_count} processed video records for source {source_id}")
+                
+            self._clear_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete processed videos for source {source_id}: {e}")
             return False
 
     def toggle_source(self, source_id: str, enabled: bool) -> bool:
@@ -4192,7 +4252,7 @@ class AutoModFetcher:
                                     shorts_format=config.get("shorts_format", "crop"),
                                     enhance=config.get("enhance_enabled", False),
                                     add_cta=config.get("add_cta", True),
-                                    hflip=config.get("hflip_enabled", False),
+                                    hflip=source_settings.get("hflip", config.get("hflip_enabled", False)),
                                     video_type=vid_type,
                                     video_effects=pick_source_video_effects(source_settings),
                                     trim_end=0.0 if (vid_type == "shorts" and tail_trim_seconds > 0) else 1.0,
@@ -4622,7 +4682,8 @@ class AutoModFetcher:
                 source_settings=source_settings,
             )
             
-            privacy = getattr(channel, "privacy", "unlisted") or "unlisted"
+            # Use per-source privacy setting if configured, otherwise channel default
+            privacy = source_settings.get("privacy") or getattr(channel, "privacy", "unlisted") or "unlisted"
 
             loop = asyncio.get_running_loop()
             import functools
