@@ -533,6 +533,36 @@ def _video_effect_status(settings: Dict[str, Any], target: str) -> str:
     return "❌ بدون تأثير"
 
 
+def _source_privacy_status(settings: Dict[str, Any]) -> str:
+    privacy = str((settings or {}).get("privacy") or "").strip().lower()
+    if privacy == "public":
+        return "🌍 علني"
+    if privacy == "private":
+        return "🔒 خاص"
+    if privacy == "unlisted":
+        return "🔗 غير مدرج"
+    return "⚙️ حسب القناة"
+
+
+def _source_hflip_status(settings: Dict[str, Any]) -> str:
+    if "hflip" not in (settings or {}):
+        return "⚙️ حسب الإعدادات العامة"
+    return "✅ مفعل" if bool((settings or {}).get("hflip")) else "❌ معطل"
+
+
+def _set_draft_source_hflip(context: ContextTypes.DEFAULT_TYPE, value: Optional[bool]) -> Dict[str, Any]:
+    draft = context.user_data.setdefault("am_new_source", {})
+    current = normalize_source_settings(draft.get("source_settings") or {})
+    raw = dict(current)
+    raw.pop("hflip", None)
+    raw.pop("hflip_enabled", None)
+    if value is not None:
+        raw["hflip"] = bool(value)
+    normalized = normalize_source_settings(raw)
+    draft["source_settings"] = normalized
+    return normalized
+
+
 async def _ask_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📝 <b>أدخل اسمًا مختصرًا للمصدر:</b>\n\n"
@@ -624,6 +654,10 @@ async def _continue_source_creation(update: Update, context: ContextTypes.DEFAUL
             return await _ask_source_video_effect_kind(update, context, "intro")
         if not draft.get("outro_effect_configured"):
             return await _ask_source_video_effect_kind(update, context, "outro")
+        if not draft.get("hflip_configured"):
+            return await _ask_source_hflip(update, context)
+        if not draft.get("privacy_configured"):
+            return await _ask_source_privacy(update, context)
         return await _ask_source_name(update, context)
     return await _ask_source_url(update, context)
 
@@ -887,6 +921,7 @@ async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
     وظيفة مجدولة لتشغيل دورة جلب تلقائي في الخلفية
     """
     from ...agent.config import load_config
+    from ...agent.alert_system import get_alert_system
     cfg = load_config()
     db = _get_db()
     config = db.get_config()
@@ -897,6 +932,11 @@ async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
 
     admin_ids = cfg.TELEGRAM_ALLOWED_USER_IDS
     admin_id = admin_ids[0] if admin_ids else None
+    if not admin_id:
+        try:
+            admin_id = get_alert_system().get_admin_chat_id()
+        except Exception:
+            admin_id = None
     
     if not admin_id:
         logger.info("🧪 [AutoMod] Running in silent mode (no admin IDs configured).")
@@ -1117,13 +1157,17 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     tail_trim_status = _tail_trim_status(settings)
     intro_effect_status = _video_effect_status(settings, "intro")
     outro_effect_status = _video_effect_status(settings, "outro")
+    hflip_status = _source_hflip_status(settings)
+    privacy_status = _source_privacy_status(settings)
 
     text = (
         f"✏️ <b>تعديل المصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
         f"نوع الفيديوهات: <code>{html.escape(dur_label)}</code>\n"
+        f"🔒 خصوصية النشر: <code>{html.escape(privacy_status)}</code>\n"
         f"🎬 فيس كام: <code>{html.escape(fc_label)}</code>\n"
         f"📝 نص داخل الشورتس: <code>{html.escape(overlay_status)}</code>\n"
         f"📄 نص إضافي في الوصف: <code>{html.escape(desc_status)}</code>\n"
+        f"↔️ قلب الفيديو: <code>{html.escape(hflip_status)}</code>\n"
         f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
         f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
         f"🏁 تأثير النهاية: <code>{html.escape(outro_effect_status)}</code>\n"
@@ -1134,9 +1178,11 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = [
         [InlineKeyboardButton("📺 تغيير القناة المستهدفة", callback_data="am_edit_ch_start")],
         [InlineKeyboardButton("⏳ تغيير نوع الفيديوهات (المدة)", callback_data="am_edit_dur_start")],
+        [InlineKeyboardButton(f"🔒 خصوصية النشر: {privacy_status}", callback_data="am_edit_priv_menu")],
         [InlineKeyboardButton(f"🎬 فيس كام: {fc_label}", callback_data="am_edit_fc_start")],
         [InlineKeyboardButton(f"📝 إدارة نص الشورتس: {overlay_status}", callback_data="am_edit_ov_menu")],
         [InlineKeyboardButton(f"📄 إدارة نص الوصف: {desc_status}", callback_data="am_edit_desc_menu")],
+        [InlineKeyboardButton(f"↔️ قلب الفيديو: {hflip_status}", callback_data="am_edit_hflip_menu")],
         [InlineKeyboardButton(f"✂️ قص النهاية: {tail_trim_status}", callback_data="am_edit_trim_menu")],
         [InlineKeyboardButton(f"✨ تأثير البداية: {intro_effect_status}", callback_data="am_edit_fx_menu:intro")],
         [InlineKeyboardButton(f"🏁 تأثير النهاية: {outro_effect_status}", callback_data="am_edit_fx_menu:outro")],
@@ -1188,6 +1234,99 @@ async def _show_tail_trim_editor(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_EDIT_SOURCE_CHANNEL
+
+
+async def _show_edit_source_privacy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    privacy_status = _source_privacy_status(settings)
+    text = (
+        f"🔒 <b>خصوصية نشر الفيديوهات</b>\n"
+        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
+        f"الحالة الحالية: <code>{html.escape(privacy_status)}</code>\n\n"
+        "اختر الخصوصية التي ستُستخدم عند رفع الفيديوهات من هذا المصدر."
+    )
+    keyboard = [
+        [InlineKeyboardButton("🌍 علني (Public)", callback_data="am_edit_priv:public")],
+        [InlineKeyboardButton("🔗 غير مدرج (Unlisted)", callback_data="am_edit_priv:unlisted")],
+        [InlineKeyboardButton("🔒 خاص (Private)", callback_data="am_edit_priv:private")],
+        [InlineKeyboardButton("⚙️ حسب خصوصية القناة", callback_data="am_edit_priv:default")],
+        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+    ]
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_privacy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    return await _show_edit_source_privacy_menu(update, context)
+
+
+async def edit_source_privacy_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    value = (query.data.split(":", 1)[1] if ":" in (query.data or "") else "").strip().lower()
+    if value not in {"public", "private", "unlisted", "default"}:
+        return await _show_edit_source_privacy_menu(update, context)
+    target_value = None if value == "default" else value
+    success = await _update_edit_source_settings(context, {"privacy": target_value})
+    await query.answer("✅ تم تحديث الخصوصية" if success else "❌ تعذر تحديث الخصوصية", show_alert=True)
+    return await _show_edit_source_menu(update, context)
+
+
+async def _show_edit_source_hflip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    hflip_status = _source_hflip_status(settings)
+    text = (
+        f"↔️ <b>إعداد قلب الفيديو أفقيًا (Mirror)</b>\n"
+        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
+        f"الحالة الحالية: <code>{html.escape(hflip_status)}</code>\n\n"
+        "اختر طريقة تطبيق القلب لهذا المصدر."
+    )
+    keyboard = [
+        [InlineKeyboardButton("✅ تفعيل للمصدر", callback_data="am_edit_hflip:on")],
+        [InlineKeyboardButton("❌ تعطيل للمصدر", callback_data="am_edit_hflip:off")],
+        [InlineKeyboardButton("⚙️ حسب الإعدادات العامة", callback_data="am_edit_hflip:default")],
+        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+    ]
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_hflip_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    return await _show_edit_source_hflip_menu(update, context)
+
+
+async def edit_source_hflip_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    choice = (query.data.split(":", 1)[1] if ":" in (query.data or "") else "").strip().lower()
+    if choice == "on":
+        success = await _update_edit_source_settings(context, {"hflip": True})
+    elif choice == "off":
+        success = await _update_edit_source_settings(context, {"hflip": False})
+    elif choice == "default":
+        success = await _update_edit_source_settings(context, {"hflip": None})
+    else:
+        return await _show_edit_source_hflip_menu(update, context)
+    await query.answer("✅ تم تحديث إعداد قلب الفيديو" if success else "❌ تعذر تحديث إعداد قلب الفيديو", show_alert=True)
+    return await _show_edit_source_menu(update, context)
 
 
 async def _show_video_effect_editor(update: Update, context: ContextTypes.DEFAULT_TYPE, target: str):
@@ -2715,6 +2854,8 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["am_new_source"]["tail_trim_configured"] = False
     context.user_data["am_new_source"]["intro_effect_configured"] = False
     context.user_data["am_new_source"]["outro_effect_configured"] = False
+    context.user_data["am_new_source"]["hflip_configured"] = False
+    context.user_data["am_new_source"]["privacy_configured"] = False
 
     return await _ask_source_tail_trim(update, context)
 
@@ -2757,7 +2898,7 @@ async def add_source_choose_video_effect_kind(update: Update, context: ContextTy
     if effect_type == "none":
         _update_draft_source_settings(context, {"video_effects": {target: _build_video_effect_config("none")}})
         context.user_data.setdefault("am_new_source", {})[f"{target}_effect_configured"] = True
-        return await (_ask_source_video_effect_kind(update, context, "outro") if target == "intro" else _ask_source_name(update, context))
+        return await (_ask_source_video_effect_kind(update, context, "outro") if target == "intro" else _continue_source_creation(update, context))
 
     return await _ask_source_video_effect_duration(update, context, target, effect_type)
 
@@ -2778,7 +2919,80 @@ async def add_source_choose_video_effect_duration(update: Update, context: Conte
 
     _update_draft_source_settings(context, {"video_effects": {target: _build_video_effect_config(effect_type, duration)}})
     context.user_data.setdefault("am_new_source", {})[f"{target}_effect_configured"] = True
-    return await (_ask_source_video_effect_kind(update, context, "outro") if target == "intro" else _ask_source_name(update, context))
+    return await (_ask_source_video_effect_kind(update, context, "outro") if target == "intro" else _continue_source_creation(update, context))
+
+
+async def _ask_source_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings = _draft_source_settings(context)
+    privacy_status = _source_privacy_status(settings)
+    text = (
+        "🔒 <b>اختر خصوصية النشر لهذا المصدر</b> <i>(اختياري)</i>\n\n"
+        f"الحالة الحالية: <code>{html.escape(privacy_status)}</code>\n\n"
+        "سيتم استخدام هذا الخيار عند نشر الفيديوهات المجلوبة من هذا المصدر."
+    )
+    keyboard = [
+        [InlineKeyboardButton("🌍 علني (Public)", callback_data="am_src_privacy:public")],
+        [InlineKeyboardButton("🔗 غير مدرج (Unlisted)", callback_data="am_src_privacy:unlisted")],
+        [InlineKeyboardButton("🔒 خاص (Private)", callback_data="am_src_privacy:private")],
+        [InlineKeyboardButton("⚙️ حسب خصوصية القناة", callback_data="am_src_privacy:default")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+    ]
+    query = update.callback_query
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_ADD_SOURCE_CUSTOMIZE
+
+
+async def _ask_source_hflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings = _draft_source_settings(context)
+    hflip_status = _source_hflip_status(settings)
+    text = (
+        "↔️ <b>قلب الفيديو أفقيًا (Mirror)</b> <i>(اختياري)</i>\n\n"
+        f"الحالة الحالية: <code>{html.escape(hflip_status)}</code>\n\n"
+        "عند التفعيل سيتم قلب الفيديو من اليمين إلى اليسار لهذا المصدر فقط."
+    )
+    keyboard = [
+        [InlineKeyboardButton("✅ تفعيل للمصدر", callback_data="am_src_hflip:on")],
+        [InlineKeyboardButton("❌ تعطيل للمصدر", callback_data="am_src_hflip:off")],
+        [InlineKeyboardButton("⚙️ حسب الإعدادات العامة", callback_data="am_src_hflip:default")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+    ]
+    query = update.callback_query
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_ADD_SOURCE_CUSTOMIZE
+
+
+async def add_source_choose_hflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    choice = (query.data.split(":", 1)[1] if ":" in (query.data or "") else "").strip().lower()
+    if choice == "on":
+        _set_draft_source_hflip(context, True)
+    elif choice == "off":
+        _set_draft_source_hflip(context, False)
+    elif choice == "default":
+        _set_draft_source_hflip(context, None)
+    else:
+        return await _ask_source_hflip(update, context)
+    context.user_data.setdefault("am_new_source", {})["hflip_configured"] = True
+    return await _continue_source_creation(update, context)
+
+
+async def add_source_choose_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    choice = (query.data.split(":", 1)[1] if ":" in (query.data or "") else "").strip().lower()
+    if choice not in {"public", "private", "unlisted", "default"}:
+        return await _ask_source_privacy(update, context)
+    value = None if choice == "default" else choice
+    _update_draft_source_settings(context, {"privacy": value})
+    context.user_data.setdefault("am_new_source", {})["privacy_configured"] = True
+    return await _continue_source_creation(update, context)
 
 
 async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2826,14 +3040,18 @@ async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tail_trim_status = _tail_trim_status(source_settings)
         intro_effect_status = _video_effect_status(source_settings, "intro")
         outro_effect_status = _video_effect_status(source_settings, "outro")
+        hflip_status = _source_hflip_status(source_settings)
         facecam_status = _facecam_status(source_settings)
+        privacy_status = _source_privacy_status(source_settings)
         text = (
             f"✅ <b>تم إضافة المصدر بنجاح!</b>\n\n"
             f"📛 الاسم: <code>{html.escape(name)}</code>\n"
             f"📦 النوع: <code>{html.escape(source_data.get('content_type', 'minecraft_mods'))}</code>\n"
             f"🔗 الرابط: <code>{html.escape(source_data.get('source_url', '')[:50])}</code>\n"
+            f"🔒 الخصوصية: <code>{html.escape(privacy_status)}</code>\n"
             f"📝 نص الشورتس: <code>{html.escape(overlay_status)}</code>\n"
             f"🎬 Facecam: <code>{html.escape(facecam_status)}</code>\n"
+            f"↔️ قلب الفيديو: <code>{html.escape(hflip_status)}</code>\n"
             f"📄 نص الوصف: <code>{html.escape(desc_status)}</code>\n"
             f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
             f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
@@ -3623,6 +3841,8 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             ],
             AM_EDIT_SOURCE_CHANNEL: [
                 CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
+                CallbackQueryHandler(edit_source_privacy_menu, pattern=r"^am_edit_priv_menu$"),
+                CallbackQueryHandler(edit_source_hflip_menu, pattern=r"^am_edit_hflip_menu$"),
                 CallbackQueryHandler(edit_source_overlay_menu, pattern=r"^am_edit_ov_menu$"),
                 CallbackQueryHandler(edit_source_description_menu, pattern=r"^am_edit_desc_menu$"),
                 CallbackQueryHandler(edit_source_tail_trim_menu, pattern=r"^am_edit_trim_menu$"),
@@ -3648,6 +3868,8 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(edit_source_description_mode, pattern=r"^am_edit_desc_mode:"),
                 CallbackQueryHandler(edit_source_description_placement, pattern=r"^am_edit_desc_place:"),
                 CallbackQueryHandler(edit_source_description_delete, pattern=r"^am_edit_desc_del:"),
+                CallbackQueryHandler(edit_source_privacy_set, pattern=r"^am_edit_priv:"),
+                CallbackQueryHandler(edit_source_hflip_set, pattern=r"^am_edit_hflip:"),
                 CallbackQueryHandler(edit_source_raw_review_toggle, pattern=r"^am_edit_raw_toggle$"),
                 CallbackQueryHandler(edit_source_choose_channel, pattern=r"^am_edit_ch:"),
                 CallbackQueryHandler(edit_source_choose_duration, pattern=r"^am_set_dur:"),
@@ -3697,6 +3919,8 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(add_source_choose_tail_trim, pattern=r"^am_src_trim:"),
                 CallbackQueryHandler(add_source_choose_video_effect_kind, pattern=r"^am_src_fx_kind:"),
                 CallbackQueryHandler(add_source_choose_video_effect_duration, pattern=r"^am_src_fx_dur:"),
+                CallbackQueryHandler(add_source_choose_hflip, pattern=r"^am_src_hflip:"),
+                CallbackQueryHandler(add_source_choose_privacy, pattern=r"^am_src_privacy:"),
                 CallbackQueryHandler(add_source_choose_overlay_enabled, pattern=r"^am_src_ov:"),
                 CallbackQueryHandler(add_source_overlay_mode, pattern=r"^am_src_ov_mode:"),
                 CallbackQueryHandler(add_source_overlay_timing, pattern=r"^am_src_ov_time:"),
