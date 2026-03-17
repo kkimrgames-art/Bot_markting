@@ -698,6 +698,34 @@ async def main():
         base_restart_delay=30,
     )
 
+    # 3d. Job Worker (Queue Processor - Separate Process)
+    async def _worker_process_supervisor():
+        """Starts and monitors the dedicated worker process."""
+        from src.agent.worker import run_worker_process
+        import multiprocessing
+        
+        while True:
+            # Start worker in a separate process to avoid blocking the main asyncio loop
+            # This is critical for Render Free Tier to keep Heartbeat/Webserver responsive
+            # even when FFmpeg is using 100% CPU.
+            p = multiprocessing.Process(target=run_worker_process, daemon=True)
+            p.start()
+            logger.info(f"👷 Worker process started (PID: {p.pid})")
+            
+            # Monitor loop
+            while p.is_alive():
+                await asyncio.sleep(5)
+                
+            logger.warning(f"⚠️ Worker process died (Exit Code: {p.exitcode}). Restarting in 5s...")
+            await asyncio.sleep(5)
+
+    await supervisor.register(
+        "job_worker_supervisor",
+        _worker_process_supervisor,
+        max_restarts=100,
+        base_restart_delay=5,
+    )
+
     # 4. تشغيل البوت (المهمة الرئيسية — تبقى في الـ foreground)
     logger.info("🤖 Starting Telegram bot...")
     if use_webhook:
