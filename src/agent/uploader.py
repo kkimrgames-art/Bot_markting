@@ -325,6 +325,91 @@ def is_youtube_quota_error(exc: Exception) -> bool:
     return any(r in msg for r in reasons)
 
 
+def youtube_channel_restriction_details(exc: Exception) -> Tuple[bool, str]:
+    try:
+        if HttpError is not None and isinstance(exc, HttpError):
+            status = None
+            try:
+                status = int(getattr(getattr(exc, "resp", None), "status", 0) or 0)
+            except Exception:
+                status = None
+
+            content_str = ""
+            try:
+                content = getattr(exc, "content", None)
+                if content:
+                    if isinstance(content, (bytes, bytearray)):
+                        content_str = content.decode("utf-8", "ignore")
+                    else:
+                        content_str = str(content)
+            except Exception:
+                content_str = ""
+
+            payload = None
+            try:
+                payload = json.loads(content_str) if content_str else None
+            except Exception:
+                payload = None
+
+            reasons = set()
+            message = ""
+            try:
+                errors = (payload.get("error") or {}).get("errors") or [] if isinstance(payload, dict) else []
+                for e in errors:
+                    if isinstance(e, dict) and e.get("reason"):
+                        reasons.add(str(e.get("reason")))
+                    if isinstance(e, dict) and not message and e.get("message"):
+                        message = str(e.get("message"))
+                if not message and isinstance(payload, dict):
+                    message = str((payload.get("error") or {}).get("message") or "")
+            except Exception:
+                reasons = set()
+
+            msg_low = (message or str(exc) or "").lower()
+            known_reasons = {
+                "youtubeSignupRequired",
+                "forbidden",
+                "accountSuspended",
+                "channelSuspended",
+                "accountDisabled",
+                "uploadBlocked",
+                "uploadLimitExceeded",
+                "uploadRestricted",
+                "videoRejected",
+                "policyViolation",
+                "copyright",
+                "termsOfService",
+            }
+
+            if status in {400, 401, 403, 409, 423, 429}:
+                if reasons.intersection(known_reasons):
+                    reason = sorted(reasons.intersection(known_reasons))[0]
+                    detail = message or str(exc)
+                    return True, f"{reason}: {detail}"[:400]
+
+                if any(s in msg_low for s in [
+                    "suspend",
+                    "terminated",
+                    "disabled",
+                    "forbidden",
+                    "not eligible",
+                    "not allowed",
+                    "restricted",
+                    "blocked",
+                    "this account",
+                    "this channel",
+                    "community",
+                    "guidelines",
+                    "copyright",
+                    "terms",
+                    "policy",
+                ]):
+                    return True, (message or str(exc) or "restricted")[:400]
+    except Exception:
+        pass
+    return False, ""
+
+
 def is_retryable_error(exc: Exception) -> bool:
     # HttpError handling
     try:

@@ -64,6 +64,7 @@ from urllib.parse import parse_qs, urlparse
 
 from src.utils.resilient_fs import ResilientFS
 from src.agent.config import load_config
+from src.agent.job_queue import JobQueue
 from src.bot.persistence import (
     has_pending_raw_reviews,
     get_pending_raw_review,
@@ -354,6 +355,16 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
             normalized["privacy"] = privacy
         else:
             normalized["privacy"] = None
+            
+    # Video type filter: shorts_only (default to None to auto-detect)
+    if "shorts_only" in settings:
+        raw_shorts_only = settings.get("shorts_only")
+        if raw_shorts_only is None:
+            normalized["shorts_only"] = None
+        elif isinstance(raw_shorts_only, str) and raw_shorts_only.strip().lower() in {"default", "inherit", "global", "auto"}:
+            normalized["shorts_only"] = None
+        else:
+            normalized["shorts_only"] = _to_bool(raw_shorts_only)
     
     # Horizontal flip setting: true/false (None to use global config)
     if "hflip" in settings:
@@ -753,10 +764,14 @@ def _normalize_youtube_watch_url(url: Any, fallback_id: Any = None) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, source_url: Any = None) -> str:
+def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, source_url: Any = None, source_settings: Any = None) -> str:
     explicit_video_type = str((video or {}).get("video_type") or "").strip().lower()
     if explicit_video_type in ("shorts", "long"):
         return explicit_video_type
+
+    # Check if source has shorts_only setting enabled
+    if source_settings and _to_bool(source_settings.get("shorts_only"), False):
+        return "shorts"
 
     platform = str(src_platform or "").strip().lower()
     if ("shorts" in platform) or ("reels" in platform):
@@ -1621,6 +1636,13 @@ class AutoModDB:
     def __init__(self, instance_id: str = None):
         self.instance_id = instance_id or get_instance_id()
 
+    def _supabase_primary_storage(self) -> bool:
+        try:
+            val = (os.environ.get("SUPABASE_PRIMARY_STORAGE") or "").strip().lower()
+            return val in {"1", "true", "yes", "on"}
+        except Exception:
+            return False
+
     # ---------- الإعدادات العامة ----------
 
     def get_config(self, use_cache: bool = True) -> Dict[str, Any]:
@@ -1661,13 +1683,23 @@ class AutoModDB:
             from src.agent.supabase_client import supabase_upsert
             config["instance_id"] = self.instance_id
             config["updated_at"] = datetime.now(timezone.utc).isoformat()
-            _local_upsert_row("auto_mod_config", config, key_field="instance_id")
-            supabase_upsert(
-                "auto_mod_config",
-                config,
-                key_field="instance_id",
-                fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
-            )
+
+            primary = self._supabase_primary_storage()
+            if primary:
+                supabase_upsert(
+                    "auto_mod_config",
+                    config,
+                    key_field="instance_id",
+                    fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
+                )
+            else:
+                _local_upsert_row("auto_mod_config", config, key_field="instance_id")
+                supabase_upsert(
+                    "auto_mod_config",
+                    config,
+                    key_field="instance_id",
+                    fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
+                )
             
             # تحديث التخزين المؤقت
             _config_cache[self.instance_id] = (time.time(), config)
@@ -1731,13 +1763,23 @@ class AutoModDB:
             payload["id"] = source.get("id", source_id)
             payload["instance_id"] = source.get("instance_id", self.instance_id)
             payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-            _local_upsert_row("auto_mod_sources", payload, key_field="id")
-            supabase_upsert(
-                "auto_mod_sources",
-                payload,
-                key_field="id",
-                fallback_local=lambda data: _local_upsert_row("auto_mod_sources", data, key_field="id"),
-            )
+
+            primary = self._supabase_primary_storage()
+            if primary:
+                supabase_upsert(
+                    "auto_mod_sources",
+                    payload,
+                    key_field="id",
+                    fallback_local=lambda data: _local_upsert_row("auto_mod_sources", data, key_field="id"),
+                )
+            else:
+                _local_upsert_row("auto_mod_sources", payload, key_field="id")
+                supabase_upsert(
+                    "auto_mod_sources",
+                    payload,
+                    key_field="id",
+                    fallback_local=lambda data: _local_upsert_row("auto_mod_sources", data, key_field="id"),
+                )
             self._clear_cache()
             return True
         except Exception as e:
@@ -1765,22 +1807,40 @@ class AutoModDB:
             merged_settings = merge_source_settings(facecam_settings, source_settings)
             if merged_settings:
                 data["settings"] = merged_settings
-            _local_upsert_row(
-                "auto_mod_sources",
-                data,
-                key_field="id",
-                on_conflict="instance_id,channel_id,source_url",
-            )
-            supabase_upsert(
-                "auto_mod_sources", data, key_field="id",
-                fallback_local=lambda payload: _local_upsert_row(
+
+            primary = self._supabase_primary_storage()
+            if primary:
+                supabase_upsert(
                     "auto_mod_sources",
-                    payload,
+                    data,
+                    key_field="id",
+                    fallback_local=lambda payload: _local_upsert_row(
+                        "auto_mod_sources",
+                        payload,
+                        key_field="id",
+                        on_conflict="instance_id,channel_id,source_url",
+                    ),
+                    on_conflict="instance_id,channel_id,source_url",
+                )
+            else:
+                _local_upsert_row(
+                    "auto_mod_sources",
+                    data,
                     key_field="id",
                     on_conflict="instance_id,channel_id,source_url",
-                ),
-                on_conflict="instance_id,channel_id,source_url"
-            )
+                )
+                supabase_upsert(
+                    "auto_mod_sources",
+                    data,
+                    key_field="id",
+                    fallback_local=lambda payload: _local_upsert_row(
+                        "auto_mod_sources",
+                        payload,
+                        key_field="id",
+                        on_conflict="instance_id,channel_id,source_url",
+                    ),
+                    on_conflict="instance_id,channel_id,source_url",
+                )
             self._clear_cache()
             return True
         except Exception as e:
@@ -1791,13 +1851,22 @@ class AutoModDB:
         """حذف مصدر جلب"""
         try:
             from src.agent.supabase_client import supabase_delete
-            _local_delete_row("auto_mod_sources", "id", source_id)
-            supabase_delete(
-                "auto_mod_sources",
-                "id",
-                source_id,
-                fallback_local=lambda key: _local_delete_row("auto_mod_sources", "id", key),
-            )
+            primary = self._supabase_primary_storage()
+            if primary:
+                supabase_delete(
+                    "auto_mod_sources",
+                    "id",
+                    source_id,
+                    fallback_local=lambda key: _local_delete_row("auto_mod_sources", "id", key),
+                )
+            else:
+                _local_delete_row("auto_mod_sources", "id", source_id)
+                supabase_delete(
+                    "auto_mod_sources",
+                    "id",
+                    source_id,
+                    fallback_local=lambda key: _local_delete_row("auto_mod_sources", "id", key),
+                )
             self._clear_cache()
             return True
         except Exception as e:
@@ -1951,13 +2020,22 @@ class AutoModDB:
             payload.update(updates or {})
             payload["instance_id"] = schedule.get("instance_id", self.instance_id)
             payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-            _local_upsert_row("auto_mod_schedule", payload, key_field="id")
-            supabase_upsert(
-                "auto_mod_schedule",
-                payload,
-                key_field="id",
-                fallback_local=lambda data: _local_upsert_row("auto_mod_schedule", data, key_field="id"),
-            )
+            primary = self._supabase_primary_storage()
+            if primary:
+                supabase_upsert(
+                    "auto_mod_schedule",
+                    payload,
+                    key_field="id",
+                    fallback_local=lambda data: _local_upsert_row("auto_mod_schedule", data, key_field="id"),
+                )
+            else:
+                _local_upsert_row("auto_mod_schedule", payload, key_field="id")
+                supabase_upsert(
+                    "auto_mod_schedule",
+                    payload,
+                    key_field="id",
+                    fallback_local=lambda data: _local_upsert_row("auto_mod_schedule", data, key_field="id"),
+                )
             self._clear_cache()
             return True
         except Exception as e:
@@ -1982,22 +2060,39 @@ class AutoModDB:
                 "next_publish_at": datetime.now(timezone.utc).isoformat(),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            _local_upsert_row(
-                "auto_mod_schedule",
-                data,
-                key_field="id",
-                on_conflict="instance_id,channel_id,content_type",
-            )
-            supabase_upsert(
-                "auto_mod_schedule", data, key_field="id",
-                fallback_local=lambda payload: _local_upsert_row(
+            primary = self._supabase_primary_storage()
+            if primary:
+                supabase_upsert(
                     "auto_mod_schedule",
-                    payload,
+                    data,
+                    key_field="id",
+                    fallback_local=lambda payload: _local_upsert_row(
+                        "auto_mod_schedule",
+                        payload,
+                        key_field="id",
+                        on_conflict="instance_id,channel_id,content_type",
+                    ),
+                    on_conflict="instance_id,channel_id,content_type",
+                )
+            else:
+                _local_upsert_row(
+                    "auto_mod_schedule",
+                    data,
                     key_field="id",
                     on_conflict="instance_id,channel_id,content_type",
-                ),
-                on_conflict="instance_id,channel_id,content_type"
-            )
+                )
+                supabase_upsert(
+                    "auto_mod_schedule",
+                    data,
+                    key_field="id",
+                    fallback_local=lambda payload: _local_upsert_row(
+                        "auto_mod_schedule",
+                        payload,
+                        key_field="id",
+                        on_conflict="instance_id,channel_id,content_type",
+                    ),
+                    on_conflict="instance_id,channel_id,content_type",
+                )
             self._clear_cache()
             return True
         except Exception as e:
@@ -3618,6 +3713,51 @@ class AutoModFetcher:
         candidate = self._expected_processed_output_path(video_id, video_type)
         return self._resolve_reusable_video_artifact(candidate)
 
+    async def schedule_jobs(self, notify_func=None):
+        """
+        Check schedules and enqueue jobs for agents that are due.
+        Replaces the old immediate execution in run_cycle.
+        """
+        config = self.db.get_config()
+        if not config.get("auto_fetch_enabled"):
+            return {"status": "disabled"}
+
+        schedules = self.db.get_all_schedules()
+        active = [s for s in schedules if s.get("enabled")]
+        
+        queue = JobQueue()
+        enqueued_count = 0
+        
+        for schedule in active:
+            channel_id = schedule["channel_id"]
+            
+            # 1. Check if agent is already in queue or processing
+            if queue.is_agent_busy_or_queued(channel_id):
+                continue
+                
+            # 2. Check time and limits
+            if not self._is_publish_time(schedule):
+                continue
+            if self._reached_daily_limit(schedule):
+                continue
+                
+            # 3. Add to queue
+            queue.add_job(
+                agent_id=channel_id,
+                task_type="process_schedule",
+                payload={
+                    "channel_id": channel_id,
+                    "content_type": schedule.get("content_type", "minecraft_mods"),
+                    "force": True # Worker execution is always "forced" in terms of bypassing time checks again, or we re-check inside? run_cycle checks again.
+                }
+            )
+            enqueued_count += 1
+            
+        if enqueued_count > 0:
+            logger.info(f"🗓️ Scheduled {enqueued_count} jobs.")
+            
+        return {"status": "ok", "enqueued": enqueued_count}
+
     async def run_cycle(
         self,
         notify_func=None,
@@ -4079,7 +4219,7 @@ class AutoModFetcher:
                                     break
 
                             src_platform = source.get("platform", "youtube")
-                            vid_type = _infer_processing_video_type(video, src_platform, source.get("source_url"))
+                            vid_type = _infer_processing_video_type(video, src_platform, source.get("source_url"), normalize_source_settings(source.get("settings")))
                             type_label = "شورتس" if vid_type == "shorts" else "طويل"
                             approved_resume_for_video = bool(
                                 approved_target_resume
@@ -4480,7 +4620,11 @@ class AutoModFetcher:
                             break
 
                     except Exception as e:
-                        from src.agent.uploader import is_youtube_quota_error, AuthenticationRequiredError
+                        from src.agent.uploader import (
+                            is_youtube_quota_error,
+                            AuthenticationRequiredError,
+                            youtube_channel_restriction_details,
+                        )
                         if processing_touch_stop:
                             processing_touch_stop.set()
                         if processing_touch_task:
@@ -4507,7 +4651,7 @@ class AutoModFetcher:
                                     f"❌ [AutoMod] Recovery after source exception failed (video={current_vid_id[:20]}..., channel={channel_id[:10]}...): {recovery_err}"
                                 )
                     
-                        # ===== أخطاء حرجة → إيقاف الأتمتة تلقائياً =====
+                        # ===== أخطاء حرجة → إيقاف جدول القناة المتأثرة فقط =====
                         is_critical = False
                         pause_reason = ""
                     
@@ -4534,28 +4678,56 @@ class AutoModFetcher:
                                 "3. أعد تشغيل الأتمتة يدوياً بعد الإصلاح"
                             )
                     
-                        if is_critical and not preview_mode:
-                            # ===== إيقاف الأتمتة تلقائياً =====
+                        if not is_critical:
                             try:
-                                config["auto_fetch_enabled"] = False
-                                self.db.save_config(config)
-                                logger.warning("🛑 [AutoMod] Auto-fetch DISABLED due to critical publishing error.")
+                                restricted, details = youtube_channel_restriction_details(e)
+                            except Exception:
+                                restricted, details = False, ""
+                            if restricted:
+                                is_critical = True
+                                pause_reason = (
+                                    "⛔ *تم تقييد القناة/الحساب من YouTube!*\n\n"
+                                    f"📺 القناة: `{channel_id[:25]}...`\n"
+                                    f"📛 السبب: `{details or str(e)[:200]}`\n\n"
+                                    "💡 *ملاحظات:*\n"
+                                    "- قد يكون هناك حظر/إنذار/قيود رفع من YouTube\n"
+                                    "- راجع YouTube Studio > Channel status/features\n"
+                                    "- بعد إزالة التقييد، أعد تفعيل جدول هذه القناة من إعدادات الأتمتة"
+                                )
+
+                        if is_critical and not preview_mode:
+                            # ===== إيقاف جدول القناة المتأثرة فقط =====
+                            try:
+                                schedule["enabled"] = False
+                                schedule["paused_reason"] = str(e)[:400]
+                                schedule["paused_at"] = datetime.now(timezone.utc).isoformat()
+                                self.db._save_existing_schedule(schedule, {
+                                    "enabled": False,
+                                    "paused_reason": str(e)[:400],
+                                    "paused_at": datetime.now(timezone.utc).isoformat(),
+                                })
+                                logger.warning(
+                                    f"🛑 [AutoMod] Schedule paused only for affected channel "
+                                    f"(channel={channel_id[:20]}..., content_type={content_type})."
+                                )
                             except Exception as db_err:
-                                logger.error(f"Failed to disable auto-fetch in DB: {db_err}")
+                                logger.error(f"Failed to pause affected schedule in DB: {db_err}")
                         
                             # إشعار المسؤول
                             auto_pause_msg = (
-                                "🛑 *تم إيقاف الأتمتة تلقائياً!*\n"
+                                "🛑 *تم إيقاف هذا الوكيل فقط تلقائياً!*\n"
                                 "━━━━━━━━━━━━━━━━━━━\n\n"
                                 f"{pause_reason}\n\n"
                                 "━━━━━━━━━━━━━━━━━━━\n"
-                                "⏸ الأتمتة مُعطلة الآن. استخدم /menu → الأتمتة → ▶️ تشغيل لإعادة التفعيل."
+                                "⏸ تم تعطيل جدول هذه القناة فقط مؤقتاً.\n"
+                                "✅ بقية الوكلاء سيواصلون العمل بشكل طبيعي.\n"
+                                "🔧 بعد إصلاح المصادقة/الحصة، أعد تفعيل جدول هذه القناة من إعدادات الأتمتة."
                             )
                             await _notify(auto_pause_msg)
-                            errors_log.append(f"🛑 إيقاف تلقائي: {str(e)[:80]}")
-                            auto_paused = True
+                            errors_log.append(f"🛑 إيقاف وكيل واحد تلقائياً: {str(e)[:80]}")
+                            schedule_done = True
                         
-                            # إنهاء الدورة فوراً
+                            # إنهاء جدول هذه القناة فقط
                             break
                         else:
                             # أخطاء عادية — تسجيل ومتابعة
@@ -4952,15 +5124,13 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
                     logger.warning(f"⏳ ErrorTracker suggests backoff. Extra wait: {extra_wait}s")
                     await asyncio.sleep(extra_wait)
                 
-                logger.info("🔄 [AutoMod] Starting scheduled cycle...")
-                cycle_result = await fetcher.run_cycle(notify_func=_loop_notify)
-                if isinstance(cycle_result, dict) and cycle_result.get("status") == "busy":
-                    busy_for = int(cycle_result.get("running_for_seconds") or 0)
-                    logger.info(
-                        f"⏳ [AutoMod] Previous cycle still active ({busy_for}s). Retrying soon without long cooldown."
-                    )
-                    await asyncio.sleep(30)
-                    continue
+                logger.info("🔄 [AutoMod] Starting scheduled cycle (Queue Mode)...")
+                cycle_result = await fetcher.schedule_jobs(notify_func=_loop_notify)
+                
+                enqueued = cycle_result.get("enqueued", 0)
+                if enqueued > 0:
+                    logger.info(f"✅ [AutoMod] Enqueued {enqueued} jobs.")
+                
                 et.record_success("auto_fetch")
                 consecutive_loop_errors = 0
             else:

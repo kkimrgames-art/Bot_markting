@@ -544,6 +544,11 @@ def _source_privacy_status(settings: Dict[str, Any]) -> str:
     return "⚙️ حسب القناة"
 
 
+def _source_shorts_only_status(settings: Dict[str, Any]) -> str:
+    if "shorts_only" not in (settings or {}):
+        return "⚙️ حسب الكشف التلقائي"
+    return "✅ شورتس فقط" if bool((settings or {}).get("shorts_only")) else "❌ كلا النوعين"
+
 def _source_hflip_status(settings: Dict[str, Any]) -> str:
     if "hflip" not in (settings or {}):
         return "⚙️ حسب الإعدادات العامة"
@@ -1070,6 +1075,24 @@ async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AM_SOURCES
 
 
+async def edit_shorts_only_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تبديل setting shorts_only"""
+    query = update.callback_query
+    await _safe_answer(query)
+    src = await _get_edit_source(context)
+    if not src:
+        await query.answer("❌ خطأ: لم يتم العثور على المصدر", show_alert=True)
+        return await sources_menu(update, context)
+
+    db = _get_db()
+    settings = _source_settings(src)
+    new_value = not bool(settings.get("shorts_only"))
+    await asyncio.to_thread(db.update_source_settings, src.get("id"), {"shorts_only": new_value})
+    await query.answer("✅ تم التبديل")
+
+    return await _show_edit_source_menu(update, context)
+
+
 async def toggle_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """تبديل حالة مصدر"""
     query = update.callback_query
@@ -1159,6 +1182,7 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     outro_effect_status = _video_effect_status(settings, "outro")
     hflip_status = _source_hflip_status(settings)
     privacy_status = _source_privacy_status(settings)
+    shorts_only_status = _source_shorts_only_status(settings)
 
     text = (
         f"✏️ <b>تعديل المصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
@@ -1171,7 +1195,8 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
         f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
         f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
         f"🏁 تأثير النهاية: <code>{html.escape(outro_effect_status)}</code>\n"
-        f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>\n\n"
+        f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>\n"
+        f"📹 شورتس فقط: <code>{html.escape(shorts_only_status)}</code>\n\n"
         "ماذا تود تعديله؟"
     )
 
@@ -1187,6 +1212,7 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton(f"✨ تأثير البداية: {intro_effect_status}", callback_data="am_edit_fx_menu:intro")],
         [InlineKeyboardButton(f"🏁 تأثير النهاية: {outro_effect_status}", callback_data="am_edit_fx_menu:outro")],
         [InlineKeyboardButton(f"🧪 مراجعة الخام: {raw_review_status}", callback_data="am_edit_raw_toggle")],
+        [InlineKeyboardButton(f"📹 شورتس فقط: {shorts_only_status}", callback_data="am_edit_shorts_only_toggle")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
 
@@ -3871,6 +3897,7 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(edit_source_privacy_set, pattern=r"^am_edit_priv:"),
                 CallbackQueryHandler(edit_source_hflip_set, pattern=r"^am_edit_hflip:"),
                 CallbackQueryHandler(edit_source_raw_review_toggle, pattern=r"^am_edit_raw_toggle$"),
+                CallbackQueryHandler(edit_shorts_only_toggle, pattern=r"^am_edit_shorts_only_toggle$"),
                 CallbackQueryHandler(edit_source_choose_channel, pattern=r"^am_edit_ch:"),
                 CallbackQueryHandler(edit_source_choose_duration, pattern=r"^am_set_dur:"),
                 CallbackQueryHandler(edit_source_choose_facecam, pattern=r"^am_edit_fc:"),

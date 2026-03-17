@@ -482,7 +482,14 @@ def optimize_hashtags(
 
 def _fallback_title_and_tags(hint_title: Optional[str], lang: str = "ar") -> Tuple[str, List[str]]:
     tl = _lang_primary(lang)
-    base = (hint_title or ("رد فعل قصير" if tl == "ar" else "Short Reaction")).strip()
+    fallback_kw = _fallback_keywords("", tl)
+    if tl == "ar":
+        default_title = "رد فعل قصير"
+    elif tl == "en":
+        default_title = "Short Reaction"
+    else:
+        default_title = " ".join([kw for kw in fallback_kw[:2] if kw]).strip() or "Video"
+    base = (hint_title or default_title).strip()
     if len(base) > 80:
         base = base[:77] + "…"
     if tl == "th":
@@ -583,8 +590,10 @@ def _compose_seo_description(raw_desc: Optional[str], title: str, topic: Optiona
         topic_text = _topic_to_plain_text(topic) or _strip_hashtags_from_text(title) or title
         if tl.startswith("ar"):
             text_only = f"شاهد هذا الشورت عن {topic_text} مع أبرز اللقطات والتفاصيل والكلمات المفتاحية المهمة."
-        else:
+        elif tl.startswith("en"):
             text_only = f"Watch this short about {topic_text} with the best moments, details, and searchable highlights."
+        else:
+            text_only = topic_text
 
     desc_tags = _sanitize_hashtag_list(_extract_hashtags_from_text(desc) + list(tags or []), tl, 18)
     if desc_tags:
@@ -609,7 +618,13 @@ def _make_title_more_distinct(title: str, tags: List[str], lang: str) -> str:
             candidate = f"{base} {ht}".strip()
             if len(candidate) <= 95:
                 return candidate
-    suffix = "شورتس" if (lang or "").strip().lower().startswith("ar") else "Shorts"
+    tl = (lang or "").strip().lower()
+    if tl.startswith("ar"):
+        suffix = "شورتس"
+    elif tl.startswith("en"):
+        suffix = "Shorts"
+    else:
+        suffix = (_fallback_keywords("", tl) or ["video"])[0]
     candidate = f"{base} | {suffix}".strip()
     return candidate[:95].rstrip()
 
@@ -622,9 +637,19 @@ def _normalize_local_title(title: Optional[str], topic: Optional[str], lang: str
     if len(text) < 8:
         topic_text = _topic_to_plain_text(topic)
         if topic_text:
-            text = f"فيديو جديد عن {topic_text}" if tl.startswith("ar") else f"New video about {topic_text}"
+            if tl.startswith("ar"):
+                text = f"فيديو جديد عن {topic_text}"
+            elif tl.startswith("en"):
+                text = f"New video about {topic_text}"
+            else:
+                text = topic_text
         else:
-            text = "فيديو قصير جديد" if tl.startswith("ar") else "New short video"
+            if tl.startswith("ar"):
+                text = "فيديو قصير جديد"
+            elif tl.startswith("en"):
+                text = "New short video"
+            else:
+                text = " ".join((_fallback_keywords("", tl) or ["video"])[:2]).strip() or "Video"
     if len(text) > 96:
         text = text[:96].rstrip(" -|:,.،؛•")
     return text
@@ -752,6 +777,77 @@ def _generate_local_platform_metadata(
         )
         title = _normalize_local_title(candidate.get("title"), topic, target_lang)
         desc = _normalize_local_description(candidate.get("description"), title, topic, tags, target_lang, int(min_tags), int(max_tags))
+
+        def _dominant_language_ok(text: str, tl: str) -> bool:
+            if not text:
+                return False
+            primary = _lang_primary(tl)
+            ranges = _LANG_SCRIPT_RANGES.get(primary)
+            if ranges:
+                any_target = False
+                for ch in text:
+                    if not ch.isalpha():
+                        continue
+                    if _char_in_ranges(ch, ranges):
+                        any_target = True
+                        continue
+                    cp = ord(ch)
+                    if cp < 128:
+                        return False
+                return any_target
+            if primary.startswith("en"):
+                return not _contains_arabic(text)
+            return True
+
+        def _enforce_lang_bundle(title_in: str, tags_in: List[str], desc_in: str, tl: str) -> tuple[str, List[str], str]:
+            tl = _normalize_lang_code(tl)
+            needs_fix = False
+            try:
+                if not _dominant_language_ok(title_in, tl) or not _dominant_language_ok(desc_in, tl):
+                    needs_fix = True
+                else:
+                    joined = (title_in or "") + "\n" + (desc_in or "")
+                    if tl and not tl.startswith("en") and _is_mostly_english(joined):
+                        needs_fix = True
+            except Exception:
+                needs_fix = False
+
+            if not needs_fix:
+                fixed_tags = _filter_hashtags_by_target_language(list(tags_in or []), tl)
+                return title_in, fixed_tags, desc_in
+
+            plain_title = _strip_hashtags_from_text(title_in)
+            plain_desc = _strip_hashtags_from_text(desc_in)
+            key_wo_hash = [t[1:] if isinstance(t, str) and t.startswith("#") else str(t or "") for t in (tags_in or [])]
+
+            tr_title = None
+            tr_desc = None
+            tr_keys = None
+            try:
+                tr_batch = translate_batch(cfg, {"title": plain_title, "desc": plain_desc}, tl)
+                tr_title = tr_batch.get("title")
+                tr_desc = tr_batch.get("desc")
+            except Exception:
+                tr_title = None
+                tr_desc = None
+            try:
+                tr_keys = translate_keywords(cfg, key_wo_hash, tl)
+            except Exception:
+                tr_keys = None
+
+            out_title = (tr_title or translate_text(cfg, plain_title, tl) or title_in).strip()
+            out_desc = (tr_desc or translate_text(cfg, plain_desc, tl) or desc_in).strip()
+            out_tags = [f"#{k.strip().replace(' ', '')}" for k in (tr_keys or key_wo_hash) if k and str(k).strip()]
+            out_tags = _filter_hashtags_by_target_language(_sanitize_hashtag_list(out_tags, tl, 24), tl)
+
+            if not _dominant_language_ok(out_title, tl) or not _dominant_language_ok(out_desc, tl):
+                fb_title, fb_tags, fb_desc = _fallback_metadata_bundle(topic or hint_title or "", tl)
+                out_title = _normalize_local_title(fb_title, topic, tl)
+                out_desc = _normalize_local_description(fb_desc, out_title, topic, fb_tags, tl)
+                out_tags = _filter_hashtags_by_target_language(_sanitize_hashtag_list(fb_tags, tl, 24), tl)
+            return out_title, out_tags, out_desc
+
+        title, tags, desc = _enforce_lang_bundle(title, tags, desc, target_lang)
         last_result = (title, tags, desc, True)
         if not history or not _is_meta_too_similar(title, desc, history):
             if channel_key:
@@ -1595,55 +1691,30 @@ def generate_title_desc_hashtags(cfg: Config, video_path: str, hint_title: Optio
     if combined_seed_tags:
         _, tags = optimize_hashtags(combined_seed_tags, target_lang, topic=base_title, limit_title=4, limit_desc=18)
 
-    # Language enforcement: ensure outputs align with target_lang
-    tl = (target_lang or "").lower()
-    
-    # 1. If target is English but output has Arabic -> Fix to English
-    if tl.startswith("en"):
-        need_fix = _contains_arabic(title) or _contains_arabic(desc) or any(_contains_arabic(t) for t in tags)
-        if need_fix:
-            try:
-                tr_batch = translate_batch(cfg, {
-                    "title": _strip_hashtags_from_text(title),
-                    "desc": _strip_hashtags_from_text(desc),
-                }, "en") if 'translate_batch' in globals() else {}
-                title = tr_batch.get("title") or translate_text(cfg, _strip_hashtags_from_text(title), "en") or title
-                desc = tr_batch.get("desc") or translate_text(cfg, _strip_hashtags_from_text(desc), "en") or desc
-                key_wo_hash = [t[1:] if t.startswith("#") else t for t in tags]
-                tr_keys = translate_keywords(cfg, key_wo_hash, "en") if 'translate_keywords' in globals() else key_wo_hash
-                if not tr_keys:
-                    tr_keys = key_wo_hash
-                tags = [f"#{k.strip().replace(' ', '')}" for k in tr_keys if k and k.strip()]
-            except Exception:
-                pass
-        tags = _filter_hashtags_by_target_language(_sanitize_hashtag_list(tags or [], tl, 24), tl)
-                
-    # 2. If target is NOT English and output doesn't match language/script -> Fix to Target Lang
-    elif len(tl) >= 2 and not tl.startswith("en"):
-        title_is_eng = _is_mostly_english(title)
-        desc_is_eng = _is_mostly_english(desc)
-        title_has_ar = _contains_arabic(title)
-        desc_has_ar = _contains_arabic(desc)
-        tags_have_ar = any(_contains_arabic(t) for t in (tags or []))
-        if tl in {"ar", "fa", "ur"}:
-            title_missing_expected_script = not title_has_ar
-            desc_missing_expected_script = not desc_has_ar
-            need_fix = title_is_eng or desc_is_eng or title_missing_expected_script or desc_missing_expected_script
-        else:
-            need_fix = title_is_eng or desc_is_eng or title_has_ar or desc_has_ar or tags_have_ar
-        if need_fix:
-            try:
-                if title_is_eng or title_has_ar or (tl in {"ar", "fa", "ur"} and not title_has_ar):
-                    title = translate_text(cfg, title, tl) or title
-                if desc_is_eng or desc_has_ar or (tl in {"ar", "fa", "ur"} and not desc_has_ar):
-                    desc = translate_text(cfg, desc, tl) or desc
-                key_wo_hash = [t[1:] if t.startswith("#") else t for t in (tags or [])]
+    tl = (target_lang or "").lower().strip()
+    if tl:
+        try:
+            plain_title = _strip_hashtags_from_text(title)
+            plain_desc = _strip_hashtags_from_text(desc)
+            key_wo_hash = [t[1:] if isinstance(t, str) and t.startswith("#") else str(t or "") for t in (tags or [])]
+
+            if tl.startswith("en"):
+                need_fix = _contains_arabic(title) or _contains_arabic(desc) or any(_contains_arabic(t) for t in tags)
+                if need_fix:
+                    tr_batch = translate_batch(cfg, {"title": plain_title, "desc": plain_desc}, "en") if 'translate_batch' in globals() else {}
+                    title = tr_batch.get("title") or translate_text(cfg, plain_title, "en") or title
+                    desc = tr_batch.get("desc") or translate_text(cfg, plain_desc, "en") or desc
+                    tr_keys = translate_keywords(cfg, key_wo_hash, "en") if 'translate_keywords' in globals() else key_wo_hash
+                    tags = [f"#{k.strip().replace(' ', '')}" for k in (tr_keys or key_wo_hash) if k and k.strip()]
+            else:
+                tr_batch = translate_batch(cfg, {"title": plain_title, "desc": plain_desc}, tl) if 'translate_batch' in globals() else {}
+                title = tr_batch.get("title") or translate_text(cfg, plain_title, tl) or title
+                desc = tr_batch.get("desc") or translate_text(cfg, plain_desc, tl) or desc
                 tr_keys = translate_keywords(cfg, key_wo_hash, tl) if 'translate_keywords' in globals() else key_wo_hash
-                if not tr_keys:
-                    tr_keys = key_wo_hash
-                tags = [f"#{k.strip().replace(' ', '')}" for k in tr_keys if k and k.strip()]
-            except Exception:
-                pass
+                tags = [f"#{k.strip().replace(' ', '')}" for k in (tr_keys or key_wo_hash) if k and k.strip()]
+        except Exception:
+            pass
+
         tags = _filter_hashtags_by_target_language(_sanitize_hashtag_list(tags or [], tl, 24), tl)
 
     # Validate format: if model didn't follow expected schema, treat as failure so callers can fallback

@@ -64,6 +64,23 @@ class PromptTemplates:
     ]
 
     @staticmethod
+    def _map_lang_code_to_name(code: str) -> str:
+        raw = (code or "ar").lower().strip().replace("_", "-")
+        primary = raw.split("-", 1)[0].strip() or "ar"
+        try:
+            from src.bot.language_manager import LanguageManager
+            lang = LanguageManager.get_language(primary)
+            if lang:
+                native = (lang.name_native or "").strip()
+                en_name = (lang.name_en or "").strip()
+                if native and en_name:
+                    return f"{native} ({en_name})"
+                return native or en_name or primary
+        except Exception:
+            pass
+        return primary
+
+    @staticmethod
     def _get_random_style(seed: str) -> str:
         keys = list(PromptTemplates.STYLES.keys())
         # Use simple hash for deterministic "randomness" based on seed
@@ -128,9 +145,10 @@ class PromptTemplates:
         structure_instr = PromptTemplates._get_structure_instructions(style_key, style_seed)
         
         keywords_str = ", ".join(keywords) if keywords else ""
+        lang_name = PromptTemplates._map_lang_code_to_name(lang)
         
         prompt = (
-            f"Task: Write a unique, effective YouTube description in {lang}.\n"
+            f"Task: Write a unique, effective YouTube description in {lang_name} ({lang}).\n"
             f"Topic: {topic}\n"
             f"Video Title: {title}\n"
             f"Details/Keywordss: {keywords_str}\n"
@@ -141,6 +159,7 @@ class PromptTemplates:
             "**Structure Constraints** (Follow this order):\n"
             f"{structure_instr}\n\n"
             "**General Rules**:\n"
+            f"- **LANGUAGE ENFORCEMENT**: The output MUST be in {lang_name}. Do NOT use English unless the target language IS English.\n"
             "- VARY the phrasing. Do not use the same opening every time.\n"
             "- For the App CTA, vary the call to action (e.g., 'Get the mod here', 'Download now', 'Try it yourself').\n"
             "- Ensure the text is naturally readable and engaging.\n"
@@ -161,6 +180,8 @@ class PromptTemplates:
         style_key = PromptTemplates._get_random_style(style_seed)
         style = PromptTemplates.STYLES[style_key]
         required_tag = (os.getenv("SHORTS_REQUIRED_TAG") or "").strip()
+        lang_name = PromptTemplates._map_lang_code_to_name(lang)
+
         if required_tag and not required_tag.startswith("#"):
             required_tag = "#" + required_tag
         rules = []
@@ -169,25 +190,26 @@ class PromptTemplates:
                 f"1. **OPTIONAL BRAND TAG**: Include the tag `{required_tag}` in BOTH the Title and Description. Keep it EXACTLY as provided."
             )
             rules.append(
-                f"2. **LANGUAGE**: Use ONLY {lang} for ALL other hashtags and keywords. The ONLY allowed exception is `{required_tag}`."
+                f"2. **LANGUAGE**: Use ONLY {lang_name} for ALL other hashtags and keywords. The ONLY allowed exception is `{required_tag}`."
             )
             title_example = f"#<tag_in_{lang}_1> #<tag_in_{lang}_2> {required_tag}"
         else:
-            rules.append(f"1. **LANGUAGE**: Use ONLY {lang} for ALL hashtags and keywords. Do NOT use any other language.")
+            rules.append(f"1. **LANGUAGE**: Use ONLY {lang_name} for ALL hashtags and keywords. Do NOT use any other language.")
             title_example = f"#<tag_in_{lang}_1> #<tag_in_{lang}_2> #<tag_in_{lang}_3>"
         
         prompt = (
-            f"Target Language: {lang}\n"
+            f"Target Language: {lang_name} ({lang})\n"
             f"Task: Generate a VIRAL YouTube Shorts metadata set optimized for SEARCH (SEO).\n"
             f"Topic: {topic}\n"
             f"Base Title: {title}\n\n"
             "**CRITICAL RULES**:\n"
             + "\n".join(rules)
+            + f"\n- **STRICT PROHIBITION**: If the input topic/title is in English, you MUST translate/adapt the concepts to {lang_name} hashtags. Do NOT return English hashtags."
             + "\n\n"
 
             "**Structure Requirements**:\n"
-            f"1. **Title**: MUST be composed of 2-6 POWERFUL hashtags. NO plain text sentences. Example: `{title_example}`.\n"
-            "2. **Description**: Hashtags + SEO keywords ONLY (no sentences). Focus on searchable terms supported by the source title/topic.\n"
+            f"1. **Title**: MUST be composed of 2-6 POWERFUL hashtags in {lang_name}. NO plain text sentences. Example: `{title_example}`.\n"
+            f"2. **Description**: Hashtags + SEO keywords ONLY in {lang_name} (no sentences). Focus on searchable terms supported by the source title/topic.\n"
             "3. **Content Relevance**: Use ONLY hashtags clearly justified by the provided topic/title. Do NOT add generic defaults like #gaming, #video, #mods, or #shorts unless the source really supports them. Prefer specific game/event/object/action tags over broad categories.\n"
             "4. **Hashtag Block**: Additional 8-14 topic-specific tags, not a repeated generic bundle.\n\n"
 
