@@ -347,6 +347,34 @@ def _to_bool(value: Any, default: bool = False) -> bool:
 def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     settings = parse_source_settings(raw_settings)
     normalized = dict(settings)
+
+    try:
+        fetch_sources = normalized.get("fetch_sources")
+        if isinstance(fetch_sources, dict):
+            fetch_sources = [fetch_sources]
+        if not isinstance(fetch_sources, list):
+            fetch_sources = []
+
+        cleaned: List[Dict[str, Any]] = []
+        for item in fetch_sources:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or item.get("source_url") or "").strip()
+            if not url:
+                continue
+            cleaned.append({
+                "url": url,
+                "name": str(item.get("name") or item.get("source_name") or "").strip(),
+                "platform": str(item.get("platform") or "").strip().lower() or None,
+                "enabled": bool(item.get("enabled", True)),
+            })
+
+        if cleaned:
+            normalized["fetch_sources"] = cleaned
+        else:
+            normalized.pop("fetch_sources", None)
+    except Exception:
+        pass
     
     # Privacy setting: public/unlisted/private (default to None to use global config)
     if "privacy" in settings:
@@ -3758,21 +3786,11 @@ class AutoModFetcher:
             
         return {"status": "ok", "enqueued": enqueued_count}
 
-    async def run_cycle(
-        self,
-        notify_func=None,
-        force: bool = False,
-        *,
-        target_channel_id: Optional[str] = None,
-        target_content_type: Optional[str] = None,
-        target_source_id: Optional[str] = None,
-        target_video_id: Optional[str] = None,
-        target_video_url: Optional[str] = None,
-        target_video_title: Optional[str] = None,
-        target_video_type: Optional[str] = None,
-        target_raw_video_path: Optional[str] = None,
-        preview_mode: bool = False,
-    ) -> Dict[str, Any]:
+    async def run_cycle(self, notify_func=None, force: bool = False, *, target_channel_id: Optional[str] = None, target_content_type: Optional[str] = None,
+                        target_source_id: Optional[str] = None, target_video_id: Optional[str] = None, target_video_url: Optional[str] = None,
+                        target_video_title: Optional[str] = None, target_video_type: Optional[str] = None,
+                        preview_mode: bool = False, preview_source: Optional[Dict[str, Any]] = None, preview_only: bool = False,
+                        **kwargs) -> Dict[str, Any]:
         """
         تشغيل دورة جلب واحدة مع إشعارات تفصيلية:
         1. فحص الإعدادات
@@ -3980,14 +3998,43 @@ class AutoModFetcher:
                         break
 
                     src_name = source.get("source_name", "مصدر")
-                    src_url = source.get("source_url", "")
                     src_platform = source.get("platform", "youtube")
                     source_settings = normalize_source_settings(source.get("settings"))
                     require_raw_review = bool(source_settings.get("require_raw_review"))
-                    source_id = str(source.get("id") or f"{channel_id}:{src_url}")
+                    legacy_src_url = source.get("source_url", "")
+                    source_id = str(source.get("id") or f"{channel_id}:{legacy_src_url}")
                     if not source.get("enabled") and not (preview_mode and source_id == str(target_source_id)):
                         continue
-                    logger.info(f"🔍 [AutoMod] Fetching from source: {src_name} (platform={src_platform}, url={src_url[:50]}...)")
+
+                    fetch_sources = []
+                    try:
+                        fs = source_settings.get("fetch_sources")
+                        if isinstance(fs, list):
+                            fetch_sources = [x for x in fs if isinstance(x, dict) and str(x.get("url") or "").strip()]
+                    except Exception:
+                        fetch_sources = []
+                    if not fetch_sources:
+                        fetch_sources = [{
+                            "url": str(legacy_src_url or "").strip(),
+                            "name": "",
+                            "platform": str(src_platform or "").strip().lower() or None,
+                            "enabled": True,
+                        }]
+                    else:
+                        # اختيار قناة الجلب بشكل عشوائي في كل دورة (مع الحفاظ على نفس منطق جلب/اختيار الفيديو)
+                        try:
+                            import random
+                            fetch_sources = list(fetch_sources)
+                            random.shuffle(fetch_sources)
+                        except Exception:
+                            pass
+
+                    try:
+                        logger.info(
+                            f"🔍 [AutoMod] Source group: {src_name} (fetch_channels={len(fetch_sources)}, target_channel={channel_id[:10]}...)"
+                        )
+                    except Exception:
+                        pass
 
                     source_pending_review = get_pending_raw_review(source_id) if (require_raw_review and not preview_mode) else None
                     if source_pending_review and not approved_target_resume and not preview_mode:
@@ -4018,7 +4065,7 @@ class AutoModFetcher:
                             "1001-5000",
                             "5001-20000"
                         ]
-                    
+
                         fetch_order = config.get("settings", {}).get("fetch_order", "newest")
                         videos = []
                         found_new_video = False
@@ -4041,69 +4088,83 @@ class AutoModFetcher:
                                 f"   📺 `{str(target_video_title or 'بدون عنوان')[:60]}`"
                             )
                         else:
-                            for idx, s_range in enumerate(search_ranges):
+                            for fidx, fetch_item in enumerate(fetch_sources):
                                 if found_new_video:
                                     break
+                                if not isinstance(fetch_item, dict):
+                                    continue
+                                if not bool(fetch_item.get("enabled", True)):
+                                    continue
+                                fetch_url = str(fetch_item.get("url") or "").strip()
+                                if not fetch_url:
+                                    continue
+                                fetch_name = str(fetch_item.get("name") or "").strip() or src_name
+                                fetch_platform = (str(fetch_item.get("platform") or "").strip().lower() or str(src_platform or "").strip().lower() or "youtube")
 
-                                await _notify(
-                                    f"🔎 *جلب فيديوهات من:* `{src_name}` (النطاق: {s_range}, الترتيب: {fetch_order})\n"
-                                    f"   🔗 `{src_url[:60]}`"
-                                )
-                            
-                                # إضافة تأخير بسيط لتجنب التزامن الشديد
-                                if idx > 0:
-                                    import random
-                                    delay = random.uniform(3.0, 7.0)
-                                    logger.debug(f"⏳ Normalizing fetch rhythm... waiting {delay:.1f}s")
-                                    await asyncio.sleep(delay)
-                            
-                                batch_videos = await self.fetch_videos_from_source(src_url, items_range=s_range, platform=src_platform)
-                                logger.info(f"📦 [AutoMod] Source {src_name}: fetched {len(batch_videos)} videos (range={s_range})")
+                                for idx, s_range in enumerate(search_ranges):
+                                    if found_new_video:
+                                        break
 
-                                if not batch_videos:
-                                    if idx == 0:
-                                        await _notify(f"📭 لم يتم العثور على فيديوهات في النطاق الأول من `{src_name}`.")
-                                        break # ربما القناة فارغة أو هناك خطأ في الوصول
-                                    else:
+                                    await _notify(
+                                        f"🔎 *جلب فيديوهات من:* `{fetch_name}` (النطاق: {s_range}, الترتيب: {fetch_order})\n"
+                                        f"   🔗 `{fetch_url[:60]}`"
+                                    )
+
+                                    # إضافة تأخير بسيط لتجنب التزامن الشديد
+                                    if idx > 0:
+                                        import random
+                                        delay = random.uniform(3.0, 7.0)
+                                        logger.debug(f"⏳ Normalizing fetch rhythm... waiting {delay:.1f}s")
+                                        await asyncio.sleep(delay)
+
+                                    batch_videos = await self.fetch_videos_from_source(fetch_url, items_range=s_range, platform=fetch_platform)
+                                    logger.info(
+                                        f"📦 [AutoMod] Fetch {fetch_name}: fetched {len(batch_videos)} videos (range={s_range})"
+                                    )
+
+                                    if not batch_videos:
+                                        if idx == 0:
+                                            await _notify(f"📭 لم يتم العثور على فيديوهات في النطاق الأول من `{fetch_name}`.")
+                                            break  # ربما القناة فارغة أو هناك خطأ في الوصول
                                         await _notify(f"⏹️ لا توجد فيديوهات إضافية بعد النطاق {search_ranges[idx-1]}.")
                                         break
 
-                                # فحص الفيديوهات في هذا النطاق
-                                potential_videos = []
-                                published_count = 0
-                                locked_count = 0
-                                other_count = 0
-                                for v in batch_videos:
-                                    v_id = v.get("id", "")
-                                    if not v_id:
-                                        continue
-
-                                    if is_raw_review_blocked(source_id, v_id):
-                                        other_count += 1
-                                        continue
-                                    if is_raw_review_skip_active(source_id, v_id):
-                                        other_count += 1
-                                        continue
-
-                                    status, updated_at = self.db.get_video_process_state(v_id, channel_id)
-                                    if status == "published":
-                                        published_count += 1
-                                        continue
-                                    if status == "processing":
-                                        processing_lock_minutes = _processing_lock_stale_minutes()
-                                        if not updated_at:
-                                            locked_count += 1
+                                    # فحص الفيديوهات في هذا النطاق
+                                    potential_videos = []
+                                    published_count = 0
+                                    locked_count = 0
+                                    other_count = 0
+                                    for v in batch_videos:
+                                        v_id = v.get("id", "")
+                                        if not v_id:
                                             continue
-                                        try:
-                                            if (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=processing_lock_minutes):
+
+                                        if is_raw_review_blocked(source_id, v_id):
+                                            other_count += 1
+                                            continue
+                                        if is_raw_review_skip_active(source_id, v_id):
+                                            other_count += 1
+                                            continue
+
+                                        status, updated_at = self.db.get_video_process_state(v_id, channel_id)
+                                        if status == "published":
+                                            published_count += 1
+                                            continue
+                                        if status == "processing":
+                                            processing_lock_minutes = _processing_lock_stale_minutes()
+                                            if not updated_at:
                                                 locked_count += 1
                                                 continue
-                                        except Exception:
-                                            locked_count += 1
-                                            continue
-                                    if status:
-                                        other_count += 1
-                                    potential_videos.append(v)
+                                            try:
+                                                if (datetime.now(timezone.utc) - updated_at) <= timedelta(minutes=processing_lock_minutes):
+                                                    locked_count += 1
+                                                    continue
+                                            except Exception:
+                                                locked_count += 1
+                                                continue
+                                        if status:
+                                            other_count += 1
+                                        potential_videos.append(v)
 
                                 if target_video_id and schedule_force and source_id == str(target_source_id):
                                     potential_videos = [
@@ -4151,8 +4212,15 @@ class AutoModFetcher:
                                     else:
                                         await _notify(f"📭 تم الوصول لأقصى عمق بحث ({depth}) ولم نجد فيديوهات جديدة.")
                                         logger.info(
-                                            f"📭 [AutoMod] No new videos in any range for source {src_name} (channel={channel_id[:10]}...)"
+                                            f"📭 [AutoMod] No new videos in any range for fetch {fetch_name} (channel={channel_id[:10]}...)"
                                         )
+
+                                if found_new_video:
+                                    # حفظ آخر fetch context للاستعمال اللاحق في التنزيل/المراجعة
+                                    source["_am_fetch_url"] = fetch_url
+                                    source["_am_fetch_name"] = fetch_name
+                                    source["_am_fetch_platform"] = fetch_platform
+                                    break
 
                         if not found_new_video:
                             continue
@@ -4218,8 +4286,14 @@ class AutoModFetcher:
                                     schedule_done = True
                                     break
 
-                            src_platform = source.get("platform", "youtube")
-                            vid_type = _infer_processing_video_type(video, src_platform, source.get("source_url"), normalize_source_settings(source.get("settings")))
+                            effective_platform = str(source.get("_am_fetch_platform") or source.get("platform") or "youtube")
+                            effective_source_url = str(source.get("_am_fetch_url") or source.get("source_url") or "")
+                            vid_type = _infer_processing_video_type(
+                                video,
+                                effective_platform,
+                                effective_source_url,
+                                normalize_source_settings(source.get("settings")),
+                            )
                             type_label = "شورتس" if vid_type == "shorts" else "طويل"
                             approved_resume_for_video = bool(
                                 approved_target_resume
@@ -4266,7 +4340,7 @@ class AutoModFetcher:
                                     dl_dir = _ensure_runtime_dir(_project_local_path(".temp", "auto_mod_downloads"))
 
                                     # تحديد المدة القصوى بناءً على النوع المختار
-                                    max_dur = 60 if src_platform in ("youtube_shorts", "facebook_reels") else None
+                                    max_dur = 60 if effective_platform in ("youtube_shorts", "facebook_reels") else None
                                     dl_path = await self.download_video(video["url"], dl_dir, max_duration=max_dur)
                                     current_dl_path = dl_path
 
@@ -4304,7 +4378,7 @@ class AutoModFetcher:
                                         source_id=source_id,
                                         channel_id=channel_id,
                                         source_name=src_name,
-                                        source_url=src_url,
+                                        source_url=effective_source_url,
                                         content_type=content_type,
                                         video=video,
                                         raw_video_path=dl_path,
@@ -4734,7 +4808,12 @@ class AutoModFetcher:
                             err_msg = f"💥 *خطأ غير متوقع* أثناء معالجة `{src_name}`:\n`{str(e)[:200]}`"
                             await _notify(err_msg)
                             errors_log.append(f"خطأ في {src_name}: {str(e)[:100]}")
-                            logger.error(f"Error processing source {src_url}: {e}")
+                            try:
+                                logger.error(
+                                    f"Error processing source {str(source.get('_am_fetch_url') or source.get('source_url') or '')[:120]}: {e}"
+                                )
+                            except Exception:
+                                logger.error(f"Error processing source: {e}")
                     if schedule_done or auto_paused:
                         break
                     

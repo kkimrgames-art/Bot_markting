@@ -116,6 +116,39 @@ def _mode_label(mode: str) -> str:
     return "عشوائي" if (mode or "fixed").strip().lower() == "random" else "ثابت"
 
 
+def _fetch_sources(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        raw = (settings or {}).get("fetch_sources")
+        if isinstance(raw, dict):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            out.append({
+                "url": url,
+                "name": str(item.get("name") or "").strip(),
+                "platform": str(item.get("platform") or "").strip().lower(),
+                "enabled": bool(item.get("enabled", True)),
+            })
+        return out
+    except Exception:
+        return []
+
+
+def _fetch_sources_status(settings: Dict[str, Any]) -> str:
+    items = _fetch_sources(settings)
+    if not items:
+        return "افتراضي (رابط واحد)"
+    enabled = sum(1 for i in items if i.get("enabled"))
+    return f"{enabled}/{len(items)}"
+
+
 def _placement_label(placement: str) -> str:
     return "قبل الوصف" if (placement or "append").strip().lower() == "prepend" else "بعد الوصف"
 
@@ -1183,10 +1216,12 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     hflip_status = _source_hflip_status(settings)
     privacy_status = _source_privacy_status(settings)
     shorts_only_status = _source_shorts_only_status(settings)
+    fetch_sources_status = _fetch_sources_status(settings)
 
     text = (
         f"✏️ <b>تعديل المصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
         f"نوع الفيديوهات: <code>{html.escape(dur_label)}</code>\n"
+        f"📥 قنوات الجلب: <code>{html.escape(fetch_sources_status)}</code>\n"
         f"🔒 خصوصية النشر: <code>{html.escape(privacy_status)}</code>\n"
         f"🎬 فيس كام: <code>{html.escape(fc_label)}</code>\n"
         f"📝 نص داخل الشورتس: <code>{html.escape(overlay_status)}</code>\n"
@@ -1202,6 +1237,7 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
 
     keyboard = [
         [InlineKeyboardButton("📺 تغيير القناة المستهدفة", callback_data="am_edit_ch_start")],
+        [InlineKeyboardButton(f"📥 قنوات الجلب: {fetch_sources_status}", callback_data="am_edit_fetch_menu")],
         [InlineKeyboardButton("⏳ تغيير نوع الفيديوهات (المدة)", callback_data="am_edit_dur_start")],
         [InlineKeyboardButton(f"🔒 خصوصية النشر: {privacy_status}", callback_data="am_edit_priv_menu")],
         [InlineKeyboardButton(f"🎬 فيس كام: {fc_label}", callback_data="am_edit_fc_start")],
@@ -3188,6 +3224,34 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ تم حفظ نصوص الوصف الجديدة." if success else "❌ تعذر حفظ النصوص.")
         return await _show_description_editor(update, context)
 
+    if mode == "edit_fetch_add":
+        url_matches = re.findall(r"https?://\S+", raw_text)
+        if len(url_matches) > 1:
+            await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
+            return AM_SOURCE_TEXT_INPUT
+        url = url_matches[0] if url_matches else raw_text
+        url = url.strip()
+        if not url.startswith("http"):
+            await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
+            return AM_SOURCE_TEXT_INPUT
+
+        src = await _get_edit_source(context)
+        if not src:
+            context.user_data.pop("am_text_input_mode", None)
+            return AM_SOURCES
+        settings = _source_settings(src)
+        items = _fetch_sources(settings)
+        items.append({
+            "url": url,
+            "name": "",
+            "platform": str(src.get("platform") or "").strip().lower(),
+            "enabled": True,
+        })
+        success = await _update_edit_source_settings(context, {"fetch_sources": items})
+        context.user_data.pop("am_text_input_mode", None)
+        await update.message.reply_text("✅ تم إضافة قناة الجلب." if success else "❌ تعذر إضافة القناة.")
+        return await edit_source_fetch_sources_menu(update, context)
+
     await update.message.reply_text("⚠️ لا يوجد حقل نصي نشط حالياً.")
     return AM_SOURCES
 
@@ -3867,6 +3931,10 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             ],
             AM_EDIT_SOURCE_CHANNEL: [
                 CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
+                CallbackQueryHandler(edit_source_fetch_sources_menu, pattern=r"^am_edit_fetch_menu$"),
+                CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add$"),
+                CallbackQueryHandler(edit_source_fetch_toggle, pattern=r"^am_edit_fetch_toggle:"),
+                CallbackQueryHandler(edit_source_fetch_delete, pattern=r"^am_edit_fetch_del:"),
                 CallbackQueryHandler(edit_source_privacy_menu, pattern=r"^am_edit_priv_menu$"),
                 CallbackQueryHandler(edit_source_hflip_menu, pattern=r"^am_edit_hflip_menu$"),
                 CallbackQueryHandler(edit_source_overlay_menu, pattern=r"^am_edit_ov_menu$"),
