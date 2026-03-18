@@ -145,7 +145,32 @@ def _fetch_sources_status(settings: Dict[str, Any]) -> str:
     items = _fetch_sources(settings)
     if not items:
         return "افتراضي (رابط واحد)"
-    enabled = sum(1 for i in items if i.get("enabled"))
+    enabled = sum(1 for x in items if bool((x or {}).get("enabled", True)))
+    return f"{enabled}/{len(items)}"
+
+
+def _fetch_sources_for_ui(src: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return fetch sources for UI with legacy fallback to source_url."""
+    settings = _source_settings(src)
+    items = _fetch_sources(settings)
+    if items:
+        return items
+    legacy_url = str((src or {}).get("source_url") or "").strip()
+    if not legacy_url:
+        return []
+    return [{
+        "url": legacy_url,
+        "name": "الرابط الافتراضي",
+        "platform": str((src or {}).get("platform") or "").strip().lower() or None,
+        "enabled": True,
+    }]
+
+
+def _fetch_sources_status_for_ui(src: Dict[str, Any]) -> str:
+    items = _fetch_sources_for_ui(src)
+    if not items:
+        return "افتراضي (رابط واحد)"
+    enabled = sum(1 for x in items if bool((x or {}).get("enabled", True)))
     return f"{enabled}/{len(items)}"
 
 
@@ -1216,7 +1241,7 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     hflip_status = _source_hflip_status(settings)
     privacy_status = _source_privacy_status(settings)
     shorts_only_status = _source_shorts_only_status(settings)
-    fetch_sources_status = _fetch_sources_status(settings)
+    fetch_sources_status = _fetch_sources_status_for_ui(src)
 
     text = (
         f"✏️ <b>تعديل المصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
@@ -1273,8 +1298,7 @@ async def edit_source_fetch_sources_menu(update: Update, context: ContextTypes.D
     if not src:
         return await sources_menu(update, context)
 
-    settings = _source_settings(src)
-    items = _fetch_sources(settings)
+    items = _fetch_sources_for_ui(src)
     src_name = src.get("source_name", "مصدر")
 
     text = f"📥 <b>قنوات الجلب</b>\nللمصدر: <code>{html.escape(src_name)}</code>\n\n"
@@ -1343,8 +1367,7 @@ async def edit_source_fetch_toggle(update: Update, context: ContextTypes.DEFAULT
     src = await _get_edit_source(context)
     if not src:
         return await sources_menu(update, context)
-    settings = _source_settings(src)
-    items = _fetch_sources(settings)
+    items = _fetch_sources_for_ui(src)
     if idx < 0 or idx >= len(items):
         return await edit_source_fetch_sources_menu(update, context)
 
@@ -1371,8 +1394,7 @@ async def edit_source_fetch_delete(update: Update, context: ContextTypes.DEFAULT
     src = await _get_edit_source(context)
     if not src:
         return await sources_menu(update, context)
-    settings = _source_settings(src)
-    items = _fetch_sources(settings)
+    items = _fetch_sources_for_ui(src)
     if idx < 0 or idx >= len(items):
         return await edit_source_fetch_sources_menu(update, context)
 
