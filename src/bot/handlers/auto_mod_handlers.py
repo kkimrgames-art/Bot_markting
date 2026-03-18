@@ -1265,6 +1265,124 @@ async def edit_source_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE
     return await _show_edit_source_menu(update, context)
 
 
+async def edit_source_fetch_sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await _safe_answer(query)
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+
+    settings = _source_settings(src)
+    items = _fetch_sources(settings)
+    src_name = src.get("source_name", "مصدر")
+
+    text = f"📥 <b>قنوات الجلب</b>\nللمصدر: <code>{html.escape(src_name)}</code>\n\n"
+    if not items:
+        text += "الحالة: <code>افتراضي (رابط واحد)</code>\n\n"
+    else:
+        enabled_count = sum(1 for x in items if bool((x or {}).get("enabled", True)))
+        text += f"الحالة: <code>{enabled_count}/{len(items)} فعّالة</code>\n\n"
+        for i, it in enumerate(items, start=1):
+            url = str((it or {}).get("url") or "").strip()
+            name = str((it or {}).get("name") or f"قناة {i}").strip() or f"قناة {i}"
+            en = bool((it or {}).get("enabled", True))
+            icon = "✅" if en else "❌"
+            text += f"{i}. {icon} <code>{html.escape(name)}</code>\n<code>{html.escape(url[:140])}</code>\n\n"
+
+    keyboard: List[List[InlineKeyboardButton]] = []
+    for idx, it in enumerate(items):
+        en = bool((it or {}).get("enabled", True))
+        toggle_label = "✅ تفعيل" if not en else "⏸ تعطيل"
+        keyboard.append([
+            InlineKeyboardButton(toggle_label, callback_data=f"am_edit_fetch_toggle:{idx}"),
+            InlineKeyboardButton("🗑 حذف", callback_data=f"am_edit_fetch_del:{idx}"),
+        ])
+    keyboard.append([InlineKeyboardButton("➕ إضافة قناة جلب", callback_data="am_edit_fetch_add")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
+
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_fetch_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await _safe_answer(query)
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+
+    context.user_data["am_text_input_mode"] = "edit_fetch_add"
+    text = (
+        "➕ <b>إضافة قناة جلب</b>\n\n"
+        "أرسل رابط واحد فقط (قناة / قائمة تشغيل / رابط فيديو).\n"
+        "يجب أن يبدأ بـ <code>http</code>.\n\n"
+        "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+    )
+    if query:
+        await query.edit_message_text(text, parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, parse_mode="HTML")
+    return AM_SOURCE_TEXT_INPUT
+
+
+async def edit_source_fetch_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    raw = (query.data or "")
+    idx_str = raw.split(":", 1)[1] if ":" in raw else ""
+    try:
+        idx = int(idx_str)
+    except Exception:
+        return await edit_source_fetch_sources_menu(update, context)
+
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    items = _fetch_sources(settings)
+    if idx < 0 or idx >= len(items):
+        return await edit_source_fetch_sources_menu(update, context)
+
+    current = dict(items[idx] or {})
+    current["enabled"] = not bool(current.get("enabled", True))
+    items[idx] = current
+
+    success = await _update_edit_source_settings(context, {"fetch_sources": items})
+    if query:
+        await query.answer("✅ تم التحديث" if success else "❌ تعذر التحديث", show_alert=not success)
+    return await edit_source_fetch_sources_menu(update, context)
+
+
+async def edit_source_fetch_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    raw = (query.data or "")
+    idx_str = raw.split(":", 1)[1] if ":" in raw else ""
+    try:
+        idx = int(idx_str)
+    except Exception:
+        return await edit_source_fetch_sources_menu(update, context)
+
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    items = _fetch_sources(settings)
+    if idx < 0 or idx >= len(items):
+        return await edit_source_fetch_sources_menu(update, context)
+
+    items.pop(idx)
+    success = await _update_edit_source_settings(context, {"fetch_sources": items})
+    if query:
+        await query.answer("🗑 تم الحذف" if success else "❌ تعذر الحذف", show_alert=not success)
+    return await edit_source_fetch_sources_menu(update, context)
+
+
 async def _show_tail_trim_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     src = await _get_edit_source(context)
