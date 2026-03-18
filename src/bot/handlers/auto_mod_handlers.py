@@ -3379,8 +3379,13 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not src:
             context.user_data.pop("am_text_input_mode", None)
             return AM_SOURCES
-        settings = _source_settings(src)
-        items = _fetch_sources(settings)
+        items = _fetch_sources_for_ui(src)
+        normalized_url = url.rstrip("/")
+        existing_urls = {str((x or {}).get("url") or "").strip().rstrip("/") for x in items}
+        if normalized_url in existing_urls:
+            context.user_data.pop("am_text_input_mode", None)
+            await update.message.reply_text("ℹ️ هذا الرابط موجود بالفعل ضمن قنوات الجلب.")
+            return await edit_source_fetch_sources_menu(update, context)
         items.append({
             "url": url,
             "name": "",
