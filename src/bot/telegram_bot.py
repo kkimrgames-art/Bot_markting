@@ -92,6 +92,7 @@ def build_application(token: str):
             ],
         },
         fallbacks=[CallbackQueryHandler(file_auth_handler.cancel_auth, pattern="^main_menu$")],
+        allow_reentry=True,
         per_message=False
     )
     application.add_handler(file_auth_conv)
