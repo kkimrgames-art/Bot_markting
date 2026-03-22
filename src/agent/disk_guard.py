@@ -27,9 +27,14 @@ CLEANUP_DIRS = [os.path.join(_PROJECT_ROOT, ".temp"), os.path.join(_PROJECT_ROOT
 
 def _protected_empty_dirs() -> set[str]:
     return {
+        os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".temp", "auto_mod"))),
         os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".temp", "auto_mod_downloads"))),
+        os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".temp", "mods"))),
+        os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".temp", "renderer"))),
         os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".output", "auto_mod_shorts"))),
         os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".output", "auto_mod_long"))),
+        os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".output", "auto_mod_overlay"))),
+        os.path.normcase(os.path.abspath(os.path.join(_PROJECT_ROOT, ".output", "auto_mod_facecam"))),
     }
 
 

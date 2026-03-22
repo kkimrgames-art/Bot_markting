@@ -330,6 +330,7 @@ class ModVideoProcessor:
             tuple: (مسار الفيديو المعالج, معلومات إضافية)
         """
         os.makedirs(output_dir, exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
         
         # التأكد من وجود البرامج اللازمة
         if not ffmpeg_bin() or not ffprobe_bin():
@@ -660,6 +661,10 @@ class ModVideoProcessor:
             raise RuntimeError((res.stderr or "")[-2500:])
     
     def _optimize_for_youtube(self, input_path: str, output_path: str) -> bool:
+        # Ensure temp and output dirs exist
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        if os.path.dirname(output_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
         """
         Final optimization pass for YouTube:
         - Ensures Move Atom is at start (Fast Start)
@@ -1345,6 +1350,10 @@ class ModVideoProcessor:
         custom_font: Optional[str] = None,
         font_size: int = 56,
     ) -> None:
+        # Ensure temp and output dirs exist
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        if os.path.dirname(output_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
         """إضافة نص مخصص على الفيديو بلون أبيض وحدود سوداء سميكة
 
         Args:
@@ -2160,6 +2169,9 @@ class ModVideoProcessor:
             if val is None:
                 return default
             return val.strip().lower() in {"1", "true", "yes", "on"}
+
+        # Ensure temp dir exists right before ffmpeg call
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         # 🔧 استخدام _shorts_x264_settings() لاحترام RENDER / LOW_RESOURCE_MODE
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()

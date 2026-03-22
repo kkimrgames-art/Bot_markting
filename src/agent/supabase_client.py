@@ -15,6 +15,11 @@ from datetime import datetime
 
 from .config import get_project_root
 
+# Load environment variables early to avoid race conditions with top-level variable reads
+import os
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(get_project_root(), ".env"), override=True)
+
 logger = logging.getLogger(__name__)
 
 # متغيرات البيئة

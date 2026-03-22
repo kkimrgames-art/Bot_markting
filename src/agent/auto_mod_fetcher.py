@@ -2189,14 +2189,22 @@ class AutoModDB:
                 interval = 120
 
             data = schedule.copy()
-            next_dt = now + timedelta(minutes=interval)
+            
+            # If published successfully, wait for the full interval.
+            # If failed, retry in 10 minutes instead of waiting for the full interval.
+            next_interval = interval if published else 10
+            
+            next_dt = now + timedelta(minutes=next_interval)
             existing_next_dt = _parse_datetime_utc(schedule.get("next_publish_at"))
+            
+            # Safeguard: if not published but original schedule is still in the future, don't bring it forward
             if not published and existing_next_dt and existing_next_dt > next_dt:
                 next_dt = existing_next_dt
 
             if published:
                 data["last_publish_at"] = now.isoformat()
                 data["total_published"] = (schedule.get("total_published", 0) or 0) + 1
+                
             data["next_publish_at"] = next_dt.isoformat()
             data["updated_at"] = now.isoformat()
 

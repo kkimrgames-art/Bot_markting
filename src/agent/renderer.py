@@ -507,6 +507,7 @@ def render_with_pip(
     override_pip: Optional[str] = None,
 ) -> str:
     os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(cfg.TEMP_DIR, exist_ok=True)
     base = os.path.splitext(os.path.basename(input_path))[0]
     out_path = os.path.join(out_dir, f"{base}_pip.mp4")
     
