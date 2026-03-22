@@ -104,6 +104,96 @@ class LanguageManager:
         
         # الفنلندية
         "fi": Language("fi", "الفنلندية", "Finnish", "Suomi", "🇫🇮"),
+
+        # الأوكرانية
+        "uk": Language("uk", "الأوكرانية", "Ukrainian", "Українська", "🇺🇦"),
+
+        # اليونانية
+        "el": Language("el", "اليونانية", "Greek", "Ελληνικά", "🇬🇷"),
+
+        # العبرية
+        "he": Language("he", "العبرية", "Hebrew", "עברית", "🇮🇱", rtl=True),
+
+        # الرومانية
+        "ro": Language("ro", "الرومانية", "Romanian", "Română", "🇷🇴"),
+
+        # التشيكية
+        "cs": Language("cs", "التشيكية", "Czech", "Čeština", "🇨🇿"),
+
+        # المجرية
+        "hu": Language("hu", "المجرية", "Hungarian", "Magyar", "🇭🇺"),
+
+        # البلغارية
+        "bg": Language("bg", "البلغارية", "Bulgarian", "Български", "🇧🇬"),
+
+        # الصربية
+        "sr": Language("sr", "الصربية", "Serbian", "Српски", "🇷🇸"),
+
+        # السلوفاكية
+        "sk": Language("sk", "السلوفاكية", "Slovak", "Slovenčina", "🇸🇰"),
+
+        # السلوفينية
+        "sl": Language("sl", "السلوفينية", "Slovenian", "Slovenščina", "🇸🇮"),
+
+        # الكرواتية
+        "hr": Language("hr", "الكرواتية", "Croatian", "Hrvatski", "🇭🇷"),
+
+        # الليتوانية
+        "lt": Language("lt", "الليتوانية", "Lithuanian", "Lietuvių", "🇱🇹"),
+
+        # اللاتفية
+        "lv": Language("lv", "اللاتفية", "Latvian", "Latviešu", "🇱🇻"),
+
+        # الإستونية
+        "et": Language("et", "الإستونية", "Estonian", "Eesti", "🇪🇪"),
+
+        # السواحلية
+        "sw": Language("sw", "السواحلية", "Swahili", "Kiswahili", "🇹🇿"),
+
+        # التاميلية
+        "ta": Language("ta", "التاميلية", "Tamil", "தமிழ்", "🇮🇳"),
+
+        # التيلجو
+        "te": Language("te", "التيلجو", "Telugu", "తెలుగు", "🇮🇳"),
+
+        # الماراثية
+        "mr": Language("mr", "الماراثية", "Marathi", "मराठी", "🇮🇳"),
+
+        # الغوجاراتية
+        "gu": Language("gu", "الغوجاراتية", "Gujarati", "ગુજરાતી", "🇮🇳"),
+
+        # البنجابية
+        "pa": Language("pa", "البنجابية", "Punjabi", "ਪੰਜਾਬੀ", "🇮🇳"),
+
+        # الكانادا
+        "kn": Language("kn", "الكانادا", "Kannada", "ಕನ್ನಡ", "🇮🇳"),
+
+        # المالايالامية
+        "ml": Language("ml", "المالايالامية", "Malayalam", "മലയാളം", "🇮🇳"),
+
+        # النيبالية
+        "ne": Language("ne", "النيبالية", "Nepali", "नेपाली", "🇳🇵"),
+
+        # السنهالية
+        "si": Language("si", "السنهالية", "Sinhala", "සිංහල", "🇱🇰"),
+
+        # البورمية
+        "my": Language("my", "البورمية", "Burmese", "မြန်မာ", "🇲🇲"),
+
+        # الخميرية
+        "km": Language("km", "الخميرية", "Khmer", "ខ្មែរ", "🇰🇭"),
+
+        # اللاوية
+        "lo": Language("lo", "اللاوية", "Lao", "ລາວ", "🇱🇦"),
+
+        # الأمهرية
+        "am": Language("am", "الأمهرية", "Amharic", "አማርኛ", "🇪🇹"),
+
+        # الجورجية
+        "ka": Language("ka", "الجورجية", "Georgian", "ქართული", "🇬🇪"),
+
+        # الأرمينية
+        "hy": Language("hy", "الأرمينية", "Armenian", "Հայերեն", "🇦🇲"),
     }
     
     @classmethod
@@ -120,9 +210,17 @@ class LanguageManager:
     def get_languages_by_region(cls) -> Dict[str, List[Language]]:
         """تصنيف اللغات حسب المنطقة"""
         regions = {
-            "الشرق الأوسط": ["ar", "fa", "ur", "tr"],
-            "أوروبا": ["en", "es", "fr", "de", "it", "ru", "pl", "nl", "sv", "no", "da", "fi"],
-            "آسيا": ["zh", "ja", "ko", "hi", "bn", "id", "th", "vi", "tl", "ms"],
+            "الشرق الأوسط": ["ar", "fa", "ur", "tr", "he"],
+            "أوروبا": [
+                "en", "es", "fr", "de", "it", "pt", "ru", "uk", "pl", "nl", "sv", "no", "da", "fi",
+                "el", "ro", "cs", "hu", "bg", "sr", "sk", "sl", "hr", "lt", "lv", "et",
+            ],
+            "آسيا": [
+                "zh", "ja", "ko", "hi", "bn", "ta", "te", "mr", "gu", "pa", "kn", "ml",
+                "id", "th", "vi", "tl", "ms", "ne", "si", "my", "km", "lo",
+            ],
+            "أفريقيا": ["sw", "am"],
+            "القوقاز وآسيا الوسطى": ["ka", "hy"],
             "أمريكا اللاتينية": ["es", "pt"],
         }
         
@@ -188,7 +286,7 @@ class LanguageManager:
     @classmethod
     def get_popular_languages(cls) -> List[str]:
         """الحصول على اللغات الأكثر شيوعاً"""
-        return ["ar", "en", "es", "pt", "id", "th", "vi", "hi", "ru", "tr"]
+        return ["ar", "en", "es", "pt", "id", "th", "vi", "hi", "ru", "tr", "zh", "fr"]
     
     @classmethod
     def search_languages(cls, query: str) -> List[Language]:

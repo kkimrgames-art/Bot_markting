@@ -4,6 +4,7 @@
 import os
 import logging
 import asyncio
+from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 
 from .handlers import (
@@ -19,6 +20,18 @@ from .raw_review import handle_raw_review_callback
 from ..agent.config import load_config, update_admin_id
 
 logger = logging.getLogger(__name__)
+
+
+def _is_expired_callback_query_error(error: Exception) -> bool:
+    if not isinstance(error, BadRequest):
+        return False
+    msg = str(error or "").lower()
+    return (
+        "query is too old" in msg
+        or "response timeout expired" in msg
+        or "query id is invalid" in msg
+    )
+
 
 def build_application(token: str):
     # زيادة أوقات الانتظار (Timeouts) لتجنب أخطاء الشبكة أثناء Polling المستمر
@@ -79,6 +92,7 @@ def build_application(token: str):
             ],
         },
         fallbacks=[CallbackQueryHandler(file_auth_handler.cancel_auth, pattern="^main_menu$")],
+        allow_reentry=True,
         per_message=False
     )
     application.add_handler(file_auth_conv)
@@ -254,6 +268,15 @@ def build_application(token: str):
     application.add_handler(CallbackQueryHandler(api_key_handlers.api_keys_menu, pattern="^api_keys_menu$"))
     application.add_handler(CallbackQueryHandler(api_key_handlers.delete_key_menu, pattern="^api_key_delete_menu$"))
     application.add_handler(CallbackQueryHandler(api_key_handlers.delete_key_confirm, pattern="^api_key_delete:"))
+
+    async def _on_application_error(update, context):
+        err = context.error
+        if _is_expired_callback_query_error(err):
+            logger.warning("Ignored expired callback query error: %s", err)
+            return
+        logger.exception("Unhandled bot error: %s", err, exc_info=err)
+
+    application.add_error_handler(_on_application_error)
 
     logger.info("✅ Auto-Mod Bot handlers registered (including Channel Management).")
     return application
