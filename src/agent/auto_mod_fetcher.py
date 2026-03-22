@@ -4145,12 +4145,15 @@ class AutoModFetcher:
                                     for v in batch_videos:
                                         v_id = v.get("id", "")
                                         if not v_id:
+                                            logger.info(f"🔎 [AutoMod-Debug] Skipped video with NO ID: {v.get('title')}")
                                             continue
 
                                         if is_raw_review_blocked(source_id, v_id):
+                                            logger.info(f"🔎 [AutoMod-Debug] Video {v_id} blocked by raw review.")
                                             other_count += 1
                                             continue
                                         if is_raw_review_skip_active(source_id, v_id):
+                                            logger.info(f"🔎 [AutoMod-Debug] Video {v_id} skipped by raw review.")
                                             other_count += 1
                                             continue
 
@@ -4171,7 +4174,17 @@ class AutoModFetcher:
                                                 locked_count += 1
                                                 continue
                                         if status:
+                                            logger.info(f"🔎 [AutoMod-Debug] Video {v_id} skipped because its status is '{status}' in DB.")
                                             other_count += 1
+                                            # If status is failed or something, we shouldn't append it to potential_videos without considering retries
+                                            # Wait, the original code had a bug here, it appended it!
+                                            # We will just print the log and continue to truly skip it, OR maybe the original logic intended to append it?
+                                            # The original code: if status: other_count += 1; potential_videos.append(v)
+                                            # If it originally appended it, then `potential_videos` was NOT empty originally!!
+                                            # Let's fix the bug: if status is truthy, we must continue, NOT append!
+                                            continue
+                                            
+                                        logger.info(f"🔎 [AutoMod-Debug] Video {v_id} added to potential_videos! (status={status})")
                                         potential_videos.append(v)
 
                                 if target_video_id and schedule_force and source_id == str(target_source_id):
