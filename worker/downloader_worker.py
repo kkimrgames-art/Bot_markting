@@ -15,7 +15,9 @@ Safety features:
 
 import asyncio
 import base64
+import logging
 import os
+import random
 import shutil
 import tempfile
 import time
@@ -24,6 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
 import yt_dlp
+
+logger = logging.getLogger("downloader_worker")
 
 # ──────────────────────────────────────────────────────────────
 # Configuration (all tuneable via env vars)
@@ -36,12 +40,13 @@ TOKEN = (os.getenv("DOWNLOADER_WORKER_TOKEN") or "").strip()
 TEMP_ROOT = Path(os.getenv("DOWNLOADER_WORKER_TEMP_DIR", "/tmp/worker_dl"))
 
 # ── Resource limits ──────────────────────────────────────────
-MAX_FILE_SIZE_MB = int(os.getenv("WORKER_MAX_FILE_MB", "50"))
+MAX_FILE_SIZE_MB = int(os.getenv("WORKER_MAX_FILE_MB", "200"))
 MAX_DURATION_SEC = int(os.getenv("WORKER_MAX_DURATION", "120"))
 MONTHLY_BW_LIMIT_GB = int(os.getenv("WORKER_BW_LIMIT_GB", "80"))
 MIN_DISK_FREE_MB = int(os.getenv("WORKER_MIN_DISK_MB", "200"))
 RATE_LIMIT_PER_MIN = int(os.getenv("WORKER_RATE_LIMIT", "10"))
 STREAM_CHUNK_KB = int(os.getenv("WORKER_CHUNK_KB", "256"))
+DOWNLOAD_TIMEOUT_SEC = int(os.getenv("WORKER_DOWNLOAD_TIMEOUT_SEC", "420"))
 
 # ── Internal state (reset on restart – fine for free tier) ───
 _download_semaphore = asyncio.Semaphore(1)
@@ -86,9 +91,31 @@ def _normalize_youtube_url(url: str) -> str:
 
 
 def _resolve_cookiefile() -> str:
-    raw_path = (os.getenv("YTDLP_COOKIES_PATH") or "").strip()
-    if raw_path and os.path.exists(raw_path):
-        return raw_path
+    env_candidates = [
+        os.getenv("YTDLP_COOKIES_PATH"),
+        os.getenv("YT_COOKIES_PATH"),
+        os.getenv("COOKIES_PATH"),
+    ]
+    for raw in env_candidates:
+        raw_path = (raw or "").strip()
+        if raw_path and os.path.exists(raw_path):
+            return raw_path
+
+    for candidate in [
+        "www.youtube.com_cookies.txt",
+        "youtube.com_cookies.txt",
+        "youtube_cookies.txt",
+        "cookies.txt",
+        ".data/yt_dlp_cookies.txt",
+        ".data/yt_cookies.txt",
+    ]:
+        try:
+            resolved = os.path.abspath(candidate)
+            if os.path.exists(resolved):
+                return resolved
+        except Exception:
+            pass
+
     cookie_b64 = (os.getenv("YTDLP_COOKIES_B64") or "").strip()
     cookie_text = (os.getenv("YTDLP_COOKIES_TEXT") or "").strip()
     if not cookie_b64 and not cookie_text:
@@ -172,12 +199,82 @@ def _duration_filter(max_dur: int):
     return _filter
 
 
-def _download_video(url: str, work_dir: Path) -> tuple[str, dict]:
+def _classify_ytdlp_error(exc: Exception) -> str:
+    msg = str(exc or "").lower()
+    if "timed out" in msg or "timeout" in msg:
+        return "timeout"
+    if "http error 429" in msg or "too many requests" in msg:
+        return "rate_limited"
+    if "http error 403" in msg or "forbidden" in msg:
+        return "forbidden"
+    if "requested format is not available" in msg or "requested formats are not available" in msg:
+        return "format_unavailable"
+    if "sign in to confirm" in msg or "bot" in msg and "detected" in msg:
+        return "botcheck"
+    if "impersonate target" in msg and "not available" in msg:
+        return "impersonate_unavailable"
+    return "other"
+
+
+def _download_profiles(ffmpeg_path: str, max_bytes: int, cookies_enabled: bool) -> list[dict]:
+    high_quality = _env_flag("WORKER_HIGH_QUALITY_FIRST", True)
+    if not ffmpeg_path:
+        return [
+            {
+                "label": "single_file_mp4",
+                "format": "best[ext=mp4]/best/b",
+                "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
+            }
+        ]
+
+    compatibility = {
+        "label": "compatibility_mobile",
+        "format": (
+            f"bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<=1080]+bestaudio/"
+            f"best[height<=1080][ext=mp4]/best[height<=1080]/best"
+        ),
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
+    }
+
+    if not high_quality:
+        return [compatibility]
+
+    profiles = [
+        {
+            "label": "hq_android_vr",
+            "format": (
+                "bestvideo[height<=1440][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1080]+bestaudio/"
+                "best[height<=1080][ext=mp4]/best[height<=1080]/best"
+            ),
+            "extractor_args": {"youtube": {"player_client": ["android_vr", "android", "mweb"]}},
+        },
+        {
+            "label": "hq_web",
+            "format": (
+                "bestvideo[height<=1440][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height<=1080]+bestaudio/"
+                "best[height<=1080][ext=mp4]/best[height<=1080]/best"
+            ),
+            "extractor_args": {"youtube": {"player_client": ["web", "android", "mweb"]}},
+        },
+        compatibility,
+    ]
+    if cookies_enabled:
+        profiles.insert(0, {"label": "authenticated_default", "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}}})
+        profiles.insert(1, {"label": "authenticated_web", "extractor_args": {"youtube": {"player_client": ["web", "web_safari", "mweb"]}}})
+    return profiles
+
+
+def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custom_po_token: str = "") -> tuple[str, dict]:
     ffmpeg_path = shutil.which("ffmpeg")
     outtmpl = str(work_dir / "%(id)s.%(ext)s")
-    cookiefile = _resolve_cookiefile()
+    cookiefile = custom_cookiefile or _resolve_cookiefile()
     proxy = (os.getenv("YTDLP_PROXY") or "").strip()
-    po_token = (os.getenv("YOUTUBE_PO_TOKEN") or "").strip()
+    po_token = custom_po_token or (os.getenv("YOUTUBE_PO_TOKEN") or "").strip()
 
     yt_args: dict = {}
     if po_token:
@@ -186,41 +283,97 @@ def _download_video(url: str, work_dir: Path) -> tuple[str, dict]:
         yt_args["player_client"] = ["android", "mweb", "web"]
 
     max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    profiles = _download_profiles(ffmpeg_path, max_bytes=max_bytes, cookies_enabled=bool(cookiefile))
+    ytdlp_url = _normalize_youtube_url(url)
+    last_error: Exception | None = None
+    max_attempts = max(1, int(os.getenv("WORKER_YTDLP_ATTEMPTS", "3")))
 
-    opts: dict = {
-        "outtmpl": outtmpl,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "continuedl": False,  # always fresh – avoids partial-file buildup
-        "retries": 2,
-        "nopart": True,
-        "match_filter": _duration_filter(MAX_DURATION_SEC),
-        "max_filesize": max_bytes,
-        "format": (
-            f"best[ext=mp4][filesize<{max_bytes}]/"
-            f"best[filesize<{max_bytes}]/"
-            "best[ext=mp4]/best/b"
-        ) if not ffmpeg_path else (
-            f"bestvideo[ext=mp4][filesize<{max_bytes}]+bestaudio[ext=m4a]/"
-            f"best[ext=mp4][filesize<{max_bytes}]/"
-            "best[ext=mp4]/best/b"
-        ),
-        "extractor_args": {"youtube": yt_args},
-        "http_headers": {"User-Agent": "Mozilla/5.0"},
-    }
-    if ffmpeg_path:
-        opts["merge_output_format"] = "mp4"
-    if cookiefile:
-        opts["cookiefile"] = cookiefile
-    if proxy:
-        opts["proxy"] = proxy
-    if _env_flag("YTDLP_FORCE_IPV4", True):
-        opts["source_address"] = "0.0.0.0"
+    for attempt in range(1, max_attempts + 1):
+        for profile_idx, profile in enumerate(profiles, start=1):
+            yt_profile_args = dict(yt_args)
+            profile_extractors = (profile.get("extractor_args") or {}).get("youtube") or {}
+            yt_profile_args.update(profile_extractors)
+            opts: dict = {
+                "outtmpl": outtmpl,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "continuedl": False,
+                "retries": 5,
+                "fragment_retries": 5,
+                "nopart": True,
+                "match_filter": _duration_filter(MAX_DURATION_SEC),
+                "max_filesize": max_bytes,
+                "format": profile.get("format"),
+                "extractor_args": {"youtube": yt_profile_args},
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Origin": "https://www.youtube.com",
+                    "Referer": "https://www.youtube.com/",
+                    "Sec-Fetch-Mode": "navigate",
+                },
+                "no_check_certificate": True,
+                "socket_timeout": 30,
+                "check_formats": "selected",
+                "prefer_free_formats": False,
+                "youtube_include_dash_manifest": True,
+                "youtube_include_hls_manifest": True,
+                "sleep_interval": 2,
+                "max_sleep_interval": 6,
+                "sleep_requests": 1,
+            }
+            if ffmpeg_path:
+                opts["merge_output_format"] = "mp4"
+                opts["ffmpeg_location"] = ffmpeg_path
+            if cookiefile:
+                opts["cookiefile"] = cookiefile
+            if proxy:
+                opts["proxy"] = proxy
+            if _env_flag("YTDLP_FORCE_IPV4", True):
+                opts["source_address"] = "0.0.0.0"
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(_normalize_youtube_url(url), download=True)
-        prepared = ydl.prepare_filename(info)
+            impersonate = (os.getenv("YTDLP_IMPERSONATE") or "chrome110").strip()
+            if impersonate and impersonate.lower() not in ("off", "none", "false") and os.getenv("YTDLP_SKIP_IMPERSONATE") != "1":
+                opts["impersonate"] = impersonate
+
+            try:
+                logger.info(
+                    "yt-dlp attempt %s/%s profile=%s ffmpeg=%s cookies=%s",
+                    attempt,
+                    max_attempts,
+                    profile.get("label") or f"profile_{profile_idx}",
+                    "on" if ffmpeg_path else "off",
+                    "on" if cookiefile else "off",
+                )
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(ytdlp_url, download=True)
+                    prepared = ydl.prepare_filename(info)
+                break
+            except Exception as exc:
+                last_error = exc
+                reason = _classify_ytdlp_error(exc)
+                logger.warning(
+                    "yt-dlp profile failed: attempt=%s/%s profile=%s reason=%s error=%s",
+                    attempt,
+                    max_attempts,
+                    profile.get("label") or f"profile_{profile_idx}",
+                    reason,
+                    repr(exc),
+                )
+                if reason == "impersonate_unavailable":
+                    os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                if profile_idx < len(profiles):
+                    continue
+                delay = min(10.0, (2 ** (attempt - 1)) + random.uniform(0.0, 0.8))
+                time.sleep(delay)
+        else:
+            continue
+        break
+    else:
+        detail = str(last_error) if str(last_error or "").strip() else repr(last_error)
+        raise RuntimeError(f"yt-dlp failed after {max_attempts} attempts: {detail}")
 
     base = os.path.splitext(prepared)[0]
     for candidate in [prepared, f"{base}.mp4", f"{base}.mkv", f"{base}.webm"]:
@@ -346,6 +499,9 @@ async def download(request: web.Request) -> web.StreamResponse:
     url = str(payload.get("url") or "").strip()
     if not url:
         return web.json_response({"error": "url is required"}, status=400)
+    
+    cookies_text = str(payload.get("cookies_text") or "").strip()
+    po_token = str(payload.get("po_token") or "").strip()
 
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -364,8 +520,15 @@ async def download(request: web.Request) -> web.StreamResponse:
     try:  # replaces "async with _download_semaphore:"
         try:
             with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp_dir:
-                file_path, info = await asyncio.to_thread(
-                    _download_video, url, Path(temp_dir)
+                custom_cookiefile = ""
+                if cookies_text:
+                    cfile_path = Path(temp_dir) / "request_cookies.txt"
+                    cfile_path.write_text(cookies_text, encoding="utf-8")
+                    custom_cookiefile = str(cfile_path)
+
+                file_path, info = await asyncio.wait_for(
+                    asyncio.to_thread(_download_video, url, Path(temp_dir), custom_cookiefile, po_token),
+                    timeout=max(60, DOWNLOAD_TIMEOUT_SEC),
                 )
 
                 file_size = os.path.getsize(file_path)
@@ -399,7 +562,7 @@ async def download(request: web.Request) -> web.StreamResponse:
 
         except Exception as exc:
             _total_downloads_fail += 1
-            return web.json_response({"error": str(exc)}, status=502)
+            return web.json_response({"error": str(exc)}, status=500)
         finally:
             _cleanup_temp()
     finally:
@@ -419,6 +582,10 @@ def create_app() -> web.Application:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
     _cleanup_temp()
     print(f"[Worker] Starting on {HOST}:{PORT}")
@@ -426,5 +593,6 @@ if __name__ == "__main__":
           f"{MAX_DURATION_SEC}s duration, "
           f"{MONTHLY_BW_LIMIT_GB}GB/month BW, "
           f"{RATE_LIMIT_PER_MIN} req/min")
+    print(f"[Worker] Download timeout: {DOWNLOAD_TIMEOUT_SEC}s")
     print(f"[Worker] FFmpeg: {shutil.which('ffmpeg') or 'NOT FOUND'}")
     web.run_app(create_app(), host=HOST, port=PORT)
