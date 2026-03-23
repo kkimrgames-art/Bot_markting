@@ -3091,12 +3091,25 @@ class AutoModFetcher:
             if max_duration is not None:
                 payload["max_duration"] = max_duration
 
+            # Inject cookies and po_token to bypass bot-checks on the remote worker
+            cookies_info = _resolve_cookiefile_details()
+            if cookies_info.get("available") and cookies_info.get("path"):
+                try:
+                    with open(cookies_info["path"], "r", encoding="utf-8") as f:
+                        payload["cookies_text"] = f.read()
+                except Exception as e:
+                    logger.warning("Failed to read cookie file for remote worker payload: %s", e)
+
+            po_token = os.getenv("YOUTUBE_PO_TOKEN")
+            if po_token:
+                payload["po_token"] = po_token
+
             timeout_seconds = float(settings.get("timeout_seconds") or 420.0)
             timeout = httpx.Timeout(timeout_seconds, connect=min(20.0, timeout_seconds))
 
             # === Retry logic for busy worker (503) or rate-limited (429) ===
-            max_worker_retries = 3
-            retry_backoff = [15, 30, 60]  # seconds between retries
+            max_worker_retries = 5
+            retry_backoff = [15, 30, 45, 60, 60]  # seconds between retries
 
             for worker_attempt in range(1, max_worker_retries + 1):
                 logger.info(
@@ -4174,67 +4187,87 @@ class AutoModFetcher:
                                                 locked_count += 1
                                                 continue
                                         if status:
+                                            # للسماح بإعادة المحاولة للفيديوهات الفاشلة بعد مرور 24 ساعة
+                                            if status == 'failed':
+                                                try:
+                                                    time_since_update = datetime.now(timezone.utc) - updated_at
+                                                    if time_since_update > timedelta(hours=24):
+                                                        logger.info(f"🔎 [AutoMod] Video {v_id} was 'failed' {time_since_update.days} days ago. Retrying it now.")
+                                                        potential_videos.append(v)
+                                                        continue
+                                                except Exception as dt_err:
+                                                    logger.warning(f"⚠️ [AutoMod] Failed to check date for retry: {dt_err}")
+                                            
                                             logger.info(f"🔎 [AutoMod-Debug] Video {v_id} skipped because its status is '{status}' in DB.")
                                             other_count += 1
-                                            # If status is failed or something, we shouldn't append it to potential_videos without considering retries
-                                            # Wait, the original code had a bug here, it appended it!
-                                            # We will just print the log and continue to truly skip it, OR maybe the original logic intended to append it?
-                                            # The original code: if status: other_count += 1; potential_videos.append(v)
-                                            # If it originally appended it, then `potential_videos` was NOT empty originally!!
-                                            # Let's fix the bug: if status is truthy, we must continue, NOT append!
                                             continue
                                             
                                         logger.info(f"🔎 [AutoMod-Debug] Video {v_id} added to potential_videos! (status={status})")
                                         potential_videos.append(v)
 
-                                if target_video_id and schedule_force and source_id == str(target_source_id):
-                                    potential_videos = [
-                                        item for item in potential_videos
-                                        if str(item.get("id", "")) == str(target_video_id)
-                                    ]
-                                elif require_raw_review and potential_videos:
-                                    approved_videos = [
-                                        item for item in potential_videos
-                                        if is_raw_review_approved(source_id, item.get("id", ""))
-                                    ]
-                                    if approved_videos:
-                                        potential_videos = approved_videos
-                                try:
-                                    logger.info(
-                                        f"🧾 [AutoMod] Source {src_name}: new={len(potential_videos)}, published={published_count}, locked={locked_count}, other={other_count} (channel={channel_id[:10]}...)"
-                                    )
-                                except Exception:
-                                    pass
-                            
-                                if potential_videos:
-                                    # وجدنا فيديوهات جديدة في هذا النطاق!
-                                    found_new_video = True
-                                
-                                    # تطبيق ترتيب الجلب (Fetch Order) المكتشف في هذا النطاق
-                                    if fetch_order == "oldest":
-                                        # ترتيب من الأقدم للأحدث (نأخذ أقدم فيديو في النطاق المكتشف)
-                                        try:
-                                            potential_videos.sort(key=lambda x: x.get("upload_date") or "99999999")
-                                        except Exception: pass
-                                    elif fetch_order == "random":
-                                        import random
-                                        random.shuffle(potential_videos)
-                                    else: # newest
-                                        try:
-                                            potential_videos.sort(key=lambda x: x.get("upload_date") or "00000000", reverse=True)
-                                        except Exception: pass
-                                
-                                    videos = potential_videos
-                                    await _notify(f"🎯 وجدنا *{len(potential_videos)}* فيديو جديد في النطاق {s_range} ({fetch_order}).")
-                                    break
-                                else:
-                                    if idx < len(search_ranges) - 1:
-                                        await _notify(f"🔄 جميع فيديوهات النطاق {s_range} تمت معالجتها. *جاري البحث في النطاق التالي...*")
-                                    else:
-                                        await _notify(f"📭 تم الوصول لأقصى عمق بحث ({depth}) ولم نجد فيديوهات جديدة.")
+                                    logger.info(f"🔎 [AutoMod-Debug] potential_videos count BEFORE filters: {len(potential_videos)}")
+                                    if target_video_id and schedule_force and source_id == str(target_source_id):
+                                        potential_videos = [
+                                            item for item in potential_videos
+                                            if str(item.get("id", "")) == str(target_video_id)
+                                        ]
+                                        logger.info(f"🔎 [AutoMod-Debug] Filtered by target_video_id({target_video_id}). Remaining: {len(potential_videos)}")
+                                    elif require_raw_review and potential_videos:
+                                        approved_videos = [
+                                            item for item in potential_videos
+                                            if is_raw_review_approved(source_id, item.get("id", ""))
+                                        ]
+                                        if approved_videos:
+                                            potential_videos = approved_videos
+                                            logger.info(f"🔎 [AutoMod-Debug] Filtered because approved_videos WAS populated. Remaining: {len(potential_videos)}")
+                                        else:
+                                            logger.info(f"🔎 [AutoMod-Debug] NOT filtered by approved_videos, because approved_videos was empty! Remaining: {len(potential_videos)}")
+                                                
+                                            # WAIT! THIS IS THE FIX. If require_raw_review is true, and NO videos are approved, WE SHOULD NOT PROCESS ANY VIDEO FROM THIS BATCH!
+                                            # If we don't process them, we should NOT send them to `for video in videos:`!
+                                            # Oh. BUT we need to send the FIRST video to raw review! 
+                                            # If we don't pick it, how does it go to raw review?
+                                            # `for video in videos:` picks the first video and sends it to raw review!
+                                            # So we MUST KEEP THE LIST OF VIDEOS AND SEND THE FIRST ONE!
+
+                                    logger.info(f"🔎 [AutoMod-Debug] potential_videos count AFTER filters: {len(potential_videos)}")
+                                    try:
                                         logger.info(
-                                            f"📭 [AutoMod] No new videos in any range for fetch {fetch_name} (channel={channel_id[:10]}...)"
+                                            f"🧾 [AutoMod] Source {src_name}: new={len(potential_videos)}, published={published_count}, locked={locked_count}, other={other_count} (channel={channel_id[:10]}...)"
                                         )
+                                    except Exception:
+                                        pass
+                                
+                                    if potential_videos:
+                                        # وجدنا فيديوهات جديدة في هذا النطاق!
+                                        found_new_video = True
+                                    
+                                        # تطبيق ترتيب الجلب (Fetch Order) المكتشف في هذا النطاق
+                                        if fetch_order == "oldest":
+                                            # ترتيب من الأقدم للأحدث (نأخذ أقدم فيديو في النطاق المكتشف)
+                                            try:
+                                                potential_videos.sort(key=lambda x: x.get("upload_date") or "99999999")
+                                            except Exception: pass
+                                        elif fetch_order == "random":
+                                            import random
+                                            random.shuffle(potential_videos)
+                                        else: # newest
+                                            try:
+                                                potential_videos.sort(key=lambda x: x.get("upload_date") or "00000000", reverse=True)
+                                            except Exception: pass
+                                    
+                                        videos = potential_videos
+                                        await _notify(f"🎯 وجدنا *{len(potential_videos)}* فيديو جديد في النطاق {s_range} ({fetch_order}).")
+                                        break
+                                    else:
+                                        if idx < len(search_ranges) - 1:
+                                            await _notify(f"🔄 جميع فيديوهات النطاق {s_range} تمت معالجتها. *جاري البحث في النطاق التالي...*")
+                                        else:
+                                            depth_msg = f"تم الوصول لأقصى عمق بحث ولم نجد فيديوهات جديدة."
+                                            await _notify(f"📭 {depth_msg}")
+                                            logger.info(
+                                                f"📭 [AutoMod] No new videos in any range for fetch {fetch_name} (channel={channel_id[:10]}...)"
+                                            )
 
                                 if found_new_video:
                                     # حفظ آخر fetch context للاستعمال اللاحق في التنزيل/المراجعة
@@ -4795,11 +4828,9 @@ class AutoModFetcher:
                             try:
                                 schedule["enabled"] = False
                                 schedule["paused_reason"] = str(e)[:400]
-                                schedule["paused_at"] = datetime.now(timezone.utc).isoformat()
                                 self.db._save_existing_schedule(schedule, {
                                     "enabled": False,
                                     "paused_reason": str(e)[:400],
-                                    "paused_at": datetime.now(timezone.utc).isoformat(),
                                 })
                                 logger.warning(
                                     f"🛑 [AutoMod] Schedule paused only for affected channel "
