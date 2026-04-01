@@ -200,6 +200,10 @@ def _duration_filter(max_dur: int):
 
 
 def _classify_ytdlp_error(exc: Exception) -> str:
+    # AssertionError with no message is thrown when impersonate target
+    # string is not auto-converted to ImpersonateTarget (yt-dlp 2026.x+)
+    if isinstance(exc, AssertionError):
+        return "impersonate_unavailable"
     msg = str(exc or "").lower()
     if "timed out" in msg or "timeout" in msg:
         return "timeout"
@@ -216,16 +220,27 @@ def _classify_ytdlp_error(exc: Exception) -> str:
     return "other"
 
 
-def _download_profiles(ffmpeg_path: str, max_bytes: int, cookies_enabled: bool) -> list[dict]:
+def _download_profiles(ffmpeg_path: str, max_bytes: int, cookies_enabled: bool, prefer_anonymous: bool = False) -> list[dict]:
     high_quality = _env_flag("WORKER_HIGH_QUALITY_FIRST", True)
-    if not ffmpeg_path:
-        return [
-            {
-                "label": "single_file_mp4",
-                "format": "best[ext=mp4]/best/b",
-                "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
-            }
-        ]
+    single_file_profile = {
+        "label": "single_file_mp4",
+        "format": "best[ext=mp4]/best/b",
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
+    }
+    anonymous_single_file_profile = {
+        "label": "anonymous_single_file_mp4",
+        "format": "best[ext=mp4]/best/b",
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
+        "strip_cookies": True,
+    }
+    authenticated_default_profile = {
+        "label": "authenticated_default",
+        "extractor_args": {"youtube": {"player_client": ["tv_embedded", "web_creator", "mweb"]}},
+    }
+    authenticated_web_profile = {
+        "label": "authenticated_web",
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}},
+    }
 
     compatibility = {
         "label": "compatibility_mobile",
@@ -236,13 +251,36 @@ def _download_profiles(ffmpeg_path: str, max_bytes: int, cookies_enabled: bool) 
         ),
         "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
     }
+    anonymous_compatibility = {
+        "label": "anonymous_compatibility_mobile",
+        "format": (
+            f"bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height<=1080]+bestaudio/"
+            f"best[height<=1080][ext=mp4]/best[height<=1080]/best"
+        ),
+        "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}},
+        "strip_cookies": True,
+    }
+
+    if not ffmpeg_path:
+        anonymous_profiles = [anonymous_single_file_profile]
+        if not cookies_enabled:
+            return anonymous_profiles
+        if prefer_anonymous:
+            return anonymous_profiles + [authenticated_default_profile, authenticated_web_profile]
+        return [authenticated_default_profile, authenticated_web_profile] + anonymous_profiles
 
     if not high_quality:
-        return [compatibility]
+        anonymous_profiles = [anonymous_compatibility]
+        if not cookies_enabled:
+            return anonymous_profiles
+        if prefer_anonymous:
+            return anonymous_profiles + [authenticated_default_profile, authenticated_web_profile]
+        return [authenticated_default_profile, authenticated_web_profile] + anonymous_profiles
 
-    profiles = [
+    anonymous_profiles = [
         {
-            "label": "hq_android_vr",
+            "label": "anonymous_hq_android_vr",
             "format": (
                 "bestvideo[height<=1440][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
                 "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
@@ -250,9 +288,10 @@ def _download_profiles(ffmpeg_path: str, max_bytes: int, cookies_enabled: bool) 
                 "best[height<=1080][ext=mp4]/best[height<=1080]/best"
             ),
             "extractor_args": {"youtube": {"player_client": ["android_vr", "android", "mweb"]}},
+            "strip_cookies": True,
         },
         {
-            "label": "hq_web",
+            "label": "anonymous_hq_web",
             "format": (
                 "bestvideo[height<=1440][vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
                 "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
@@ -260,21 +299,33 @@ def _download_profiles(ffmpeg_path: str, max_bytes: int, cookies_enabled: bool) 
                 "best[height<=1080][ext=mp4]/best[height<=1080]/best"
             ),
             "extractor_args": {"youtube": {"player_client": ["web", "android", "mweb"]}},
+            "strip_cookies": True,
         },
-        compatibility,
+        anonymous_compatibility,
     ]
-    if cookies_enabled:
-        profiles.insert(0, {"label": "authenticated_default", "extractor_args": {"youtube": {"player_client": ["ios", "android", "mweb"]}}})
-        profiles.insert(1, {"label": "authenticated_web", "extractor_args": {"youtube": {"player_client": ["web", "web_safari", "mweb"]}}})
-    return profiles
+    if not cookies_enabled:
+        return anonymous_profiles
+
+    if prefer_anonymous:
+        return anonymous_profiles + [authenticated_default_profile, authenticated_web_profile]
+
+    return [authenticated_default_profile, authenticated_web_profile] + anonymous_profiles
 
 
-def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custom_po_token: str = "") -> tuple[str, dict]:
+def _download_video(
+    url: str,
+    work_dir: Path,
+    custom_cookiefile: str = "",
+    custom_po_token: str = "",
+    custom_max_duration: int | None = None,
+    prefer_anonymous: bool = False,
+) -> tuple[str, dict]:
     ffmpeg_path = shutil.which("ffmpeg")
     outtmpl = str(work_dir / "%(id)s.%(ext)s")
     cookiefile = custom_cookiefile or _resolve_cookiefile()
     proxy = (os.getenv("YTDLP_PROXY") or "").strip()
     po_token = custom_po_token or (os.getenv("YOUTUBE_PO_TOKEN") or "").strip()
+    max_duration = max(1, int(custom_max_duration)) if custom_max_duration else MAX_DURATION_SEC
 
     yt_args: dict = {}
     if po_token:
@@ -283,7 +334,12 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
         yt_args["player_client"] = ["android", "mweb", "web"]
 
     max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
-    profiles = _download_profiles(ffmpeg_path, max_bytes=max_bytes, cookies_enabled=bool(cookiefile))
+    profiles = _download_profiles(
+        ffmpeg_path,
+        max_bytes=max_bytes,
+        cookies_enabled=bool(cookiefile),
+        prefer_anonymous=prefer_anonymous,
+    )
     ytdlp_url = _normalize_youtube_url(url)
     last_error: Exception | None = None
     max_attempts = max(1, int(os.getenv("WORKER_YTDLP_ATTEMPTS", "3")))
@@ -293,6 +349,7 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
             yt_profile_args = dict(yt_args)
             profile_extractors = (profile.get("extractor_args") or {}).get("youtube") or {}
             yt_profile_args.update(profile_extractors)
+            profile_cookiefile = "" if profile.get("strip_cookies") else cookiefile
             opts: dict = {
                 "outtmpl": outtmpl,
                 "noplaylist": True,
@@ -302,7 +359,7 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
                 "retries": 5,
                 "fragment_retries": 5,
                 "nopart": True,
-                "match_filter": _duration_filter(MAX_DURATION_SEC),
+                "match_filter": _duration_filter(max_duration),
                 "max_filesize": max_bytes,
                 "format": profile.get("format"),
                 "extractor_args": {"youtube": yt_profile_args},
@@ -327,8 +384,8 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
             if ffmpeg_path:
                 opts["merge_output_format"] = "mp4"
                 opts["ffmpeg_location"] = ffmpeg_path
-            if cookiefile:
-                opts["cookiefile"] = cookiefile
+            if profile_cookiefile:
+                opts["cookiefile"] = profile_cookiefile
             if proxy:
                 opts["proxy"] = proxy
             if _env_flag("YTDLP_FORCE_IPV4", True):
@@ -336,7 +393,12 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
 
             impersonate = (os.getenv("YTDLP_IMPERSONATE") or "chrome110").strip()
             if impersonate and impersonate.lower() not in ("off", "none", "false") and os.getenv("YTDLP_SKIP_IMPERSONATE") != "1":
-                opts["impersonate"] = impersonate
+                try:
+                    from yt_dlp.networking.impersonate import ImpersonateTarget
+                    target = ImpersonateTarget.from_str(impersonate)
+                    opts["impersonate"] = target
+                except Exception:
+                    logger.info("impersonate target %r not available, skipping", impersonate)
 
             try:
                 logger.info(
@@ -345,11 +407,20 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
                     max_attempts,
                     profile.get("label") or f"profile_{profile_idx}",
                     "on" if ffmpeg_path else "off",
-                    "on" if cookiefile else "off",
+                    "on" if profile_cookiefile else "off",
                 )
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(ytdlp_url, download=True)
-                    prepared = ydl.prepare_filename(info)
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(ytdlp_url, download=True)
+                        prepared = ydl.prepare_filename(info)
+                except AssertionError:
+                    # impersonate target incompatible — retry without it
+                    opts.pop("impersonate", None)
+                    os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                    logger.warning("impersonate caused AssertionError, retrying without it")
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(ytdlp_url, download=True)
+                        prepared = ydl.prepare_filename(info)
                 break
             except Exception as exc:
                 last_error = exc
@@ -364,6 +435,9 @@ def _download_video(url: str, work_dir: Path, custom_cookiefile: str = "", custo
                 )
                 if reason == "impersonate_unavailable":
                     os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                if reason == "botcheck":
+                    logger.warning("Botcheck detected. Cookiefile might be poisoned. Dropping cookies for subsequent fallbacks.")
+                    cookiefile = ""
                 if profile_idx < len(profiles):
                     continue
                 delay = min(10.0, (2 ** (attempt - 1)) + random.uniform(0.0, 0.8))
@@ -502,6 +576,19 @@ async def download(request: web.Request) -> web.StreamResponse:
     
     cookies_text = str(payload.get("cookies_text") or "").strip()
     po_token = str(payload.get("po_token") or "").strip()
+    max_duration_raw = payload.get("max_duration")
+    max_duration = None
+    try:
+        if max_duration_raw is not None and str(max_duration_raw).strip():
+            max_duration = max(1, int(float(str(max_duration_raw).strip())))
+    except Exception:
+        max_duration = None
+    prefer_anonymous_raw = payload.get("prefer_anonymous")
+    if prefer_anonymous_raw is None:
+        prefer_anonymous = _env_flag("WORKER_PREFER_ANONYMOUS_YOUTUBE", False)
+    else:
+        prefer_anonymous = str(prefer_anonymous_raw).strip().lower() in {"1", "true", "yes", "on"}
+    skip_cookies = str(payload.get("skip_cookies") or "").strip().lower() in {"1", "true", "yes", "on"}
 
     TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -521,13 +608,21 @@ async def download(request: web.Request) -> web.StreamResponse:
         try:
             with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as temp_dir:
                 custom_cookiefile = ""
-                if cookies_text:
+                if cookies_text and not skip_cookies:
                     cfile_path = Path(temp_dir) / "request_cookies.txt"
                     cfile_path.write_text(cookies_text, encoding="utf-8")
                     custom_cookiefile = str(cfile_path)
 
                 file_path, info = await asyncio.wait_for(
-                    asyncio.to_thread(_download_video, url, Path(temp_dir), custom_cookiefile, po_token),
+                    asyncio.to_thread(
+                        _download_video,
+                        url,
+                        Path(temp_dir),
+                        custom_cookiefile,
+                        po_token,
+                        max_duration,
+                        prefer_anonymous,
+                    ),
                     timeout=max(60, DOWNLOAD_TIMEOUT_SEC),
                 )
 
@@ -573,7 +668,7 @@ async def download(request: web.Request) -> web.StreamResponse:
 # App factory
 # ──────────────────────────────────────────────────────────────
 def create_app() -> web.Application:
-    app = web.Application(client_max_size=2 * 1024 * 1024)  # 2MB max request
+    app = web.Application(client_max_size=8 * 1024 * 1024)
     app.router.add_get("/", root)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/status", status)
