@@ -4116,6 +4116,10 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             CommandHandler("start", auto_mod_menu),
             CommandHandler("menu", auto_mod_menu),
             CallbackQueryHandler(auto_mod_menu, pattern=r"^(am_menu|auto_mod)$"),
+            CallbackQueryHandler(edit_source_start, pattern=r"^am_edit_src:"),
+            CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
+            CallbackQueryHandler(edit_source_fetch_sources_menu, pattern=r"^am_edit_fetch_menu$"),
+            CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add:"),
         ],
         states={
             AM_MENU: [
