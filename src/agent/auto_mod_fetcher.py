@@ -60,7 +60,7 @@ import threading
 from contextlib import suppress
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from src.agent.downloader import _is_retryable_ytdlp_error, _build_retry_opts
 from src.utils.resilient_fs import ResilientFS
@@ -1624,13 +1624,172 @@ def _is_facebook_reel_url(url: str) -> bool:
     return ("/reel/" in u) or ("/reels/" in u) or ("facebook.com/reel/" in u) or ("facebook.com/reels/" in u)
 
 
+def _clean_url_candidate(raw_url: Any) -> str:
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return ""
+    raw = raw.strip().strip("`'\"")
+    raw = raw.replace(" ", "")
+    while raw and raw[-1] in ".,;)]}>":
+        raw = raw[:-1]
+    return raw
+
+
+def _normalize_facebook_netloc(netloc: str) -> str:
+    lowered = str(netloc or "").strip().lower()
+    if lowered in {"web.facebook.com", "m.facebook.com", "mbasic.facebook.com"}:
+        return "www.facebook.com"
+    return netloc
+
+
+def _normalize_facebook_candidate_url(raw_url: Any) -> str:
+    raw = _clean_url_candidate(raw_url)
+    if not raw:
+        return ""
+
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+
+    parsed = urlparse(raw)
+    host = (parsed.netloc or "").lower()
+    if "facebook.com" not in host and host != "fb.watch":
+        return raw
+
+    query = parse_qs(parsed.query)
+    for key in ("share_url", "u", "href"):
+        for value in query.get(key, []):
+            nested = _clean_url_candidate(unquote(value))
+            if not nested:
+                continue
+            nested_parsed = urlparse(nested)
+            nested_host = (nested_parsed.netloc or "").lower()
+            if "facebook.com" in nested_host or nested_host == "fb.watch":
+                return _normalize_facebook_candidate_url(nested)
+
+    normalized_netloc = parsed.netloc
+    if "facebook.com" in host:
+        normalized_netloc = _normalize_facebook_netloc(parsed.netloc)
+
+    path = parsed.path or ""
+    path_lc = path.lower()
+    keep_query_keys = {"id", "sk"}
+    if host == "fb.watch":
+        keep_query_keys = set()
+    elif "/watch" in path_lc:
+        keep_query_keys = {"v", "video_id", "story_fbid", "id"}
+
+    normalized_query: List[Tuple[str, str]] = []
+    for key, values in query.items():
+        if key not in keep_query_keys:
+            continue
+        for value in values:
+            cleaned_value = _clean_url_candidate(value)
+            if cleaned_value:
+                normalized_query.append((key, cleaned_value))
+
+    return parsed._replace(
+        netloc=normalized_netloc,
+        query=urlencode(normalized_query, doseq=True) if normalized_query else "",
+        fragment="",
+    ).geturl()
+
+
+def _is_direct_facebook_video_url(raw_url: Any) -> bool:
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    host = (parsed.netloc or "").lower()
+    if host == "fb.watch":
+        return True
+    path = (parsed.path or "").lower()
+    return "/watch" in path or "/reel/" in path or "/videos/" in path
+
+
+def _extract_facebook_video_id(raw_value: Any) -> str:
+    value = _clean_url_candidate(raw_value)
+    if not value:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", value):
+        return value
+
+    normalized = _normalize_facebook_candidate_url(value)
+    parsed = urlparse(normalized)
+    host = (parsed.netloc or "").lower()
+    query = parse_qs(parsed.query)
+    for key in ("v", "video_id"):
+        candidate = _clean_url_candidate((query.get(key) or [""])[0])
+        if candidate:
+            return candidate
+
+    match = re.search(r"/(?:reel|videos)/(?:[^/?#]+/)?([^/?#]+)", parsed.path or "", re.IGNORECASE)
+    if match:
+        return _clean_url_candidate(match.group(1))
+
+    if host == "fb.watch":
+        return _clean_url_candidate((parsed.path or "").strip("/"))
+
+    return ""
+
+
+def _select_facebook_video_url(entry: Dict[str, Any], source_url: str) -> str:
+    seen = set()
+    direct_candidates: List[str] = []
+    all_candidates: List[str] = []
+
+    for candidate in (
+        (entry or {}).get("webpage_url"),
+        (entry or {}).get("original_url"),
+        (entry or {}).get("url"),
+        source_url,
+    ):
+        normalized = _normalize_facebook_candidate_url(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        all_candidates.append(normalized)
+        if _is_direct_facebook_video_url(normalized):
+            direct_candidates.append(normalized)
+
+    if direct_candidates:
+        return direct_candidates[0]
+
+    for candidate in (
+        (entry or {}).get("id"),
+        (entry or {}).get("display_id"),
+        (entry or {}).get("url"),
+        (entry or {}).get("webpage_url"),
+    ):
+        extracted_id = _extract_facebook_video_id(candidate)
+        if extracted_id:
+            return f"https://www.facebook.com/watch/?v={extracted_id}"
+
+    return all_candidates[0] if all_candidates else ""
+
+
+def _normalize_facebook_video_identifier(raw_id: Any, video_url: str) -> str:
+    cleaned_id = _clean_url_candidate(raw_id)
+    if cleaned_id and not re.match(r"^https?://", cleaned_id, re.IGNORECASE):
+        return cleaned_id
+
+    extracted_id = _extract_facebook_video_id(video_url)
+    if extracted_id:
+        return extracted_id
+
+    normalized_id = _normalize_facebook_candidate_url(cleaned_id)
+    if normalized_id:
+        return normalized_id
+
+    return _normalize_facebook_candidate_url(video_url)
+
+
 def _normalize_facebook_source_url(source_url: str, platform: str) -> str:
     if not source_url:
         return source_url
     if not (platform or "").startswith("facebook"):
         return source_url
 
-    raw = source_url.strip()
+    raw = _normalize_facebook_candidate_url(source_url)
     if not raw:
         return raw
 
@@ -1660,6 +1819,75 @@ def _normalize_facebook_source_url(source_url: str, platform: str) -> str:
             return raw
 
     return raw
+
+
+def _coerce_video_timestamp(value: Any) -> int:
+    if value in (None, "", 0, "0"):
+        return 0
+    try:
+        return max(0, int(float(value)))
+    except Exception:
+        pass
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    raw = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, int(dt.timestamp()))
+    except Exception:
+        return 0
+
+
+def _normalize_upload_date_value(upload_date: Any, timestamp: Any = None) -> str:
+    raw = str(upload_date or "").strip()
+    if raw:
+        compact = re.sub(r"[^0-9]", "", raw)
+        if len(compact) >= 8:
+            return compact[:8]
+
+    ts = _coerce_video_timestamp(timestamp)
+    if ts > 0:
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d")
+        except Exception:
+            return ""
+    return ""
+
+
+def _video_sort_timestamp(video: Dict[str, Any]) -> int:
+    upload_date = str((video or {}).get("upload_date") or "").strip()
+    if upload_date:
+        try:
+            dt = datetime.strptime(upload_date[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except Exception:
+            pass
+
+    for key in ("timestamp", "release_timestamp", "modified_timestamp"):
+        ts = _coerce_video_timestamp((video or {}).get(key))
+        if ts > 0:
+            return ts
+    return 0
+
+
+def _sort_videos_for_fetch_order(videos: List[Dict[str, Any]], fetch_order: str) -> List[Dict[str, Any]]:
+    if fetch_order == "random":
+        random.shuffle(videos)
+        return videos
+
+    reverse = fetch_order != "oldest"
+    videos.sort(
+        key=lambda item: (
+            _video_sort_timestamp(item),
+            _coerce_video_timestamp(item.get("view_count")),
+            str(item.get("id") or ""),
+        ),
+        reverse=reverse,
+    )
+    return videos
 
 # ==================== معرف النسخة ====================
 
@@ -3044,23 +3272,47 @@ class AutoModFetcher:
             for entry in entries:
                 if not entry:
                     continue
-                # Use webpage_url or url, fallback to common patterns
-                fb_url = entry.get("webpage_url") or entry.get("url") or ""
+                fb_url = ""
                 vid_id = entry.get("id") or entry.get("url", "")
+                if (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower() or "fb.watch" in (source_url or "").lower():
+                    fb_url = _select_facebook_video_url(entry, source_url)
+                    vid_id = _normalize_facebook_video_identifier(vid_id, fb_url)
+                else:
+                    fb_url = entry.get("webpage_url") or entry.get("url") or ""
                 if not vid_id:
                     continue
                 
-                # If the user provided a direct video URL, don't filter it out even if they chose "reels" platform.
-                # Only filter if the original source_url was a page/reels list.
                 is_direct = "/watch" in source_url.lower() or "/reel" in source_url.lower() or "v=" in source_url.lower()
                 
-                # Correctly handle platform filtering
                 if platform == "facebook_reels" and not is_direct and fb_url and (not _is_facebook_reel_url(fb_url)):
                     continue
 
                 duration = entry.get("duration")
                 if duration is not None:
                     logger.debug(f"ℹ️ Video {vid_id} duration: {duration}s")
+
+                timestamp = _coerce_video_timestamp(
+                    entry.get("timestamp")
+                    or entry.get("release_timestamp")
+                    or entry.get("modified_timestamp")
+                    or entry.get("upload_timestamp")
+                )
+                upload_date = _normalize_upload_date_value(
+                    entry.get("upload_date")
+                    or entry.get("release_date")
+                    or entry.get("modified_date"),
+                    timestamp=timestamp,
+                )
+                video_type = _infer_processing_video_type(
+                    {
+                        "duration": duration,
+                        "url": fb_url,
+                        "webpage_url": entry.get("webpage_url"),
+                        "original_url": entry.get("original_url"),
+                    },
+                    platform,
+                    source_url,
+                )
 
                 videos.append({
                     "id": vid_id,
@@ -3069,7 +3321,11 @@ class AutoModFetcher:
                     "url": fb_url or (f"https://www.youtube.com/watch?v={vid_id}" if "facebook" not in (platform or "") else f"https://www.facebook.com/watch/?v={vid_id}"),
                     "duration": duration,
                     "view_count": entry.get("view_count"),
-                    "upload_date": entry.get("upload_date"),
+                    "upload_date": upload_date,
+                    "timestamp": timestamp,
+                    "video_type": video_type,
+                    "webpage_url": entry.get("webpage_url") or fb_url,
+                    "original_url": entry.get("original_url") or source_url,
                 })
             return videos
 
@@ -3138,10 +3394,11 @@ class AutoModFetcher:
         """تنزيل بشكل متزامن — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة وretry"""
         output_dir = _ensure_runtime_dir(output_dir)
         cookies_info = _resolve_cookiefile_details()
-        normalized_video_url = _normalize_youtube_watch_url(video_url)
+        normalized_video_url = _normalize_facebook_candidate_url(video_url)
+        normalized_video_url = _normalize_youtube_watch_url(normalized_video_url)
         if normalized_video_url and normalized_video_url != video_url:
             logger.info(
-                "🔁 Normalized YouTube download URL for yt-dlp: %s -> %s",
+                "🔁 Normalized download URL for yt-dlp: %s -> %s",
                 video_url,
                 normalized_video_url,
             )
@@ -3763,6 +4020,7 @@ class AutoModFetcher:
     def _download_sync_attempt(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
         """محاولة واحدة للتنزيل — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة"""
         import yt_dlp
+        video_url = _normalize_facebook_candidate_url(video_url)
         video_url = _normalize_youtube_watch_url(video_url)
         output_dir, keepalive_path = _create_runtime_dir_keepalive(output_dir)
         output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
@@ -4508,22 +4766,11 @@ class AutoModFetcher:
                                         pass
                                 
                                     if potential_videos:
-                                        # وجدنا فيديوهات جديدة في هذا النطاق!
                                         found_new_video = True
-                                    
-                                        # تطبيق ترتيب الجلب (Fetch Order) المكتشف في هذا النطاق
-                                        if fetch_order == "oldest":
-                                            # ترتيب من الأقدم للأحدث (نأخذ أقدم فيديو في النطاق المكتشف)
-                                            try:
-                                                potential_videos.sort(key=lambda x: x.get("upload_date") or "99999999")
-                                            except Exception: pass
-                                        elif fetch_order == "random":
-                                            import random
-                                            random.shuffle(potential_videos)
-                                        else: # newest
-                                            try:
-                                                potential_videos.sort(key=lambda x: x.get("upload_date") or "00000000", reverse=True)
-                                            except Exception: pass
+                                        try:
+                                            _sort_videos_for_fetch_order(potential_videos, fetch_order)
+                                        except Exception:
+                                            pass
                                     
                                         videos = potential_videos
                                         await _notify(f"🎯 وجدنا *{len(potential_videos)}* فيديو جديد في النطاق {s_range} ({fetch_order}).")
