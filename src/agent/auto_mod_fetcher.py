@@ -57,6 +57,7 @@ import random
 import shutil
 import base64
 import threading
+import requests
 from contextlib import suppress
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
@@ -1642,6 +1643,28 @@ def _normalize_facebook_netloc(netloc: str) -> str:
     return netloc
 
 
+def _facebook_app_url_to_web_url(raw_url: Any) -> str:
+    value = _clean_url_candidate(unquote(str(raw_url or "")))
+    if not value:
+        return ""
+    lowered = value.lower()
+    if lowered.startswith("fb://profile/"):
+        profile_id = _clean_url_candidate(value.rsplit("/", 1)[-1])
+        if profile_id:
+            return f"https://www.facebook.com/profile.php?id={profile_id}"
+    if lowered.startswith("fb://reel/"):
+        reel_id = _clean_url_candidate(value.rsplit("/", 1)[-1])
+        if reel_id:
+            return f"https://www.facebook.com/reel/{reel_id}/"
+    if lowered.startswith("fb://video/"):
+        video_id = _clean_url_candidate(value.rsplit("/", 1)[-1])
+        if video_id:
+            return f"https://www.facebook.com/watch/?v={video_id}"
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return ""
+
+
 def _normalize_facebook_candidate_url(raw_url: Any) -> str:
     raw = _clean_url_candidate(raw_url)
     if not raw:
@@ -1694,6 +1717,121 @@ def _normalize_facebook_candidate_url(raw_url: Any) -> str:
     ).geturl()
 
 
+def _is_facebook_profile_root_url(raw_url: Any) -> bool:
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    host = (parsed.netloc or "").lower()
+    if "facebook.com" not in host:
+        return False
+    if _is_direct_facebook_video_url(normalized) or _is_facebook_share_url(normalized) or _is_facebook_section_url(normalized):
+        return False
+    path = (parsed.path or "").strip("/")
+    if not path:
+        return True
+    if path.lower() == "profile.php":
+        return bool(_clean_url_candidate((parse_qs(parsed.query).get("id") or [""])[0]))
+    if "/" in path:
+        return False
+    return path.lower() not in {"watch", "reel", "reels", "videos", "share", "groups", "sharer.php", "stories"}
+
+
+def _extract_facebook_html_candidates(page_url: str, html_text: str) -> List[str]:
+    text = str(html_text or "")
+    if not text:
+        return []
+
+    candidates: List[str] = []
+
+    for pattern in (
+        r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']',
+        r'<meta[^>]+property=["\']al:android:url["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+property=["\']al:ios:url["\'][^>]+content=["\']([^"\']+)["\']',
+    ):
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            candidate = _facebook_app_url_to_web_url(match) or _clean_url_candidate(unquote(match))
+            if candidate:
+                candidates.append(candidate)
+
+    for pattern in (
+        r"/reel/(\d{8,30})",
+        r"/videos/(?:[^/?#]+/)?(\d{8,30})",
+        r'"videoID":"(\d{8,30})"',
+        r'"video_id":"(\d{8,30})"',
+        r'"story_fbid":"(\d{8,30})"',
+        r'fb://reel/(\d{8,30})',
+        r'fb://video/(\d{8,30})',
+    ):
+        for match in re.findall(pattern, text, re.IGNORECASE):
+            video_id = _clean_url_candidate(match)
+            if not video_id:
+                continue
+            candidates.append(f"https://www.facebook.com/reel/{video_id}/")
+            candidates.append(f"https://www.facebook.com/watch/?v={video_id}")
+
+    final_page = _normalize_facebook_candidate_url(page_url)
+    if final_page:
+        candidates.append(final_page)
+
+    seen = set()
+    out: List[str] = []
+    for candidate in candidates:
+        normalized = _normalize_facebook_candidate_url(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _resolve_facebook_share_target_url(raw_url: Any, platform: str = "facebook") -> str:
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized or not _is_facebook_share_url(normalized):
+        return normalized
+
+    headers = {
+        "User-Agent": (os.getenv("FB_USER_AGENT") or _MODERN_USER_AGENT).strip() or _MODERN_USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.facebook.com/",
+    }
+
+    try:
+        response = requests.get(normalized, headers=headers, allow_redirects=True, timeout=15)
+        html_candidates = _extract_facebook_html_candidates(response.url, response.text)
+    except Exception as exc:
+        logger.debug("Facebook share resolution request failed for %s: %s", normalized, exc)
+        return normalized
+
+    lower_platform = str(platform or "facebook").strip().lower()
+    direct_candidates: List[str] = []
+    root_candidates: List[str] = []
+    section_candidates: List[str] = []
+
+    for candidate in html_candidates:
+        if _is_direct_facebook_video_url(candidate):
+            direct_candidates.append(candidate)
+        elif _is_facebook_profile_root_url(candidate):
+            root_candidates.append(candidate)
+        elif _is_facebook_section_url(candidate):
+            section_candidates.append(candidate)
+
+    if direct_candidates:
+        direct_candidates.sort(key=lambda item: _facebook_candidate_priority(item, lower_platform))
+        return direct_candidates[0]
+
+    if root_candidates:
+        root_candidates.sort()
+        return root_candidates[0]
+
+    if section_candidates:
+        section_candidates.sort(key=lambda item: _facebook_candidate_priority(item, lower_platform))
+        return section_candidates[0]
+
+    return normalized
+
+
 def _is_direct_facebook_video_url(raw_url: Any) -> bool:
     normalized = _normalize_facebook_candidate_url(raw_url)
     if not normalized:
@@ -1703,7 +1841,104 @@ def _is_direct_facebook_video_url(raw_url: Any) -> bool:
     if host == "fb.watch":
         return True
     path = (parsed.path or "").lower()
-    return "/watch" in path or "/reel/" in path or "/videos/" in path
+    if "/watch" in path or "/reel/" in path:
+        return True
+    if "/videos/" in path:
+        return bool(re.search(r"/videos/(?:[^/?#]+/)?[0-9A-Za-z_-]{6,}", path, re.IGNORECASE))
+    return False
+
+
+def _is_facebook_share_url(raw_url: Any) -> bool:
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    path = (parsed.path or "").lower()
+    return "/share/" in path or path.endswith("/share") or "share.php" in path
+
+
+def _is_facebook_section_url(raw_url: Any) -> bool:
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    path = (parsed.path or "").lower()
+    query = parse_qs(parsed.query)
+    return (
+        "/reels" in path
+        or "/videos" in path
+        or "reels_tab" in str(query.get("sk", [""])[0]).lower()
+        or "videos" in str(query.get("sk", [""])[0]).lower()
+    )
+
+
+def _facebook_candidate_priority(raw_url: Any, platform: str = "facebook") -> Tuple[int, str]:
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized:
+        return (99, "")
+
+    lower_platform = str(platform or "facebook").strip().lower()
+    if _is_facebook_reel_url(normalized):
+        return (0 if lower_platform == "facebook_reels" else 1, normalized)
+    if _is_direct_facebook_video_url(normalized):
+        return (1 if lower_platform == "facebook_reels" else 0, normalized)
+    if _is_facebook_section_url(normalized):
+        if lower_platform == "facebook_reels" and "/reels" in normalized.lower():
+            return (2, normalized)
+        return (3, normalized)
+    if _is_facebook_share_url(normalized):
+        return (5, normalized)
+    return (4, normalized)
+
+
+def _expand_facebook_source_candidates(source_url: str, platform: str = "facebook") -> List[str]:
+    normalized = _normalize_facebook_source_url(source_url, platform)
+    if not normalized:
+        return []
+
+    candidates: List[str] = [normalized]
+    parsed = urlparse(normalized)
+    host = (parsed.netloc or "").lower()
+    lower_platform = str(platform or "facebook").strip().lower()
+
+    if "facebook.com" in host or host == "fb.watch":
+        extracted_id = _extract_facebook_video_id(normalized)
+        if extracted_id:
+            candidates.append(f"https://www.facebook.com/watch/?v={extracted_id}")
+            candidates.append(f"https://www.facebook.com/reel/{extracted_id}/")
+
+        path = parsed.path or ""
+        if host != "fb.watch" and not _is_direct_facebook_video_url(normalized) and not _is_facebook_section_url(normalized):
+            base = normalized.split("?", 1)[0].rstrip("/")
+            if base:
+                candidates.append(f"{base}/reels")
+                if lower_platform != "facebook_reels":
+                    candidates.append(f"{base}/videos")
+
+        if "/profile.php" in path.lower():
+            profile_id = _clean_url_candidate((parse_qs(parsed.query).get("id") or [""])[0])
+            if profile_id:
+                candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}&sk=reels_tab")
+                if lower_platform != "facebook_reels":
+                    candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}&sk=videos")
+
+    try:
+        from src.agent.downloader import _expand_facebook_candidates
+        fb_ua = (os.getenv("FB_USER_AGENT") or _MODERN_USER_AGENT).strip() or _MODERN_USER_AGENT
+        candidates.extend(_expand_facebook_candidates(normalized, fb_ua) or [])
+    except Exception as exc:
+        logger.debug("Facebook candidate expansion fallback unavailable for %s: %s", normalized, exc)
+
+    ranked: List[Tuple[int, str]] = []
+    seen = set()
+    for candidate in candidates:
+        priority, normalized_candidate = _facebook_candidate_priority(candidate, lower_platform)
+        if not normalized_candidate or normalized_candidate in seen:
+            continue
+        seen.add(normalized_candidate)
+        ranked.append((priority, normalized_candidate))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [candidate for _, candidate in ranked]
 
 
 def _extract_facebook_video_id(raw_value: Any) -> str:
@@ -1732,7 +1967,7 @@ def _extract_facebook_video_id(raw_value: Any) -> str:
     return ""
 
 
-def _select_facebook_video_url(entry: Dict[str, Any], source_url: str) -> str:
+def _select_facebook_video_url(entry: Dict[str, Any], source_url: str, platform: str = "facebook") -> str:
     seen = set()
     direct_candidates: List[str] = []
     all_candidates: List[str] = []
@@ -1752,7 +1987,29 @@ def _select_facebook_video_url(entry: Dict[str, Any], source_url: str) -> str:
             direct_candidates.append(normalized)
 
     if direct_candidates:
-        return direct_candidates[0]
+        prioritized_direct = sorted(
+            direct_candidates,
+            key=lambda item: _facebook_candidate_priority(item, platform),
+        )
+        return prioritized_direct[0]
+
+    expansion_inputs = list(all_candidates) or [source_url]
+    for candidate in expansion_inputs:
+        for expanded in _expand_facebook_source_candidates(candidate, platform):
+            normalized = _normalize_facebook_candidate_url(expanded)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            all_candidates.append(normalized)
+            if _is_direct_facebook_video_url(normalized):
+                direct_candidates.append(normalized)
+
+    if direct_candidates:
+        prioritized_direct = sorted(
+            direct_candidates,
+            key=lambda item: _facebook_candidate_priority(item, platform),
+        )
+        return prioritized_direct[0]
 
     for candidate in (
         (entry or {}).get("id"),
@@ -1763,8 +2020,7 @@ def _select_facebook_video_url(entry: Dict[str, Any], source_url: str) -> str:
         extracted_id = _extract_facebook_video_id(candidate)
         if extracted_id:
             return f"https://www.facebook.com/watch/?v={extracted_id}"
-
-    return all_candidates[0] if all_candidates else ""
+    return ""
 
 
 def _normalize_facebook_video_identifier(raw_id: Any, video_url: str) -> str:
@@ -1793,6 +2049,11 @@ def _normalize_facebook_source_url(source_url: str, platform: str) -> str:
     if not raw:
         return raw
 
+    if _is_facebook_share_url(raw):
+        resolved = _resolve_facebook_share_target_url(raw, platform)
+        if resolved:
+            raw = resolved
+
     if _is_facebook_reel_url(raw):
         return raw
 
@@ -1804,9 +2065,8 @@ def _normalize_facebook_source_url(source_url: str, platform: str) -> str:
                 return raw
             if "facebook.com" not in pr.netloc.lower():
                 return raw
-            
-            # If it's a direct video/reel link, don't append /reels
-            if "/watch" in raw.lower() or "/reel/" in raw.lower() or "v=" in raw.lower():
+
+            if _is_direct_facebook_video_url(raw) or _is_facebook_section_url(raw) or _is_facebook_share_url(raw):
                 return raw
 
             base = raw.split("?", 1)[0].rstrip("/")
@@ -3083,6 +3343,9 @@ class AutoModFetcher:
         """جلب الفيديوهات بشكل متزامن عبر yt-dlp مع retry وتخطي القيود بذكاء"""
 
         source_url = _normalize_facebook_source_url(source_url, platform)
+        source_candidates = [source_url]
+        if (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower() or "fb.watch" in (source_url or "").lower():
+            source_candidates = _expand_facebook_source_candidates(source_url, platform) or [source_url]
         cookies_info = _resolve_cookiefile_details()
 
         # تحسين رابط المصدر لليوتيوب شورتس
@@ -3116,74 +3379,101 @@ class AutoModFetcher:
         max_retries = 3
         last_error = None
 
-        for attempt in range(max_retries + 1):
+        for candidate_index, candidate_url in enumerate(source_candidates, start=1):
+            candidate_opts = dict(ydl_opts)
             try:
-                videos = self._fetch_sync_attempt(source_url, items_range, platform, ydl_opts=ydl_opts)
-                if videos is not None:
-                    return videos
-            except AssertionError as e:
-                # ImpersonateTarget or internal yt-dlp assert failure
-                logger.warning(f"⚠️ Initializing yt-dlp failed (AssertionError). Skipping impersonate and cookies logic...")
-                os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
-                ydl_opts.pop("impersonate", None)
-                if attempt == 0:
-                    continue
-                break
-            except Exception as e:
-                import traceback
-                last_error = e
-                error_msg = str(e)
-                if not error_msg.strip():
-                    error_msg = repr(e)
-                logger.error(f"yt-dlp raw exception details: {traceback.format_exc()}")
+                candidate_opts["http_headers"] = dict(ydl_opts.get("http_headers") or {})
+            except Exception:
+                pass
+            try:
+                candidate_opts["extractor_args"] = dict(ydl_opts.get("extractor_args") or {})
+            except Exception:
+                pass
 
-                if "impersonate target" in error_msg.lower() and "not available" in error_msg.lower():
-                    logger.warning(f"⚠️ Impersonate target not available in this environment. Retrying without it...")
+            if candidate_index > 1:
+                logger.info(
+                    "🔁 Trying Facebook source candidate %d/%d: %s",
+                    candidate_index,
+                    len(source_candidates),
+                    candidate_url,
+                )
+
+            for attempt in range(max_retries + 1):
+                try:
+                    videos = self._fetch_sync_attempt(candidate_url, items_range, platform, ydl_opts=candidate_opts)
+                    if videos:
+                        return videos
+                    if videos == []:
+                        break
+                except AssertionError as e:
+                    logger.warning(f"⚠️ Initializing yt-dlp failed (AssertionError). Skipping impersonate and cookies logic...")
                     os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
-                    ydl_opts.pop("impersonate", None)
-                    continue
-
-                if "rate-limited" in error_msg.lower() or "too many requests" in error_msg.lower():
-                    from src.agent.supabase_storage import mark_source_rate_limited
-                    mark_source_rate_limited(source_url, duration=3600)
-
-                    if attempt < max_retries:
-                        wait_time = 30 + (20 * attempt)
-                        logger.warning(f"⏳ YouTube Rate limited! Waiting {wait_time}s before retrying...")
-                        time.sleep(wait_time)
+                    candidate_opts.pop("impersonate", None)
+                    if attempt == 0:
                         continue
                     break
+                except Exception as e:
+                    import traceback
+                    last_error = e
+                    error_msg = str(e)
+                    if not error_msg.strip():
+                        error_msg = repr(e)
+                    logger.error(f"yt-dlp raw exception details: {traceback.format_exc()}")
 
-                is_retryable, error_type = _is_retryable_ytdlp_error(error_msg)
-                if _is_youtube_botcheck_error(e) and not is_retryable:
-                    is_retryable = True
-                    error_type = "403_forbidden"
+                    if "impersonate target" in error_msg.lower() and "not available" in error_msg.lower():
+                        logger.warning(f"⚠️ Impersonate target not available in this environment. Retrying without it...")
+                        os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                        candidate_opts.pop("impersonate", None)
+                        continue
 
-                if "cannot parse data" in error_msg.lower():
-                    logger.warning(f"⚠️ Facebook parsing failed. Retrying without cookies, source_address, and extractor_args...")
-                    ydl_opts.pop("cookiefile", None)
-                    ydl_opts.pop("source_address", None)
-                    ydl_opts.pop("extractor_args", None)
-                    continue
+                    if "rate-limited" in error_msg.lower() or "too many requests" in error_msg.lower():
+                        from src.agent.supabase_storage import mark_source_rate_limited
+                        mark_source_rate_limited(candidate_url, duration=3600)
 
-                if not is_retryable or attempt >= max_retries:
-                    if _is_youtube_botcheck_error(e):
-                        global _YT_BOTCHECK_HINT_SHOWN
-                        if not _YT_BOTCHECK_HINT_SHOWN:
-                            _YT_BOTCHECK_HINT_SHOWN = True
-                            logger.error(
-                                "🚫 YouTube bot-check detected! %s | %s",
-                                _build_youtube_botcheck_hint(cookies_info),
-                                _build_ytdlp_runtime_diagnostics("fetch_botcheck", cookies_info=cookies_info),
-                            )
-                    logger.error(f"yt-dlp fetch error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
-                    break
+                        if attempt < max_retries:
+                            wait_time = 30 + (20 * attempt)
+                            logger.warning(f"⏳ YouTube Rate limited! Waiting {wait_time}s before retrying...")
+                            time.sleep(wait_time)
+                            continue
+                        break
 
-                logger.warning(f"yt-dlp retryable error ({error_type}), attempt {attempt + 1}/{max_retries + 1}: {error_msg}")
-                ydl_opts = _build_retry_opts(ydl_opts, attempt + 1, error_type)
+                    is_retryable, error_type = _is_retryable_ytdlp_error(error_msg)
+                    if _is_youtube_botcheck_error(e) and not is_retryable:
+                        is_retryable = True
+                        error_type = "403_forbidden"
 
-                wait_time = min(5 * (2 ** attempt), 30)
-                time.sleep(wait_time)
+                    if "cannot parse data" in error_msg.lower():
+                        logger.warning(f"⚠️ Facebook parsing failed. Retrying without cookies, source_address, and extractor_args...")
+                        candidate_opts.pop("cookiefile", None)
+                        candidate_opts.pop("source_address", None)
+                        candidate_opts.pop("extractor_args", None)
+                        continue
+
+                    if "unsupported url" in error_msg.lower() and candidate_index < len(source_candidates):
+                        logger.warning(
+                            "⚠️ Facebook candidate %s is not directly supported by yt-dlp. Moving to next candidate.",
+                            candidate_url,
+                        )
+                        break
+
+                    if not is_retryable or attempt >= max_retries:
+                        if _is_youtube_botcheck_error(e):
+                            global _YT_BOTCHECK_HINT_SHOWN
+                            if not _YT_BOTCHECK_HINT_SHOWN:
+                                _YT_BOTCHECK_HINT_SHOWN = True
+                                logger.error(
+                                    "🚫 YouTube bot-check detected! %s | %s",
+                                    _build_youtube_botcheck_hint(cookies_info),
+                                    _build_ytdlp_runtime_diagnostics("fetch_botcheck", cookies_info=cookies_info),
+                                )
+                        logger.error(f"yt-dlp fetch error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                        break
+
+                    logger.warning(f"yt-dlp retryable error ({error_type}), attempt {attempt + 1}/{max_retries + 1}: {error_msg}")
+                    candidate_opts = _build_retry_opts(candidate_opts, attempt + 1, error_type)
+
+                    wait_time = min(5 * (2 ** attempt), 30)
+                    time.sleep(wait_time)
 
         # === فشل نهائي — تسجيل و تحديث yt-dlp ===
         if last_error:
@@ -3275,8 +3565,22 @@ class AutoModFetcher:
                 fb_url = ""
                 vid_id = entry.get("id") or entry.get("url", "")
                 if (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower() or "fb.watch" in (source_url or "").lower():
-                    fb_url = _select_facebook_video_url(entry, source_url)
+                    fb_url = _select_facebook_video_url(entry, source_url, platform)
                     vid_id = _normalize_facebook_video_identifier(vid_id, fb_url)
+                    direct_facebook_id = _extract_facebook_video_id(vid_id) or _extract_facebook_video_id(fb_url)
+                    if direct_facebook_id and not _is_direct_facebook_video_url(fb_url):
+                        fb_url = (
+                            f"https://www.facebook.com/reel/{direct_facebook_id}/"
+                            if platform == "facebook_reels"
+                            else f"https://www.facebook.com/watch/?v={direct_facebook_id}"
+                        )
+                        vid_id = direct_facebook_id
+                    if not fb_url:
+                        logger.info(
+                            "⏭️ Skipping unresolved Facebook entry from %s because no direct video URL could be determined.",
+                            source_url,
+                        )
+                        continue
                 else:
                     fb_url = entry.get("webpage_url") or entry.get("url") or ""
                 if not vid_id:
@@ -3390,6 +3694,61 @@ class AutoModFetcher:
             logger.error(f"Failed to download container video {vid_id}: {e}")
             return None
 
+    def _resolve_facebook_download_url(self, video_url: str, max_duration: Optional[int] = None) -> str:
+        normalized = _normalize_facebook_candidate_url(video_url)
+        if not normalized:
+            return ""
+        if _is_direct_facebook_video_url(normalized):
+            return normalized
+
+        seed_platforms: List[str] = []
+        if _is_facebook_share_url(normalized):
+            seed_platforms = ["facebook_reels", "facebook"]
+        elif _is_facebook_section_url(normalized):
+            if "/reels" in normalized.lower() or "reels_tab" in normalized.lower():
+                seed_platforms = ["facebook_reels", "facebook"]
+            else:
+                seed_platforms = ["facebook", "facebook_reels"]
+        else:
+            seed_platforms = ["facebook", "facebook_reels"]
+
+        seen_candidates = set()
+        candidate_pairs: List[Tuple[str, str]] = []
+        for platform in seed_platforms:
+            for candidate in _expand_facebook_source_candidates(normalized, platform) or [normalized]:
+                cleaned_candidate = _normalize_facebook_candidate_url(candidate)
+                if not cleaned_candidate or cleaned_candidate in seen_candidates:
+                    continue
+                seen_candidates.add(cleaned_candidate)
+                candidate_pairs.append((platform, cleaned_candidate))
+
+        for platform, candidate in candidate_pairs:
+            if _is_direct_facebook_video_url(candidate):
+                return candidate
+            if not (_is_facebook_section_url(candidate) or _is_facebook_profile_root_url(candidate)):
+                continue
+            try:
+                fetched_videos = self._fetch_sync(candidate, items_range="1-3", platform=platform)
+            except Exception as exc:
+                logger.debug("Facebook download resolution fetch failed for %s: %s", candidate, exc)
+                continue
+
+            for fetched in fetched_videos or []:
+                direct_url = _normalize_facebook_candidate_url((fetched or {}).get("url"))
+                if not _is_direct_facebook_video_url(direct_url):
+                    continue
+
+                duration = (fetched or {}).get("duration")
+                if max_duration and duration:
+                    try:
+                        if float(duration) > float(max_duration):
+                            continue
+                    except Exception:
+                        pass
+                return direct_url
+
+        return normalized
+
     def _download_sync(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
         """تنزيل بشكل متزامن — بأعلى جودة ممكنة مع FFmpeg merge وفلترة المدة وretry"""
         output_dir = _ensure_runtime_dir(output_dir)
@@ -3405,6 +3764,86 @@ class AutoModFetcher:
             video_url = normalized_video_url
         max_retries = 3
         last_error = None
+        is_facebook_download = (
+            "facebook.com" in (video_url or "").lower()
+            or "fb.watch" in (video_url or "").lower()
+        )
+        download_candidates = [video_url]
+        if is_facebook_download:
+            resolved_direct_url = self._resolve_facebook_download_url(video_url, max_duration=max_duration)
+            resolved_direct_url = _normalize_facebook_candidate_url(resolved_direct_url)
+            if resolved_direct_url and _is_direct_facebook_video_url(resolved_direct_url):
+                if resolved_direct_url != video_url:
+                    logger.info(
+                        "🎯 Resolved Facebook source/share URL to direct downloadable video: %s -> %s",
+                        video_url,
+                        resolved_direct_url,
+                    )
+                download_candidates = [resolved_direct_url]
+            else:
+                download_candidates = _expand_facebook_source_candidates(video_url, "facebook") or [video_url]
+
+            for candidate_index, candidate_url in enumerate(download_candidates, start=1):
+                if candidate_index > 1:
+                    logger.info(
+                        "🔁 Trying Facebook download candidate %d/%d: %s",
+                        candidate_index,
+                        len(download_candidates),
+                        candidate_url,
+                    )
+
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        result = self._download_sync_attempt(candidate_url, output_dir, max_duration)
+                        if result:
+                            return result
+                        if attempt < max_retries:
+                            wait_time = 5 * attempt
+                            logger.warning(
+                                "⏳ Facebook download attempt %d/%d returned None for %s. Retrying in %ss...",
+                                attempt,
+                                max_retries,
+                                candidate_url,
+                                wait_time,
+                            )
+                            time.sleep(wait_time)
+                            continue
+                        break
+                    except Exception as e:
+                        last_error = e
+                        error_code, error_reason = _classify_download_error(e)
+                        lowered = str(e).lower()
+
+                        if "unsupported url" in lowered and candidate_index < len(download_candidates):
+                            logger.warning(
+                                "⚠️ Facebook download candidate failed (%s): %s. Trying next resolved candidate.",
+                                error_code,
+                                candidate_url,
+                            )
+                            break
+
+                        if attempt < max_retries:
+                            if "impersonate target" in lowered and "is not available" in lowered:
+                                logger.warning(f"⚠️ Impersonate target not available for download. Retrying without it...")
+                                os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                                continue
+
+                            if "rate-limited" in lowered or "too many requests" in lowered:
+                                wait_time = 30 + (20 * attempt)
+                                logger.warning(f"⏳ Download Rate limited! Waiting {wait_time}s before retrying...")
+                            else:
+                                wait_time = 5 * (3 ** (attempt - 1))
+                                logger.warning(
+                                    f"⏳ Download attempt {attempt}/{max_retries} failed ({error_code}): {error_reason}. "
+                                    f"Retrying in {wait_time}s... | raw={e}"
+                                )
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(
+                                f"yt-dlp download error after {max_retries} retries ({error_code}): {error_reason} | raw={e}"
+                            )
+            return None
+
         remote_settings = _resolve_remote_downloader_settings()
         remote_worker_disabled, remote_worker_disable_reason = _get_remote_worker_disable_state(remote_settings.get("url") or "")
         remote_worker_eligible = (
@@ -4371,6 +4810,7 @@ class AutoModFetcher:
                 except Exception:
                     pass
 
+        target_raw_video_path = kwargs.get("target_raw_video_path")
         preview_mode = bool(preview_mode)
         preview_source = None
         if preview_mode and target_source_id:
