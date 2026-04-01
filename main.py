@@ -515,6 +515,7 @@ async def start_web_server():
     app = web.Application()
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
+    app.router.add_get("/healthz", health_check)
     app.router.add_get("/oauth2/callback", oauth_callback_handler)
 
     telegram_app = globals().get("_TELEGRAM_APPLICATION")
@@ -567,7 +568,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"🌍 Web server started on port {port} with /health and /oauth2/callback")
+    logger.info(f"🌍 Web server started on 0.0.0.0:{port} with /health, /healthz and /oauth2/callback")
     return site
 
 
@@ -626,25 +627,10 @@ async def main():
 
     logger.info("🚀 Starting Auto-Mod Bot (Autonomous Agent Mode)...")
 
-    # -1. التحقق من وجود FFmpeg وتثبيته إذا لزم الأمر (Self-Healing)
-    try:
-        from install_ffmpeg import install
-        install()
-    except Exception as e:
-        logger.error(f"Failed to run auto-FFmpeg installer: {e}")
-
-
     # 0. تثبيت معالجات الأخطاء العالمية
     setup_global_exception_handlers()
 
-    # 1. استعادة البيانات من Supabase
-    logger.info("📥 Restoring data from Supabase...")
-    try:
-        await sync_supabase_to_local()
-    except Exception as e:
-        logger.warning(f"⚠️ Supabase sync failed (continuing with local data): {e}")
-
-    # 2. تشغيل Web Server
+    # 1. تشغيل خادم الويب مبكرًا حتى يكتشف Render المنفذ قبل أي تهيئة بطيئة
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
         logger.error("❌ TELEGRAM_BOT_TOKEN is missing!")
@@ -660,6 +646,22 @@ async def main():
         admin_chat_id=admin_ids[0] if admin_ids else None,
     )
 
+    await start_web_server()
+
+    # 2. التحقق من وجود FFmpeg وتثبيته إذا لزم الأمر (Self-Healing)
+    try:
+        from install_ffmpeg import install
+        install()
+    except Exception as e:
+        logger.error(f"Failed to run auto-FFmpeg installer: {e}")
+
+    # 3. استعادة البيانات من Supabase
+    logger.info("📥 Restoring data from Supabase...")
+    try:
+        await sync_supabase_to_local()
+    except Exception as e:
+        logger.warning(f"⚠️ Supabase sync failed (continuing with local data): {e}")
+
     external_url = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
     webhook_path = (os.environ.get("TELEGRAM_WEBHOOK_PATH") or "/telegram").strip() or "/telegram"
     if not webhook_path.startswith("/"):
@@ -668,11 +670,9 @@ async def main():
     force_polling = (os.environ.get("TELEGRAM_FORCE_POLLING") or "").strip().lower() in {"1", "true", "yes", "on"}
     use_webhook = bool(external_url) and not force_polling
 
-    await start_web_server()
+    # 4. تسجيل المهام المراقبة
 
-    # 3. تسجيل المهام المراقبة
-
-    # 3a. Keep-Alive
+    # 4a. Keep-Alive
     if external_url:
         await supervisor.register(
             "keep_alive",
@@ -681,7 +681,7 @@ async def main():
             base_restart_delay=10,
         )
 
-    # 3b. Auto-Fetch Loop
+    # 4b. Auto-Fetch Loop
     from src.agent.auto_mod_fetcher import start_auto_fetch_loop
     await supervisor.register(
         "auto_fetch",
@@ -690,7 +690,7 @@ async def main():
         base_restart_delay=15,
     )
 
-    # 3c. Periodic Maintenance
+    # 4c. Periodic Maintenance
     await supervisor.register(
         "maintenance",
         periodic_maintenance,
@@ -698,7 +698,7 @@ async def main():
         base_restart_delay=30,
     )
 
-    # 3d. Job Worker (Queue Processor - Separate Process)
+    # 4d. Job Worker (Queue Processor - Separate Process)
     async def _worker_process_supervisor():
         """Starts and monitors the dedicated worker process."""
         from src.agent.worker import run_worker_process
@@ -726,7 +726,7 @@ async def main():
         base_restart_delay=5,
     )
 
-    # 4. تشغيل البوت (المهمة الرئيسية — تبقى في الـ foreground)
+    # 5. تشغيل البوت (المهمة الرئيسية — تبقى في الـ foreground)
     logger.info("🤖 Starting Telegram bot...")
     if use_webhook:
         webhook_url = f"{external_url}{webhook_path}"
