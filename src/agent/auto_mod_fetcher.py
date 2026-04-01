@@ -62,6 +62,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qs, urlparse
 
+from src.agent.downloader import _is_retryable_ytdlp_error, _build_retry_opts
 from src.utils.resilient_fs import ResilientFS
 from src.agent.config import load_config
 from src.agent.job_queue import JobQueue
@@ -997,14 +998,7 @@ def _build_yt_opts(extra_opts: Optional[Dict[str, Any]] = None, cookies_path: Op
         "no_check_certificate": True,
         "socket_timeout": 30,
         "geo_bypass": True,
-        "http_headers": {
-            "User-Agent": _MODERN_USER_AGENT,
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Origin": "https://www.youtube.com",
-            "Referer": "https://www.youtube.com/",
-            "Sec-Fetch-Mode": "navigate",
-        },
+        "http_headers": {},
         "extractor_args": {
             "youtube": youtube_extractor_args,
         },
@@ -1017,8 +1011,13 @@ def _build_yt_opts(extra_opts: Optional[Dict[str, Any]] = None, cookies_path: Op
     }
 
     impersonate = (os.environ.get("YTDLP_IMPERSONATE") or "").strip()
-    if impersonate and os.environ.get("YTDLP_SKIP_IMPERSONATE") != "1":
-        opts["impersonate"] = impersonate
+    if impersonate and impersonate.lower() not in ("off", "none", "false", "") and os.environ.get("YTDLP_SKIP_IMPERSONATE") != "1":
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            target = ImpersonateTarget.from_str(impersonate)
+            opts["impersonate"] = target
+        except Exception as e:
+            logger.debug(f"impersonate target parsing failed: {e}")
 
     # === Proxy (الأهم لتجاوز bot-check على سيرفرات datacenter) ===
     proxy = (os.environ.get("YTDLP_PROXY") or "").strip()
@@ -1092,18 +1091,29 @@ def _download_profile_overrides(ffmpeg_path: Optional[str], cookies_enabled: boo
             "label": "authenticated_web",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["web", "web_safari", "mweb"],
+                    "player_client": ["tv_embedded", "web_creator", "mweb"],
                 }
             },
         }
+        
+        anonymous_fallback_profile = {
+            "label": "anonymous_fallback",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "mweb"],
+                }
+            },
+            "strip_cookies": True
+        }
 
         if not ffmpeg_path or not _env_flag("YTDLP_HIGH_QUALITY_FIRST", True):
-            return [authenticated_default_profile, authenticated_web_profile]
+            return [authenticated_default_profile, authenticated_web_profile, anonymous_fallback_profile]
 
         return [
             authenticated_default_profile,
             authenticated_web_profile,
             compatibility_profile,
+            anonymous_fallback_profile,
         ]
 
     if not ffmpeg_path or not _env_flag("YTDLP_HIGH_QUALITY_FIRST", True):
@@ -1512,6 +1522,11 @@ def _normalize_facebook_source_url(source_url: str, platform: str) -> str:
                 return raw
             if "facebook.com" not in pr.netloc.lower():
                 return raw
+            
+            # If it's a direct video/reel link, don't append /reels
+            if "/watch" in raw.lower() or "/reel/" in raw.lower() or "v=" in raw.lower():
+                return raw
+
             base = raw.split("?", 1)[0].rstrip("/")
             if base.endswith("/reels"):
                 return base
@@ -2600,10 +2615,25 @@ class AutoModDB:
     def _extract_channel_name(url: str) -> str:
         """استخراج اسم مختصر من رابط المصدر (يوتيوب/فيسبوك)"""
         import re
-        if "facebook.com" in (url or ""):
+        if not url: return "source"
+        url_lc = url.lower()
+        if "facebook.com" in url_lc:
+            # Handle watch?v=...
+            if "/watch" in url_lc or "v=" in url_lc:
+                m = re.search(r"v=([^&/?\s]+)", url)
+                if m: return f"FB_{m.group(1)[:8]}"
+            # Handle reel/...
+            if "/reel/" in url_lc:
+                m = re.search(r"/reel/([^/?\s]+)", url)
+                if m: return f"FB_Reel_{m.group(1)[:8]}"
+            # Handle page name
             m = re.search(r"facebook\.com/([^/?\s]+)", url)
             if m:
-                return m.group(1)
+                name = m.group(1)
+                if name.lower() not in ("watch", "reels", "reel", "groups", "pages"):
+                    return name
+            return "Facebook"
+
         match = re.search(r"youtube\.com/@([^/?\s]+)", url)
         if match:
             return match.group(1)
@@ -2613,7 +2643,7 @@ class AutoModDB:
         match = re.search(r"youtube\.com/c/([^/?\s]+)", url)
         if match:
             return match.group(1)
-        return url[:50]
+        return url[:30] if len(url) > 30 else url
 
 
 # ==================== محرك الجلب ====================
@@ -2722,11 +2752,13 @@ class AutoModFetcher:
                 "Accept-Language": "en-US,en;q=0.9",
             }
 
+        is_facebook = "facebook.com" in url_lc or (platform or "").startswith("facebook")
         ydl_opts = _build_yt_opts({
             "extract_flat": True,
             "playlist_items": items_range,
             "ignoreerrors": True,
             "http_headers": header_overrides,
+            "quiet": not is_facebook, # Enable logging for Facebook to help debugging and avoid some bugs
         }, cookies_path=cookies_info)
 
         # === Retry مع backoff ذكي ===
@@ -2738,11 +2770,23 @@ class AutoModFetcher:
                 videos = self._fetch_sync_attempt(source_url, items_range, platform, ydl_opts=ydl_opts)
                 if videos is not None:
                     return videos
+            except AssertionError as e:
+                # ImpersonateTarget or internal yt-dlp assert failure
+                logger.warning(f"⚠️ Initializing yt-dlp failed (AssertionError). Skipping impersonate and cookies logic...")
+                os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
+                ydl_opts.pop("impersonate", None)
+                if attempt == 0:
+                    continue
+                break
             except Exception as e:
+                import traceback
                 last_error = e
                 error_msg = str(e)
+                if not error_msg.strip():
+                    error_msg = repr(e)
+                logger.error(f"yt-dlp raw exception details: {traceback.format_exc()}")
 
-                if "impersonate target" in error_msg.lower() and "is not available" in error_msg.lower():
+                if "impersonate target" in error_msg.lower() and "not available" in error_msg.lower():
                     logger.warning(f"⚠️ Impersonate target not available in this environment. Retrying without it...")
                     os.environ["YTDLP_SKIP_IMPERSONATE"] = "1"
                     ydl_opts.pop("impersonate", None)
@@ -2763,6 +2807,13 @@ class AutoModFetcher:
                 if _is_youtube_botcheck_error(e) and not is_retryable:
                     is_retryable = True
                     error_type = "403_forbidden"
+
+                if "cannot parse data" in error_msg.lower():
+                    logger.warning(f"⚠️ Facebook parsing failed. Retrying without cookies, source_address, and extractor_args...")
+                    ydl_opts.pop("cookiefile", None)
+                    ydl_opts.pop("source_address", None)
+                    ydl_opts.pop("extractor_args", None)
+                    continue
 
                 if not is_retryable or attempt >= max_retries:
                     if _is_youtube_botcheck_error(e):
@@ -2839,6 +2890,8 @@ class AutoModFetcher:
                 "ignoreerrors": True,
                 # لا نستخدم noplaylist هنا لأنه يمنع جلب قائمة فيديوهات القناة
                 "http_headers": header_overrides,
+                "nocheckcertificate": True,
+                "prefer_free_formats": True,
             })
         else:
             ydl_opts = dict(ydl_opts)
@@ -2858,16 +2911,28 @@ class AutoModFetcher:
             if not info:
                 return []
 
-            entries = info.get("entries") or []
+            if "entries" not in info:
+                # This is a single video info
+                entries = [info]
+            else:
+                entries = info.get("entries") or []
+
             videos = []
             for entry in entries:
                 if not entry:
                     continue
+                # Use webpage_url or url, fallback to common patterns
+                fb_url = entry.get("webpage_url") or entry.get("url") or ""
                 vid_id = entry.get("id") or entry.get("url", "")
                 if not vid_id:
                     continue
-                fb_url = entry.get("webpage_url") or entry.get("url") or ""
-                if platform == "facebook_reels" and fb_url and (not _is_facebook_reel_url(fb_url)):
+                
+                # If the user provided a direct video URL, don't filter it out even if they chose "reels" platform.
+                # Only filter if the original source_url was a page/reels list.
+                is_direct = "/watch" in source_url.lower() or "/reel" in source_url.lower() or "v=" in source_url.lower()
+                
+                # Correctly handle platform filtering
+                if platform == "facebook_reels" and not is_direct and fb_url and (not _is_facebook_reel_url(fb_url)):
                     continue
 
                 duration = entry.get("duration")
@@ -2878,7 +2943,7 @@ class AutoModFetcher:
                     "id": vid_id,
                     "title": entry.get("title", ""),
                     "description": entry.get("description", ""),
-                    "url": entry.get("webpage_url") or entry.get("url") or f"https://www.youtube.com/watch?v={vid_id}",
+                    "url": fb_url or (f"https://www.youtube.com/watch?v={vid_id}" if "facebook" not in (platform or "") else f"https://www.facebook.com/watch/?v={vid_id}"),
                     "duration": duration,
                     "view_count": entry.get("view_count"),
                     "upload_date": entry.get("upload_date"),
@@ -3526,12 +3591,12 @@ class AutoModFetcher:
                 "bestvideo[height<=1920][width<=1920][ext=mp4]+bestaudio[ext=m4a]/"
                 "bestvideo[height<=1920][width<=1920]+bestaudio/"
                 "bestvideo+bestaudio/"
-                "best[ext=mp4]/"
+                "hd/best[ext=mp4]/"
                 "best/"
                 "b"
             )
         else:
-            fmt = "best[ext=mp4]/best/b"
+            fmt = "hd/best[ext=mp4]/best/b"
             logger.warning(
                 "⚠️ FFmpeg not found — skipping merged high-quality streams and using a single compatibility profile only "
                 "(typically max ~720p)"
@@ -3587,6 +3652,12 @@ class AutoModFetcher:
                         dl_extra[key] = value
 
                 ydl_opts = _build_yt_opts(dl_extra, cookies_path=cookies_info)
+                # If this profile explicitly requests stripping cookies (e.g. anonymous fallback after botcheck)
+                if profile.get("strip_cookies"):
+                    ydl_opts.pop("cookiefile", None)
+                    ydl_opts.pop("cookies", None)
+                    logger.info(f"🍪 Stripping cookies for profile {profile_label}")
+
                 if os.environ.get("YTDLP_SKIP_IMPERSONATE") == "1":
                     ydl_opts.pop("impersonate", None)
 
@@ -3623,6 +3694,13 @@ class AutoModFetcher:
                 except Exception as e:
                     last_profile_error = e
                     error_code, error_reason = _classify_download_error(e)
+                    
+                    if _is_youtube_botcheck_error(e) and profile_index < len(download_profiles):
+                        # Detect poisoned cookie scenario immediately
+                        logger.warning(f"🚫 Botcheck detected on {profile_label}. Injecting 'strip_cookies' to remaining fallback profiles.")
+                        for remaining_profile in download_profiles[profile_index:]:
+                            remaining_profile["strip_cookies"] = True
+
                     if profile_index < len(download_profiles):
                         logger.warning(
                             f"⚠️ Download profile {profile_label} failed ({error_code}): {error_reason}. "

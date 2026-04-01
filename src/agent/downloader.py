@@ -34,7 +34,9 @@ def _is_retryable_ytdlp_error(error_msg: str) -> tuple[bool, str]:
     # Signature/cipher issues - expanded detection
     if any(kw in msg for kw in ["signature", "cipher", "nsig", "n_sig", "decrypt", "n-challenge", "n challenge"]):
         return True, "signature"
-    if "sign in" in msg or "login" in msg or "age" in msg:
+    if "sign in" in msg or "login" in msg or "age" in msg or "bot" in msg:
+        if "bot" in msg or "confirm you’re not a bot" in msg or "robot" in msg:
+            return True, "youtube_botcheck"
         return True, "signature"  # Often requires different player client
     if "requested format is not available" in msg or "no video formats" in msg or "format is not available" in msg:
         return True, "format_unavailable"
@@ -81,34 +83,36 @@ def _build_retry_opts(base_opts: dict, attempt: int, error_type: str) -> dict:
     # Ensure JS runtime is always set in retries
     opts["js_runtimes"] = {"node": {}}
     
-    if error_type == "403_forbidden":
+    if error_type in ["403_forbidden", "youtube_botcheck"]:
+        # When facing a botcheck or 403, our cookies are likely poisoned or flagged. Drop them immediately.
+        if "cookiefile" in opts:
+            opts.pop("cookiefile", None)
+            logger.info("🍪 Dropped 'cookiefile' from ydl_opts to bypass botcheck/403 block.")
+        if "cookies" in opts:
+            opts.pop("cookies", None)
+        
         # Rotate through clients, prioritizing those that bypass PO Token/403
-        # Use more specific clients for 403 errors
-        clients = ["android", "ios", "tv_embedded", "web", "mweb"]
+        clients = ["tv_embedded", "web_creator", "android", "ios", "mweb"]
         client_idx = attempt % len(clients)
         selected_client = clients[client_idx]
         
         # Reset extractor args to ensure clean state
         opts["extractor_args"] = {"youtube": {}}
         opts["extractor_args"]["youtube"]["player_client"] = [selected_client]
+        opts["extractor_args"]["youtube"]["formats"] = ["missing_pot"]
         
         # Force specific n_client to match player_client if possible to avoid verification issues
-        if selected_client in ["android", "web"]:
+        if selected_client in ["android", "web", "web_creator"]:
              opts["extractor_args"]["youtube"]["n_client"] = [selected_client]
         
-        # Disable cookiefile for mobile clients often fixes 403s related to invalid session cookies
-        if selected_client in ["ios", "android"]:
-            opts.pop("cookiefile", None)
-            logger.info(f"🍪 Disabled cookies for client {selected_client} (403 fix)")
-        
-        # حتى في 403 retry، نحاول الحفاظ على أعلى جودة
+        # Even in 403/botcheck retry, attempt to keep good quality
         if attempt > 0:
             if has_ffmpeg:
                 opts["format"] = "bestvideo[height<=1080]+bestaudio/best[ext=mp4]/best"
             else:
                 opts["format"] = "best[ext=mp4]/best"
             
-        logger.info(f"🔄 403 Forbidden (attempt {attempt}): Switching YouTube client to {selected_client}")
+        logger.info(f"🔄 {error_type} (attempt {attempt}): Switched YouTube client to {selected_client} without cookies")
         
         # Add a delay for 403 to avoid rate limits
         opts["sleep_interval"] = 5 + (attempt * 3)
