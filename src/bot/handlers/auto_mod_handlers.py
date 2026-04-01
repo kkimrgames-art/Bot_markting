@@ -1322,7 +1322,10 @@ async def edit_source_fetch_sources_menu(update: Update, context: ContextTypes.D
             InlineKeyboardButton(toggle_label, callback_data=f"am_edit_fetch_toggle:{idx}"),
             InlineKeyboardButton("🗑 حذف", callback_data=f"am_edit_fetch_del:{idx}"),
         ])
-    keyboard.append([InlineKeyboardButton("➕ إضافة قناة جلب", callback_data="am_edit_fetch_add")])
+    keyboard.append([
+        InlineKeyboardButton("➕ إضافة يوتيوب", callback_data="am_edit_fetch_add:youtube"),
+        InlineKeyboardButton("➕ إضافة فيسبوك", callback_data="am_edit_fetch_add:facebook")
+    ])
     keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
 
     if query:
@@ -1336,14 +1339,21 @@ async def edit_source_fetch_add_prompt(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     if query:
         await _safe_answer(query)
+    
+    parts = (query.data or "").split(":")
+    platform = parts[1] if len(parts) > 1 else "youtube"
+    
     src = await _get_edit_source(context)
     if not src:
         return await sources_menu(update, context)
 
     context.user_data["am_text_input_mode"] = "edit_fetch_add"
+    context.user_data["am_edit_fetch_platform"] = platform
+
+    plat_label = "يوتيوب" if platform == "youtube" else "فيسبوك"
     text = (
-        "➕ <b>إضافة قناة جلب</b>\n\n"
-        "أرسل رابط واحد فقط (قناة / قائمة تشغيل / رابط فيديو).\n"
+        f"➕ <b>إضافة رابط {plat_label}</b>\n\n"
+        "أرسل رابط واحد فقط.\n"
         "يجب أن يبدأ بـ <code>http</code>.\n\n"
         "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
     )
@@ -2427,12 +2437,14 @@ async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_T
         "📍 <b>اختر طريقة المصدر:</b>\n\n"
         "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
         "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
+        "• <b>🔗 دمج</b>: جلب عشوائي من يوتيوب وفيسبوك معاً\n"
         "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)\n\n"
         "سيتم بعد ذلك تحديد المصدر الذي يعتمد عليه البوت ضمن أتمتة الجلب."
     )
     keyboard = [
         [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
         [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("🔗 دمج (YT + FB)", callback_data="am_src_kind:mix")],
         [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
@@ -2484,11 +2496,18 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
     await _safe_answer(query)
 
     kind = (query.data.split(":", 1)[1] if query and query.data else "").strip().lower()
-    if kind not in {"youtube", "container", "facebook"}:
+    if kind not in {"youtube", "container", "facebook", "mix"}:
         return AM_ADD_SOURCE_KIND
 
     context.user_data.setdefault("am_new_source", {})
     context.user_data["am_new_source"]["source_kind"] = kind
+
+    if kind == "mix":
+        context.user_data["am_new_source"]["platform"] = "mix"
+        context.user_data["am_new_source"]["mix_step"] = "youtube"
+        # التقصير التلقائي لـ Shorts/Reels في وضع الدمج
+        context.user_data["am_new_source"]["video_duration_type"] = "any" 
+        return await _ask_source_url(update, context)
 
     if kind == "container":
         return await _show_container_picker(update, context, page=0)
@@ -2986,7 +3005,22 @@ async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     new_src = context.user_data.get("am_new_source", {}) or {}
     platform = (new_src.get("platform") or "youtube").strip().lower()
-    if platform == "container":
+    mix_step = new_src.get("mix_step")
+
+    if platform == "mix":
+        if mix_step == "youtube":
+            text = (
+                "🔗 <b>(1/2) أدخل رابط يوتيوب للمصدر:</b>\n\n"
+                "هذا هو المصدر الرئيسي الذي سيتم البدء به.\n"
+                "• <code>https://www.youtube.com/@channel/shorts</code>"
+            )
+        else:
+            text = (
+                "🔗 <b>(2/2) الآن أدخل رابط فيس بوك الاحتياطي:</b>\n\n"
+                "سيتم استخدامه تلقائياً في حال فشل يوتيوب.\n"
+                "• <code>https://www.facebook.com/page</code>"
+            )
+    elif platform == "container":
         text = (
             "📦 <b>أدخل معرف الحاوية (Container ID):</b>\n\n"
             "أمثلة:\n"
@@ -2998,14 +3032,13 @@ async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_reels = platform == "facebook_reels"
         text = (
             "🔗 <b>أدخل رابط فيس بوك المصدر:</b>\n\n"
-            + ("📱 <b>وضع ريلز فقط:</b> يمكنك إدخال رابط الصفحة مباشرة وسيتم تلقائياً استخدام <code>/reels</code>.\n\n" if is_reels else "")
-            + "أمثلة (قد يختلف الدعم حسب نوع الرابط):\n"
-            + ("• <code>https://www.facebook.com/&lt;page&gt;</code>\n" if is_reels else "")
-            + ("• <code>https://www.facebook.com/&lt;page&gt;/reels</code>\n" if is_reels else "")
-            + "• <code>https://www.facebook.com/watch/?v=...</code>\n"
-            + "• <code>https://www.facebook.com/reel/...</code>\n\n"
-            + "💡 الأفضل عادةً إرسال رابط ريل مباشر لضمان نجاح الجلب.\n"
-            "⚠️ إذا فشل الجلب، جرّب تزويد Cookies عبر متغير البيئة <code>YTDLP_COOKIES_PATH</code>."
+            + ("📱 <b>وضع ريلز فقط:</b> يمكنك إدخال رابط الصفحة مباشرة وسيتم تلقائياً استخدام <code>/reels</code> لجلب الفيديوهات القصيرة.\n\n" if is_reels else "")
+            + "أمثلة للروابط المدعومة:\n"
+            + ("• رابط الصفحة: <code>https://www.facebook.com/&lt;page_name&gt;</code>\n" if is_reels else "")
+            + "• رابط فيديو محدد: <code>https://www.facebook.com/watch/?v=...</code>\n"
+            + "• رابط ريل محدد: <code>https://www.facebook.com/reel/...</code>\n\n"
+            + "💡 <b>نصيحة:</b> الأفضل عادة الفيديوهات من صفحات عامة لضمان استقرار الجلب.\n"
+            "⚠️ إذا واجهت مشكلة، قد تحتاج لإضافة Cookies في خيارات الإعدادات."
         )
     else:
         text = (
@@ -3031,7 +3064,31 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source_data = context.user_data.get("am_new_source", {}) or {}
     platform = (source_data.get("platform") or "youtube").strip().lower()
 
-    if platform == "container":
+    if platform == "mix":
+        mix_step = source_data.get("mix_step", "youtube")
+        if mix_step == "youtube":
+            if not raw.startswith("http"):
+                await update.message.reply_text("❌ أدخل رابط يوتيوب صالح.")
+                return AM_ADD_SOURCE_URL
+            context.user_data["am_new_source"]["yt_url"] = raw
+            context.user_data["am_new_source"]["mix_step"] = "facebook"
+            return await _ask_source_url(update, context)
+        else:
+            if not raw.startswith("http"):
+                await update.message.reply_text("❌ أدخل رابط فيس بوك صالح.")
+                return AM_ADD_SOURCE_URL
+            yt_url = source_data.get("yt_url")
+            fb_url = raw
+            # إعداد fetch_sources مدمج
+            fetch_sources = [
+                {"url": yt_url, "platform": "youtube", "enabled": True},
+                {"url": fb_url, "platform": "facebook", "enabled": True}
+            ]
+            context.user_data["am_new_source"].setdefault("source_settings", {})["fetch_sources"] = fetch_sources
+            context.user_data["am_new_source"]["source_url"] = yt_url # الرابط الأساسي للعرض
+            context.user_data["am_new_source"]["platform"] = "youtube" # المنصة الافتراضية، fetcher سيستخدم fetch_sources
+
+    elif platform == "container":
         cid = raw
         if cid.lower().startswith("container:"):
             cid = cid.split(":", 1)[1].strip()
@@ -3384,16 +3441,21 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_urls = {str((x or {}).get("url") or "").strip().rstrip("/") for x in items}
         if normalized_url in existing_urls:
             context.user_data.pop("am_text_input_mode", None)
+            context.user_data.pop("am_edit_fetch_platform", None)
             await update.message.reply_text("ℹ️ هذا الرابط موجود بالفعل ضمن قنوات الجلب.")
             return await edit_source_fetch_sources_menu(update, context)
+            
+        target_platform = context.user_data.get("am_edit_fetch_platform") or str(src.get("platform") or "").strip().lower()
+        
         items.append({
             "url": url,
             "name": "",
-            "platform": str(src.get("platform") or "").strip().lower(),
+            "platform": target_platform,
             "enabled": True,
         })
         success = await _update_edit_source_settings(context, {"fetch_sources": items})
         context.user_data.pop("am_text_input_mode", None)
+        context.user_data.pop("am_edit_fetch_platform", None)
         await update.message.reply_text("✅ تم إضافة قناة الجلب." if success else "❌ تعذر إضافة القناة.")
         return await edit_source_fetch_sources_menu(update, context)
 
