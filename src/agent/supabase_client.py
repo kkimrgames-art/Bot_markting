@@ -22,6 +22,13 @@ load_dotenv(dotenv_path=os.path.join(get_project_root(), ".env"), override=True)
 
 logger = logging.getLogger(__name__)
 
+class SupabaseInfrastructureError(Exception):
+    """استثناء يرفع عند وجود خطأ في البنية التحتية لـ Supabase (مثل 502 Bad Gateway)"""
+    def __init__(self, message, code=None, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
 # متغيرات البيئة
 SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
 SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
@@ -518,6 +525,22 @@ def supabase_select(table: str, filters: Dict = None, fallback_local: Callable =
                 break
             except Exception as e:
                 msg = str(e).lower()
+                
+                # التحقق من أخطاء البنية التحتية (502, 503, 504)
+                error_data = None
+                if hasattr(e, 'message') and hasattr(e, 'code'):
+                    error_data = {"message": e.message, "code": e.code}
+                elif isinstance(e, dict) and "code" in e:
+                    error_data = e
+                
+                if error_data and str(error_data.get("code")) in ("502", "503", "504"):
+                    logger.critical(f"🚨 خطأ فادح في البنية التحتية لـ Supabase ({error_data.get('code')}): {error_data.get('message')}")
+                    raise SupabaseInfrastructureError(
+                        message=error_data.get("message", "Bad Gateway"),
+                        code=error_data.get("code"),
+                        details=error_data
+                    )
+
                 if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
                     logger.warning(f"⚠️ اتصال Supabase غير مستقر (select/ {table})، إعادة محاولة... [{e}]")
                     reset_connection()

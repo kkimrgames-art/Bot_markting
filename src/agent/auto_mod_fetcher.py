@@ -3534,6 +3534,7 @@ class AutoModFetcher:
                 "http_headers": header_overrides,
                 "nocheckcertificate": True,
                 "prefer_free_formats": True,
+                "socket_timeout": 20, # مهلة زمنية قصيرة للفحص السريع
             })
         else:
             ydl_opts = dict(ydl_opts)
@@ -4856,16 +4857,31 @@ class AutoModFetcher:
                     f"🕐 الوقت: `{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}`"
                 )
 
-            # ========== فحص الإعدادات ==========
-            config = self.db.get_config()
-            if not config.get("auto_fetch_enabled") and not force:
-                await _notify("⚠️ الجلب التلقائي *معطل*. قم بتفعيله أولاً.")
-                return {"status": "disabled", "message": "Auto fetch is disabled"}
+            # ========== فحص الإعدادات والجداول ==========
+            try:
+                from src.agent.supabase_client import SupabaseInfrastructureError
+                config = self.db.get_config()
+                
+                # ========== فحص الجداول ==========
+                schedules = self.db.get_all_schedules()
+                active = [s for s in schedules if s.get("enabled")]
+                schedule_total = len(schedules)
+            except SupabaseInfrastructureError as infra_err:
+                logger.critical(f"🛑 [AutoMod] Infrastructure Error (DB Unreachable): {infra_err}")
+                await _notify(
+                    "🚨 *البوت متوقف حالياً بسبب عطل في قاعدة البيانات!*\n\n"
+                    f"⚠️ السبب: `{infra_err.message}`\n"
+                    "🛡️ تم إيقاف الدورة تلقائياً لمنع تكرار النشر. سيعاود البوت المحاولة في الدورة القادمة."
+                )
+                return {"status": "error", "message": f"DB Infrastructure Error: {infra_err.message}"}
+            except Exception as e:
+                logger.error(f"Failed to initialize cycle data: {e}")
+                return {"status": "error", "message": str(e)}
 
-            # ========== فحص الجداول ==========
-            schedules = self.db.get_all_schedules()
-            active = [s for s in schedules if s.get("enabled")]
-            schedule_total = len(schedules)
+            if not config.get("auto_fetch_enabled") and not force:
+                if meta_notifications_enabled:
+                    await _notify("⚠️ الجلب التلقائي *معطل*. قم بتفعيله أولاً.")
+                return {"status": "disabled", "message": "Auto fetch is disabled"}
 
             if target_channel_id or target_content_type:
                 filtered_active = []
