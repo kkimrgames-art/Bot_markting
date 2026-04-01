@@ -17,6 +17,9 @@ logger = logging.getLogger("JobWorker")
 
 def run_worker_process():
     """Entry point for the worker process."""
+    # Ensure worker process doesn't duplicate background sync with Supabase
+    os.environ["SUPABASE_DISABLE_BG_SYNC"] = "1"
+    
     # Set up logging for the new process
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -61,8 +64,8 @@ class JobWorker:
         self.fetcher = AutoModFetcher(self.instance_id)
 
         # Reset stuck jobs on startup (jobs that were processing when previous worker died)
-        # Timeout: 1 hour (3600s). If a job takes > 1h, it's probably stuck/dead.
-        self.queue.reset_stuck_jobs(timeout_seconds=3600)
+        # Timeout: 30 minutes (1800s).
+        self.queue.reset_stuck_jobs(timeout_seconds=1800)
 
         while self.running:
             try:

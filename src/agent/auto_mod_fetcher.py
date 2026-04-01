@@ -3449,10 +3449,11 @@ class AutoModFetcher:
                         candidate_opts.pop("extractor_args", None)
                         continue
 
-                    if "unsupported url" in error_msg.lower() and candidate_index < len(source_candidates):
+                    if ("unsupported url" in error_msg.lower() or "not found" in error_msg.lower() or "404" in error_msg.lower()) and candidate_index <= len(source_candidates):
                         logger.warning(
-                            "⚠️ Facebook candidate %s is not directly supported by yt-dlp. Moving to next candidate.",
+                            "⚠️ Facebook candidate %s failed with %s. Moving to next candidate.",
                             candidate_url,
+                            "404 Not Found" if "not found" in error_msg.lower() or "404" in error_msg.lower() else "Unsupported URL"
                         )
                         break
 
@@ -3781,7 +3782,7 @@ class AutoModFetcher:
                     )
                 download_candidates = [resolved_direct_url]
             else:
-                download_candidates = _expand_facebook_source_candidates(video_url, "facebook") or [video_url]
+                download_candidates = [video_url]
 
             for candidate_index, candidate_url in enumerate(download_candidates, start=1):
                 if candidate_index > 1:
@@ -5783,10 +5784,8 @@ class AutoModFetcher:
                             # ===== إيقاف جدول القناة المتأثرة فقط =====
                             try:
                                 schedule["enabled"] = False
-                                schedule["paused_reason"] = str(e)[:400]
                                 self.db._save_existing_schedule(schedule, {
-                                    "enabled": False,
-                                    "paused_reason": str(e)[:400],
+                                    "enabled": False
                                 })
                                 logger.warning(
                                     f"🛑 [AutoMod] Schedule paused only for affected channel "

@@ -21,7 +21,10 @@ class JobQueue:
 
     def _get_conn(self):
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        return sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        return conn
 
     def _init_db(self):
         with self._get_conn() as conn:

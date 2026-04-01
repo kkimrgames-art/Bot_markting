@@ -417,6 +417,9 @@ async def sync_pending_operations():
 
 def start_background_sync(interval_seconds: int = 60):
     """بدء المزامنة الخلفية التلقائية"""
+    if os.environ.get("SUPABASE_DISABLE_BG_SYNC") == "1":
+        logger.info("⏸️ Background sync is disabled via SUPABASE_DISABLE_BG_SYNC. Skipping.")
+        return
     global _background_sync_task, _background_sync_thread, _background_sync_interval
 
     async def _sync_loop():
