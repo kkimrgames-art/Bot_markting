@@ -83,6 +83,9 @@ _COBALT_FALLBACK_COOLDOWN_UNTIL_BY_HOST: Dict[str, float] = {}
 _COBALT_FALLBACK_COOLDOWN_REASON_BY_HOST: Dict[str, str] = {}
 _COBALT_FALLBACK_COOLDOWN_SECONDS = 900
 _COBALT_DISABLE_HINT_SHOWN = False
+_REMOTE_WORKER_COOLDOWN_UNTIL_BY_HOST: Dict[str, float] = {}
+_REMOTE_WORKER_COOLDOWN_REASON_BY_HOST: Dict[str, str] = {}
+_REMOTE_WORKER_COOLDOWN_SECONDS = 1200
 
 # === Invidious / Piped fallback instances ===
 _INVIDIOUS_INSTANCES = [
@@ -1073,6 +1076,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _download_profile_overrides(ffmpeg_path: Optional[str], cookies_enabled: bool = False) -> List[Dict[str, Any]]:
     """ترتيب محافظ لمسارات تنزيل yt-dlp: جودة أعلى أولًا ثم توافق أوسع."""
+    prefer_anonymous = cookies_enabled and _prefer_anonymous_youtube_downloads()
     compatibility_profile = {
         "label": "compatibility_mobile",
         "extractor_args": {
@@ -1080,6 +1084,49 @@ def _download_profile_overrides(ffmpeg_path: Optional[str], cookies_enabled: boo
                 "player_client": ["ios", "android", "mweb"],
             }
         },
+    }
+    anonymous_compatibility_profile = {
+        "label": "anonymous_compatibility_mobile",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "mweb"],
+            }
+        },
+        "strip_cookies": True,
+    }
+    high_quality_android_vr_profile = {
+        "label": "high_quality_android_vr",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android_vr", "android", "mweb"],
+            }
+        },
+    }
+    anonymous_high_quality_android_vr_profile = {
+        "label": "anonymous_high_quality_android_vr",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android_vr", "android", "mweb"],
+            }
+        },
+        "strip_cookies": True,
+    }
+    high_quality_web_profile = {
+        "label": "high_quality_web",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android", "mweb"],
+            }
+        },
+    }
+    anonymous_high_quality_web_profile = {
+        "label": "anonymous_high_quality_web",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android", "mweb"],
+            }
+        },
+        "strip_cookies": True,
     }
 
     if cookies_enabled:
@@ -1107,7 +1154,23 @@ def _download_profile_overrides(ffmpeg_path: Optional[str], cookies_enabled: boo
         }
 
         if not ffmpeg_path or not _env_flag("YTDLP_HIGH_QUALITY_FIRST", True):
+            if prefer_anonymous:
+                return [
+                    anonymous_compatibility_profile,
+                    anonymous_fallback_profile,
+                    authenticated_default_profile,
+                    authenticated_web_profile,
+                ]
             return [authenticated_default_profile, authenticated_web_profile, anonymous_fallback_profile]
+
+        if prefer_anonymous:
+            return [
+                anonymous_high_quality_android_vr_profile,
+                anonymous_high_quality_web_profile,
+                anonymous_compatibility_profile,
+                authenticated_default_profile,
+                authenticated_web_profile,
+            ]
 
         return [
             authenticated_default_profile,
@@ -1120,22 +1183,8 @@ def _download_profile_overrides(ffmpeg_path: Optional[str], cookies_enabled: boo
         return [compatibility_profile]
 
     return [
-        {
-            "label": "high_quality_android_vr",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android_vr", "android", "mweb"],
-                }
-            },
-        },
-        {
-            "label": "high_quality_web",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web", "android", "mweb"],
-                }
-            },
-        },
+        high_quality_android_vr_profile,
+        high_quality_web_profile,
         compatibility_profile,
     ]
 
@@ -1195,6 +1244,69 @@ def _resolve_remote_downloader_settings() -> Dict[str, Any]:
         "timeout_seconds": timeout_seconds,
         "host": _safe_url_host(base_url),
     }
+
+
+def _prefer_anonymous_youtube_downloads(cookies_info: Optional[Dict[str, Any]] = None) -> bool:
+    override_raw = os.environ.get("YTDLP_PREFER_ANONYMOUS_YOUTUBE")
+    if override_raw is not None:
+        return _env_flag("YTDLP_PREFER_ANONYMOUS_YOUTUBE", False)
+
+    info = cookies_info or _resolve_cookiefile_details()
+    if not info.get("available"):
+        return False
+    if _first_env("YTDLP_PROXY") or _first_env("YOUTUBE_PO_TOKEN"):
+        return False
+    return _runtime_environment_name() == "render"
+
+
+def _should_forward_remote_worker_cookies(cookies_info: Optional[Dict[str, Any]] = None) -> bool:
+    override_raw = os.environ.get("DOWNLOADER_WORKER_FORWARD_COOKIES")
+    if override_raw is not None:
+        return _env_flag("DOWNLOADER_WORKER_FORWARD_COOKIES", False)
+
+    info = cookies_info or _resolve_cookiefile_details()
+    if not info.get("available"):
+        return False
+    return not _prefer_anonymous_youtube_downloads(info)
+
+
+def _get_remote_worker_disable_state(worker_url: str = "") -> Tuple[bool, str]:
+    resolved_url = worker_url or _resolve_remote_downloader_settings().get("url") or ""
+    host = _safe_url_host(resolved_url)
+    cooldown_until = _REMOTE_WORKER_COOLDOWN_UNTIL_BY_HOST.get(host, 0.0)
+    if cooldown_until and cooldown_until <= time.time():
+        _REMOTE_WORKER_COOLDOWN_UNTIL_BY_HOST.pop(host, None)
+        _REMOTE_WORKER_COOLDOWN_REASON_BY_HOST.pop(host, None)
+        return False, ""
+    if cooldown_until:
+        reason = _REMOTE_WORKER_COOLDOWN_REASON_BY_HOST.get(host) or "remote worker temporarily disabled for this host"
+        remaining_seconds = max(1, int(cooldown_until - time.time()))
+        return True, f"{reason} Retry after about {remaining_seconds}s."
+    return False, ""
+
+
+def _temporarily_disable_remote_worker(
+    reason: str,
+    worker_url: str = "",
+    cooldown_seconds: int = _REMOTE_WORKER_COOLDOWN_SECONDS,
+):
+    resolved_url = worker_url or _resolve_remote_downloader_settings().get("url") or ""
+    host = _safe_url_host(resolved_url)
+    if not host:
+        host = "unknown"
+
+    cooldown_until = time.time() + max(1, int(cooldown_seconds))
+    _REMOTE_WORKER_COOLDOWN_UNTIL_BY_HOST[host] = max(
+        _REMOTE_WORKER_COOLDOWN_UNTIL_BY_HOST.get(host, 0.0),
+        cooldown_until,
+    )
+    _REMOTE_WORKER_COOLDOWN_REASON_BY_HOST[host] = reason or "remote worker temporarily disabled for this host"
+    logger.warning(
+        "⚠️ Remote downloader worker temporarily disabled for host=%s for %ss: %s",
+        host,
+        max(1, int(cooldown_seconds)),
+        reason,
+    )
 
 
 def _yt_dlp_version_label() -> str:
@@ -1374,6 +1486,17 @@ def _build_youtube_botcheck_hint(cookies_info: Optional[Dict[str, Any]] = None) 
     if not cobalt_auth:
         base += " Cobalt auth token is missing, so fallback may fail on default/public Cobalt servers."
     return base
+
+
+def _is_remote_worker_botcheck_body(raw_body: str) -> bool:
+    lowered = str(raw_body or "").lower()
+    return any(token in lowered for token in [
+        "sign in to confirm",
+        "not a bot",
+        "human-verification",
+        "bot-check",
+        "botcheck",
+    ])
 
 
 def _resolve_cobalt_api_settings() -> Tuple[str, str, str]:
@@ -3026,8 +3149,20 @@ class AutoModFetcher:
         max_retries = 3
         last_error = None
         remote_settings = _resolve_remote_downloader_settings()
-        remote_worker_eligible = bool(_extract_youtube_video_id(video_url)) and remote_settings.get("enabled")
+        remote_worker_disabled, remote_worker_disable_reason = _get_remote_worker_disable_state(remote_settings.get("url") or "")
+        remote_worker_eligible = (
+            bool(_extract_youtube_video_id(video_url))
+            and remote_settings.get("enabled")
+            and not remote_worker_disabled
+        )
         remote_worker_tried = False
+
+        if remote_settings.get("enabled") and remote_worker_disabled and remote_worker_disable_reason:
+            logger.warning(
+                "⏭️ Skipping remote downloader worker for host=%s: %s",
+                remote_settings.get("host"),
+                remote_worker_disable_reason,
+            )
 
         if remote_worker_eligible and remote_settings.get("prefer_remote"):
             remote_worker_tried = True
@@ -3140,6 +3275,16 @@ class AutoModFetcher:
         if not settings.get("enabled") or not settings.get("url"):
             return None
 
+        worker_disabled, worker_disable_reason = _get_remote_worker_disable_state(settings.get("url") or "")
+        if worker_disabled:
+            if worker_disable_reason:
+                logger.warning(
+                    "⏭️ Skipping remote downloader worker for host=%s: %s",
+                    settings.get("host"),
+                    worker_disable_reason,
+                )
+            return None
+
         try:
             import httpx
 
@@ -3156,14 +3301,23 @@ class AutoModFetcher:
             if max_duration is not None:
                 payload["max_duration"] = max_duration
 
-            # Inject cookies and po_token to bypass bot-checks on the remote worker
             cookies_info = _resolve_cookiefile_details()
-            if cookies_info.get("available") and cookies_info.get("path"):
+            prefer_anonymous = _prefer_anonymous_youtube_downloads(cookies_info)
+            if prefer_anonymous:
+                payload["prefer_anonymous"] = True
+
+            if _should_forward_remote_worker_cookies(cookies_info) and cookies_info.get("available") and cookies_info.get("path"):
                 try:
                     with open(cookies_info["path"], "r", encoding="utf-8") as f:
                         payload["cookies_text"] = f.read()
                 except Exception as e:
                     logger.warning("Failed to read cookie file for remote worker payload: %s", e)
+            elif cookies_info.get("available"):
+                payload["skip_cookies"] = True
+                logger.info(
+                    "🍪 Skipping cookie forwarding to remote worker for host=%s to avoid cookie/IP mismatch",
+                    settings.get("host"),
+                )
 
             po_token = os.getenv("YOUTUBE_PO_TOKEN")
             if po_token:
@@ -3203,10 +3357,28 @@ class AutoModFetcher:
                                     "Remote worker still busy after %d retries. Falling back. | body=%s",
                                     max_worker_retries, response_body,
                                 )
+                                _temporarily_disable_remote_worker(
+                                    "remote worker stayed busy or rate-limited across repeated attempts",
+                                    worker_url=settings.get("url") or "",
+                                    cooldown_seconds=300,
+                                )
                                 return None
 
                         if resp.status_code != 200:
                             response_body = resp.read().decode("utf-8", errors="replace")[:400]
+                            lowered_body = response_body.lower()
+                            if _is_remote_worker_botcheck_body(lowered_body):
+                                _temporarily_disable_remote_worker(
+                                    "remote worker hit YouTube bot-check and is unlikely to recover without proxy/PO token",
+                                    worker_url=settings.get("url") or "",
+                                    cooldown_seconds=1800,
+                                )
+                            elif resp.status_code in (401, 403):
+                                _temporarily_disable_remote_worker(
+                                    "remote worker auth/config was rejected by the upstream service",
+                                    worker_url=settings.get("url") or "",
+                                    cooldown_seconds=1800,
+                                )
                             logger.warning(
                                 "Remote downloader worker error: status=%s host=%s body=%s",
                                 resp.status_code,
@@ -3244,10 +3416,29 @@ class AutoModFetcher:
                         )
                         time.sleep(wait)
                         continue
+                    _temporarily_disable_remote_worker(
+                        "remote worker timed out repeatedly",
+                        worker_url=settings.get("url") or "",
+                        cooldown_seconds=600,
+                    )
                     raise
 
             return None  # exhausted retries
         except Exception as exc:
+            lowered = str(exc).lower()
+            if any(token in lowered for token in [
+                "timed out",
+                "timeout",
+                "connection refused",
+                "temporary failure",
+                "name resolution",
+                "network is unreachable",
+            ]):
+                _temporarily_disable_remote_worker(
+                    "remote worker could not be reached from this runtime",
+                    worker_url=settings.get("url") or "",
+                    cooldown_seconds=600,
+                )
             logger.warning(
                 "Remote downloader worker request failed for host=%s: %s",
                 settings.get("host"),

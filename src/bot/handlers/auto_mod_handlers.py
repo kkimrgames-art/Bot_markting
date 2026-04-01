@@ -4139,7 +4139,7 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             AM_EDIT_SOURCE_CHANNEL: [
                 CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
                 CallbackQueryHandler(edit_source_fetch_sources_menu, pattern=r"^am_edit_fetch_menu$"),
-                CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add$"),
+                CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add:"),
                 CallbackQueryHandler(edit_source_fetch_toggle, pattern=r"^am_edit_fetch_toggle:"),
                 CallbackQueryHandler(edit_source_fetch_delete, pattern=r"^am_edit_fetch_del:"),
                 CallbackQueryHandler(edit_source_privacy_menu, pattern=r"^am_edit_priv_menu$"),
