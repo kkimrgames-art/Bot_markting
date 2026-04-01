@@ -3339,6 +3339,65 @@ class AutoModFetcher:
 
     # (تمت إزالة نظام YouTube Data API القديم. الجلب يعتمد الآن على yt-dlp فقط.)
 
+    def _fetch_facebook_via_scraping(self, source_url: str, platform: str = "facebook") -> List[Dict]:
+        """
+        مسار بديل لجلب فيديوهات فيسبوك عبر HTTP scraping مباشرة.
+        يُستخدم عندما يفشل yt-dlp في استخراج قائمة كاملة من الفيديوهات.
+        """
+        try:
+            from src.agent.downloader import _expand_facebook_candidates
+            _DEFAULT_FB_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            fb_ua = (os.getenv("FB_USER_AGENT") or _DEFAULT_FB_UA).strip() or _DEFAULT_FB_UA
+
+            # استخراج جميع الروابط المرشحة من الصفحة
+            all_candidates = _expand_facebook_candidates(source_url, fb_ua) or []
+            logger.info(f"🔍 [FB-Scrape] Found {len(all_candidates)} candidate URLs from {source_url}")
+
+            # استخراج معرّفات الفيديوهات الفريدة من الروابط المرشحة
+            seen_ids = set()
+            videos = []
+            for candidate_url in all_candidates:
+                video_id = _extract_facebook_video_id(candidate_url)
+                if not video_id or video_id in seen_ids:
+                    continue
+                # تجاهل المعرّفات التي تبدو كمعرّفات ملفات شخصية (ليست فيديوهات)
+                if not video_id.isdigit():
+                    continue
+                seen_ids.add(video_id)
+
+                video_url = (
+                    f"https://www.facebook.com/reel/{video_id}/"
+                    if platform == "facebook_reels"
+                    else f"https://www.facebook.com/watch/?v={video_id}"
+                )
+                video_type = _infer_processing_video_type(
+                    {"url": video_url, "webpage_url": video_url},
+                    platform,
+                    source_url,
+                )
+                videos.append({
+                    "id": video_id,
+                    "title": "",
+                    "description": "",
+                    "url": video_url,
+                    "duration": None,
+                    "view_count": None,
+                    "upload_date": None,
+                    "timestamp": None,
+                    "video_type": video_type,
+                    "webpage_url": video_url,
+                    "original_url": source_url,
+                })
+
+            if videos:
+                logger.info(f"✅ [FB-Scrape] Extracted {len(videos)} unique videos from {source_url}")
+            else:
+                logger.info(f"📭 [FB-Scrape] No video IDs found from {source_url}")
+            return videos
+        except Exception as e:
+            logger.warning(f"⚠️ [FB-Scrape] Failed to scrape Facebook page: {e}")
+            return []
+
     def _fetch_sync(self, source_url: str, items_range: str = "1-10", platform: str = "youtube") -> List[Dict]:
         """جلب الفيديوهات بشكل متزامن عبر yt-dlp مع retry وتخطي القيود بذكاء"""
 
@@ -3402,6 +3461,18 @@ class AutoModFetcher:
                 try:
                     videos = self._fetch_sync_attempt(candidate_url, items_range, platform, ydl_opts=candidate_opts)
                     if videos:
+                        # فيسبوك: إذا حصلنا على فيديو واحد فقط، نحاول إثراء القائمة عبر scraping
+                        is_fb = (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower()
+                        if is_fb and len(videos) <= 2:
+                            logger.info(f"🔄 [FB-Enrich] yt-dlp returned only {len(videos)} video(s). Trying scraping to find more...")
+                            scrape_extra = self._fetch_facebook_via_scraping(source_url, platform)
+                            if scrape_extra:
+                                existing_ids = {v.get("id") for v in videos}
+                                for sv in scrape_extra:
+                                    if sv.get("id") not in existing_ids:
+                                        videos.append(sv)
+                                        existing_ids.add(sv.get("id"))
+                                logger.info(f"✅ [FB-Enrich] Total after enrichment: {len(videos)} videos")
                         return videos
                     if videos == []:
                         break
@@ -3509,6 +3580,16 @@ class AutoModFetcher:
                         logger.warning(f"⚠️ yt-dlp auto-update error: {upd_err}")
             except Exception:
                 pass
+
+        # === Facebook Scraping Fallback ===
+        # إذا فشل yt-dlp في استخراج فيديوهات من فيسبوك، نجرب الـ scraping المباشر
+        is_facebook = (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower()
+        if is_facebook:
+            logger.info("🔄 [FB-Fallback] yt-dlp returned no results. Trying HTTP scraping fallback...")
+            scrape_results = self._fetch_facebook_via_scraping(source_url, platform)
+            if scrape_results:
+                logger.info(f"✅ [FB-Fallback] Scraping found {len(scrape_results)} videos!")
+                return scrape_results
 
         return []
 
@@ -5062,18 +5143,25 @@ class AutoModFetcher:
                     claimed_processing = False
 
                     try:
-                        # مستويات البحث المتدرجة (نطاقات غير متداخلة لتحسين الكفاءة وتوسيع نطاق الاستخراج)
-                        search_ranges = [
-                            "1-50",
-                            "51-250",
-                            "251-1000",
-                            "1001-5000",
-                            "5001-20000"
-                        ]
+                        # مستويات البحث المتدرجة
+                        is_facebook_source = (src_platform or "").startswith("facebook") or "facebook.com" in (source.get("source_url") or "").lower()
+                        if is_facebook_source:
+                            # فيسبوك: المستخرج العام (generic) لا يدعم ترقيم الصفحات
+                            # لذا نطاق واحد يكفي - التوسيع لا يعيد نتائج مختلفة
+                            search_ranges = ["1-50"]
+                        else:
+                            search_ranges = [
+                                "1-50",
+                                "51-250",
+                                "251-1000",
+                                "1001-5000",
+                                "5001-20000"
+                            ]
 
                         fetch_order = config.get("settings", {}).get("fetch_order", "newest")
                         videos = []
                         found_new_video = False
+                        _prev_batch_ids = set()  # لاكتشاف تكرار نفس الفيديوهات عبر النطاقات
 
                         if direct_target_resume and schedule_force and source_id == str(target_source_id):
                             videos = [{
@@ -5134,6 +5222,17 @@ class AutoModFetcher:
                                         await _notify(f"⏹️ لا توجد فيديوهات إضافية بعد النطاق {search_ranges[idx-1]}.")
                                         break
 
+                                    # اكتشاف تكرار نفس الفيديوهات (خاصية مهمة لفيسبوك)
+                                    current_batch_ids = {v.get("id", "") for v in batch_videos if v.get("id")}
+                                    if current_batch_ids and current_batch_ids == _prev_batch_ids:
+                                        logger.info(
+                                            f"🔄 [AutoMod] Detected duplicate batch (same {len(current_batch_ids)} video IDs). "
+                                            f"Stopping range expansion for {fetch_name}."
+                                        )
+                                        await _notify(f"🔄 تم اكتشاف تكرار نفس الفيديوهات. إيقاف البحث في نطاقات أعمق.")
+                                        break
+                                    _prev_batch_ids = current_batch_ids
+
                                     # فحص الفيديوهات في هذا النطاق
                                     potential_videos = []
                                     published_count = 0
@@ -5171,12 +5270,14 @@ class AutoModFetcher:
                                                 locked_count += 1
                                                 continue
                                         if status:
-                                            # للسماح بإعادة المحاولة للفيديوهات الفاشلة بعد مرور 24 ساعة
+                                            # للسماح بإعادة المحاولة للفيديوهات الفاشلة
                                             if status == 'failed':
                                                 try:
                                                     time_since_update = datetime.now(timezone.utc) - updated_at
-                                                    if time_since_update > timedelta(hours=24):
-                                                        logger.info(f"🔎 [AutoMod] Video {v_id} was 'failed' {time_since_update.days} days ago. Retrying it now.")
+                                                    # فيسبوك: إعادة المحاولة بعد 6 ساعات بدل 24
+                                                    retry_hours = 6 if is_facebook_source else 24
+                                                    if time_since_update > timedelta(hours=retry_hours):
+                                                        logger.info(f"🔎 [AutoMod] Video {v_id} was 'failed' {time_since_update} ago (retry after {retry_hours}h). Retrying it now.")
                                                         potential_videos.append(v)
                                                         continue
                                                 except Exception as dt_err:
