@@ -283,7 +283,8 @@ def build_application(token: str):
 
 
 async def run_polling_forever(application):
-    await application.initialize()
+    if not application._initialized:
+        await application.initialize()
     await application.start()
     if application.updater:
         await application.updater.start_polling()
@@ -301,7 +302,8 @@ async def run_polling_forever(application):
 
 
 async def run_webhook_forever(application, webhook_url: str, secret_token: str | None = None):
-    await application.initialize()
+    if not application._initialized:
+        await application.initialize()
     await application.start()
     await application.bot.set_webhook(
         url=webhook_url,

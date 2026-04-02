@@ -2398,11 +2398,15 @@ class AutoModDB:
             config["instance_id"] = self.instance_id
             config["updated_at"] = datetime.now(timezone.utc).isoformat()
 
+            supabase_payload = dict(config)
+            for _k in ("auto_fetch_interval_seconds",):
+                supabase_payload.pop(_k, None)
+
             primary = self._supabase_primary_storage()
             if primary:
                 supabase_upsert(
                     "auto_mod_config",
-                    config,
+                    supabase_payload,
                     key_field="instance_id",
                     fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
                 )
@@ -2410,7 +2414,7 @@ class AutoModDB:
                 _local_upsert_row("auto_mod_config", config, key_field="instance_id")
                 supabase_upsert(
                     "auto_mod_config",
-                    config,
+                    supabase_payload,
                     key_field="instance_id",
                     fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
                 )
@@ -6409,7 +6413,7 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
         # تنظيف أي فيديوهات علقت قيد المعالجة بسبب انهيار سابق
         stale_count = db.reset_stale_processing(
             stale_minutes=_processing_lock_stale_minutes(),
-            force_reset=_should_force_reset_processing_on_boot(),
+            force_reset_all=_should_force_reset_processing_on_boot(),
         )
         if stale_count:
             logger.warning(f"🧹 Reset {stale_count} stale processing locks")
