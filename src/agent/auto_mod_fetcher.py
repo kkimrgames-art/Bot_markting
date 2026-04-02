@@ -1708,6 +1708,15 @@ def _normalize_facebook_candidate_url(raw_url: Any) -> str:
 
     path = parsed.path or ""
     path_lc = path.lower()
+    
+    # 1. تحويل روابط Reel (reel/ID or reels/ID) إلى رابط Watch القياسي
+    # yt-dlp يتعامل بشكل أفضل مع روابط watch?v=ID في بعض الحالات
+    reel_match = re.search(r'/(?:reels?|videos)/([^/?#]+)', path_lc)
+    if reel_match:
+        video_id = reel_match.group(1).strip("/")
+        if video_id and video_id.isdigit():
+             return f"https://www.facebook.com/watch?v={video_id}"
+
     keep_query_keys = {"id", "sk"}
     if host == "fb.watch":
         keep_query_keys = set()
@@ -1726,6 +1735,7 @@ def _normalize_facebook_candidate_url(raw_url: Any) -> str:
     return parsed._replace(
         netloc=normalized_netloc,
         query=urlencode(normalized_query, doseq=True) if normalized_query else "",
+        path=path,  # الحفاظ على المسار الأصلي إذا لم يكن رييل
         fragment="",
     ).geturl()
 
@@ -4915,12 +4925,49 @@ class AutoModFetcher:
                             )
 
                             filename = ydl.prepare_filename(info)
+                            
+                            # 1. الاكتشاف المباشر للملف
                             base = os.path.splitext(filename)[0]
                             for ext in [".mp4", ".mkv", ".webm"]:
                                 if ResilientFS.exists(base + ext):
                                     return base + ext
                             if ResilientFS.exists(filename):
                                 return filename
+                                
+                            # 2. Scavenger Mode: إذا فشل الاكتشاف المباشر (يحدث أحياناً بسبب إعادة التسمية بواسطة yt-dlp)
+                            logger.debug(f"🔍 Detection failed for {filename}, entering Scavenger Mode...")
+                            try:
+                                # محاولة استخراج معرف الفيديو من المعلومات أو الرابط
+                                file_id = info.get("id") or _extract_video_id(video_url)
+                                candidates = []
+                                for f in ResilientFS.listdir(output_dir):
+                                    f_path = os.path.join(output_dir, f)
+                                    if not ResilientFS.isfile(f_path):
+                                        continue
+                                    if f.lower().endswith((".mp4", ".mkv", ".webm")):
+                                        # التحقق من وجود المعرف في اسم الملف أو أن هذا هو الملف الوحيد/الأكبر في المجلد
+                                        if file_id and file_id in f:
+                                            candidates.append((os.path.getsize(f_path), f_path))
+                                        elif not file_id:
+                                             candidates.append((os.path.getsize(f_path), f_path))
+                                
+                                if candidates:
+                                    # نأخذ أكبر ملف فيديو موجود (غالباً هو الفيديو المدمج النهائي)
+                                    candidates.sort(key=lambda x: x[0], reverse=True)
+                                    found_path = candidates[0][1]
+                                    logger.info(f"✅ Scavenger found file: {found_path} ({os.path.getsize(found_path)} bytes)")
+                                    return found_path
+                            except Exception as ex:
+                                logger.warning(f"⚠️ Scavenger Mode failed: {ex}")
+
+                            # إذا وصلنا هنا، يعني لم نجد الملف رغم نجاح extract_info
+                            # نقوم بطباعة محتويات المجلد للتشخيص
+                            try:
+                                files = ResilientFS.listdir(output_dir)
+                                logger.warning(f"❌ File not found after download success! Dir content: {files}")
+                            except:
+                                pass
+
                 except Exception as e:
                     last_profile_error = e
                     error_code, error_reason = _classify_download_error(e)
