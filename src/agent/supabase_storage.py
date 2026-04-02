@@ -848,7 +848,72 @@ async def sync_supabase_to_local() -> bool:
             with open(LOCAL_STATE_PATH, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
             logger.info("✅ تم استعادة حالة البوت.")
+
+        # 3. استعادة بيانات AutoMod (المصادر، الجداول، الحاويات، ومفاتيح API)
+        automod_tables = {
+            "auto_mod_sources": _project_data_path("auto_mod_sources.json"),
+            "auto_mod_schedule": _project_data_path("auto_mod_schedule.json"),
+            "auto_mod_processed": _project_data_path("auto_mod_processed.json"),
+            "youtube_api_keys": _project_data_path("youtube_api_keys.json"),
+            "video_containers": _project_data_path("video_containers.json"),
+            "video_container_videos": _project_data_path("video_container_videos.json")
+        }
+        
+        for table, local_path in automod_tables.items():
+            try:
+                rows = supabase_select(table)
+                if rows:
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(local_path, "w", encoding="utf-8") as f:
+                        json.dump(rows, f, ensure_ascii=False, indent=2)
+                    logger.info(f"✅ تم استعادة {len(rows)} سجل لجدول {table}.")
+                else:
+                    logger.info(f"ℹ️ جدول {table} فارغ أو غير موجود.")
+            except Exception as e:
+                logger.warning(f"⚠️ فشل استعادة جدول {table}: {e}")
+
+        # 4. استعادة بيانات FaceCam ومزامنة الملفات
+        try:
+            # مزامنة الفهرس
+            fc_clips = supabase_select("facecam_clips")
+            if fc_clips:
+                # حفظ في الفهرس المحلي (حسب ما يتوقعه bot/persistence.py أو auto_mod_fetcher)
+                # ملاحظة: Facecam clips تُخزن غالباً في bot_state ولكن جداول Supabase منفصلة
+                logger.info(f"✅ تم استعادة {len(fc_clips)} مرجع لمقاطع FaceCam.")
             
+            # مزامنة فهرس التخزين وتحميل الملفات المادية المفقودة
+            fc_storage_rows = supabase_select("facecam_storage")
+            if fc_storage_rows:
+                FACECAM_STORAGE_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(FACECAM_STORAGE_LOCAL_PATH, "w", encoding="utf-8") as f:
+                    json.dump(fc_storage_rows, f, ensure_ascii=False, indent=2)
+                
+                # تحميل الملفات المادية
+                facecam_dir = _project_data_path("facecam")
+                facecam_dir.mkdir(parents=True, exist_ok=True)
+                
+                download_count = 0
+                for row in fc_storage_rows:
+                    clip_id = row.get("id")
+                    obj_path = row.get("storage_path")
+                    if not clip_id or not obj_path:
+                        continue
+                        
+                    # تحديد المسار المحلي (نحاول الحفاظ على نفس البنية)
+                    # المسار الموجود في الحقل local_path قد يكون مطلقاً لنظام قديم، لذا نستخدم clip_id
+                    ext = os.path.splitext(obj_path)[1] or ".mp4"
+                    local_file = facecam_dir / f"{clip_id}{ext}"
+                    
+                    if not local_file.exists():
+                        bucket = row.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+                        if supabase_storage_download_to_file(bucket, obj_path, str(local_file)):
+                            download_count += 1
+                
+                if download_count > 0:
+                    logger.info(f"✅ تم تحميل {download_count} ملف FaceCam مفقود من التخزين.")
+        except Exception as e:
+            logger.warning(f"⚠️ فشل مزامنة ملفات FaceCam: {e}")
+
         return True
     except Exception as e:
         logger.error(f"❌ فشل استعادة البيانات من Supabase: {e}")

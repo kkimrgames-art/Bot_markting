@@ -396,6 +396,16 @@ def _expand_facebook_candidates(u: str, fb_ua: Optional[str]) -> List[str]:
                         urls.append(f"https://www.facebook.com/profile.php?id={pid}&sk=reels_tab")
                         urls.append(f"https://www.facebook.com/profile.php?id={pid}&sk=owner_reels")
                         urls.append(f"https://www.facebook.com/profile.php?id={pid}&sk=videos")
+                elif "/people/" in base_clean:
+                    # Handle /people/{name}/{numeric_id}/ URL format
+                    people_id_match = re.search(r'/people/[^/]+/(\d{10,20})/?', base_clean)
+                    if people_id_match:
+                        pid = people_id_match.group(1)
+                        urls.append(f"https://www.facebook.com/profile.php?id={pid}&sk=reels_tab")
+                        urls.append(f"https://www.facebook.com/profile.php?id={pid}&sk=owner_reels")
+                        urls.append(f"https://www.facebook.com/profile.php?id={pid}&sk=videos")
+                        urls.append(f"{base_clean}/reels/")
+                        urls.append(f"{base_clean}/videos/")
 
             # Perform HTTP GET to find redirects and content
             resp = _http_get(page_url, headers=headers, timeout=10, allow_redirects=True)

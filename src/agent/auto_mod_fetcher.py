@@ -1961,6 +1961,18 @@ def _expand_facebook_source_candidates(source_url: str, platform: str = "faceboo
                 candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}&sk=reels_tab")
                 if lower_platform != "facebook_reels":
                     candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}&sk=videos")
+        elif "/people/" in path.lower():
+            people_match = re.search(r'/people/[^/]+/(\d{10,20})/?', path)
+            if people_match:
+                profile_id = people_match.group(1)
+                candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}&sk=reels_tab")
+                if lower_platform != "facebook_reels":
+                    candidates.append(f"https://www.facebook.com/profile.php?id={profile_id}&sk=videos")
+                base_people = normalized.split("?", 1)[0].rstrip("/")
+                if base_people:
+                    candidates.append(f"{base_people}/reels")
+                    if lower_platform != "facebook_reels":
+                        candidates.append(f"{base_people}/videos")
 
     try:
         from src.agent.downloader import _expand_facebook_candidates
@@ -3584,6 +3596,7 @@ class AutoModFetcher:
         # === Retry مع backoff ذكي ===
         max_retries = 3
         last_error = None
+        _fb_partial_videos: List[Dict] = []  # Collect partial Facebook results across candidates
 
         for candidate_index, candidate_url in enumerate(source_candidates, start=1):
             candidate_opts = dict(ydl_opts)
@@ -3618,6 +3631,17 @@ class AutoModFetcher:
                                 source_url,
                             )
                             logger.info(f"✅ [FB-Enrich] Total after enrichment: {len(videos)} videos")
+                            if len(videos) <= 2:
+                                # Still too few - save partial and try more candidates / scraping fallback
+                                _fb_partial_videos = _merge_unique_videos(_fb_partial_videos, videos)
+                                logger.info(
+                                    "🔄 [FB-Enrich] Still only %d video(s) after enrichment. Continuing to next candidate...",
+                                    len(videos),
+                                )
+                                break  # break retry loop, try next candidate
+                        # Merge with any partial results collected from earlier candidates
+                        if _fb_partial_videos:
+                            videos = _merge_unique_videos(_fb_partial_videos, videos)
                         return videos
                     if videos == []:
                         break
@@ -3730,7 +3754,7 @@ class AutoModFetcher:
         # إذا فشل yt-dlp في استخراج فيديوهات من فيسبوك، نجرب الـ scraping المباشر
         is_facebook = (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower()
         if is_facebook:
-            fallback_results: List[Dict[str, Any]] = []
+            fallback_results: List[Dict[str, Any]] = list(_fb_partial_videos)  # Start with any partial results
             attempted_scrape_urls = set()
             for scrape_url in source_candidates or [source_url]:
                 normalized_scrape_url = _normalize_facebook_candidate_url(scrape_url)
@@ -3738,16 +3762,21 @@ class AutoModFetcher:
                     continue
                 attempted_scrape_urls.add(normalized_scrape_url)
                 logger.info(
-                    "🔄 [FB-Fallback] yt-dlp returned no results for %s. Trying HTTP scraping fallback...",
+                    "🔄 [FB-Fallback] Trying HTTP scraping fallback for %s (partial=%d)...",
                     normalized_scrape_url,
+                    len(fallback_results),
                 )
                 scrape_results = self._fetch_facebook_via_scraping(normalized_scrape_url, platform)
                 if not scrape_results:
                     continue
                 fallback_results = _merge_unique_videos(fallback_results, scrape_results)
             if fallback_results:
-                logger.info(f"✅ [FB-Fallback] Scraping found {len(fallback_results)} videos across fallback candidates!")
+                logger.info(f"✅ [FB-Fallback] Scraping found {len(fallback_results)} total videos (including partials)!")
                 return fallback_results
+
+        # Return any partial Facebook results even if scraping didn't add more
+        if _fb_partial_videos:
+            return _fb_partial_videos
 
         return []
 
