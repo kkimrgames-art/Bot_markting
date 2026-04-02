@@ -4813,21 +4813,24 @@ class AutoModFetcher:
         # أولوية الجودة: أعلى جودة ممكنة مع دعم دقة الشورتس العمودية (1920x1080)
         if is_facebook:
             # Facebook-specific format: تفضيل الفيديوهات المدمجة (بدون حاجة لدمج FFmpeg)
-            # DASH VP9 streams من فيسبوك تفشل عند الدمج بصمت مع quiet:True
-            # لذلك نفضل الفورمات المدمجة أولاً ثم DASH كـ fallback
+            # ⚠️ فيسبوك يوفر فقط DASH VP9 streams منفصلة (video-only + audio-only)
+            # الفورمات المدمجة الوحيدة هي hd/sd (format IDs خاصة بفيسبوك)
+            # best[ext=mp4] يطابق DASH streams أيضاً لأن فيسبوك يصنفها كـ mp4
+            # لذلك يجب تفضيل hd/sd أولاً (المدمجة) ثم DASH+merge كـ fallback
             if ffmpeg_path:
                 fmt = (
-                    "best[ext=mp4][height<=1920]/"
-                    "best[ext=mp4]/"
                     "hd/sd/"
-                    "best/"
+                    "best[vcodec!=none][acodec!=none][ext=mp4]/"
+                    "best[vcodec!=none][acodec!=none]/"
                     "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
                     "bestvideo+bestaudio/"
+                    "best[ext=mp4]/"
+                    "best/"
                     "b"
                 )
             else:
-                fmt = "best[ext=mp4]/hd/sd/best/b"
-            logger.info("📘 Using Facebook-optimized format selector (combined streams first)")
+                fmt = "hd/sd/best[vcodec!=none][acodec!=none][ext=mp4]/best[vcodec!=none][acodec!=none]/best[ext=mp4]/best/b"
+            logger.info("📘 Using Facebook-optimized format selector (combined hd/sd first, then DASH+merge fallback)")
         elif ffmpeg_path:
             fmt = (
                 "bestvideo[height<=1920][width<=1920][ext=mp4]+bestaudio[ext=m4a]/"
@@ -4968,19 +4971,50 @@ class AutoModFetcher:
 
                             filename = ydl.prepare_filename(info)
                             
-                            # 1. الاكتشاف المباشر للملف
+                            # 0. فحص requested_downloads أولاً (الأكثر موثوقية — يحتوي المسار الفعلي بعد الدمج)
+                            requested_downloads = info.get("requested_downloads") or []
+                            for rd in requested_downloads:
+                                rd_filepath = rd.get("filepath") or rd.get("filename") or ""
+                                if rd_filepath and ResilientFS.exists(rd_filepath):
+                                    rd_size = 0
+                                    try:
+                                        rd_size = os.path.getsize(rd_filepath)
+                                    except Exception:
+                                        pass
+                                    if rd_size > 1000:
+                                        logger.info(
+                                            "✅ Found file via requested_downloads: %s (%s bytes)",
+                                            rd_filepath, rd_size,
+                                        )
+                                        return rd_filepath
+
+                            # 1. الاكتشاف المباشر للملف عبر prepare_filename
                             base = os.path.splitext(filename)[0]
                             for ext in [".mp4", ".mkv", ".webm"]:
                                 if ResilientFS.exists(base + ext):
                                     return base + ext
                             if ResilientFS.exists(filename):
                                 return filename
-                                
+
+                            # 1.5 فحص progress hook — قد يحتوي على المسار الفعلي للملف المُنزّل
+                            progress_last = _download_progress_state.get("last_filename")
+                            if progress_last and ResilientFS.exists(progress_last):
+                                try:
+                                    psize = os.path.getsize(progress_last)
+                                    if psize > 1000:
+                                        logger.info(
+                                            "✅ Found file via progress hook last_filename: %s (%s bytes)",
+                                            progress_last, psize,
+                                        )
+                                        return progress_last
+                                except Exception:
+                                    pass
+
                             # 2. Scavenger Mode: إذا فشل الاكتشاف المباشر (يحدث أحياناً بسبب إعادة التسمية بواسطة yt-dlp)
                             logger.debug(f"🔍 Detection failed for {filename}, entering Scavenger Mode...")
                             try:
                                 # محاولة استخراج معرف الفيديو من المعلومات أو الرابط
-                                file_id = info.get("id") or _extract_video_id(video_url)
+                                file_id = info.get("id") or _extract_facebook_video_id(video_url) or _extract_youtube_video_id(video_url)
                                 candidates = []
                                 fragment_video = None
                                 fragment_audio = None
