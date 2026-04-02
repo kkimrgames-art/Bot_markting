@@ -35,6 +35,18 @@ async def _list_channels_wrapper(update: Update, context: ContextTypes.DEFAULT_T
     return await list_channels(update, context)
 
 
+async def _open_ai_menu_from_auto_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .ai_manager_handler import show_ai_menu
+    await show_ai_menu(update, context)
+    return ConversationHandler.END
+
+
+async def _open_api_keys_menu_from_auto_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .api_key_handlers import api_keys_menu
+    await api_keys_menu(update, context)
+    return ConversationHandler.END
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -781,12 +793,12 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("📋 القنوات", callback_data="list_channels:0"),
-         InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources"),
-         InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule")],
-        [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
+         InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources")],
+        [InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule"),
          InlineKeyboardButton("📊 الحالة", callback_data="am_status")],
-        [InlineKeyboardButton("🎬 فيديوهات الفيس كام", callback_data="am_fc_viewer"),
-         InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config")],
+        [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
+         InlineKeyboardButton("🎬 فيديوهات الفيس كام", callback_data="am_fc_viewer")],
+        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config")],
         [InlineKeyboardButton("🤖 الذكاء الاصطناعي", callback_data="ai_main_menu"),
          InlineKeyboardButton("🔑 مفاتيح API", callback_data="api_keys_menu")],
         [InlineKeyboardButton(toggle_text, callback_data="am_toggle"),
@@ -4223,8 +4235,10 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(test_render_menu, pattern=r"^am_test_render$"),
         CallbackQueryHandler(test_render_run, pattern=r"^am_test_render_src:"),
         CallbackQueryHandler(_list_channels_wrapper, pattern=r"^list_channels:"),
+        CallbackQueryHandler(_open_ai_menu_from_auto_mod, pattern=r"^ai_main_menu$"),
+        CallbackQueryHandler(_open_api_keys_menu_from_auto_mod, pattern=r"^api_keys_menu$"),
+        CallbackQueryHandler(auto_mod_menu, pattern=r"^main_menu$"),
         CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
-        CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^ai_main_menu$|^api_keys_menu$|^main_menu$"),
     ]
 
 

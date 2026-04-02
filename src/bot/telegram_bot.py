@@ -130,6 +130,7 @@ def build_application(token: str):
     )
     application.add_handler(add_channel_conv)
 
+    application.add_handler(CallbackQueryHandler(auto_mod_handlers.auto_mod_menu, pattern="^main_menu$"))
     application.add_handler(CallbackQueryHandler(channel_handlers.list_channels, pattern="^list_channels:"))
     application.add_handler(CallbackQueryHandler(channel_handlers.view_channel, pattern="^view_channel:"))
     application.add_handler(CallbackQueryHandler(channel_handlers.callback_noop, pattern="^noop$"))

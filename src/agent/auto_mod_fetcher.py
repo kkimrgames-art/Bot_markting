@@ -1614,6 +1614,13 @@ def _classify_download_error(err: Exception) -> Tuple[str, str]:
         return "network_failure", "Network/CDN communication failed while resolving or downloading the media"
     if any(token in lowered for token in ["private video", "members-only", "sign in to confirm your age", "video unavailable"]):
         return "availability_restricted", "The source video is unavailable or restricted for this runtime"
+    # Facebook-specific errors
+    if any(token in lowered for token in ["login required", "login to view", "content not available", "this content isn't available", "video not found"]):
+        return "facebook_auth_required", "Facebook requires authentication (cookies) to access this video"
+    if "unsupported url" in lowered:
+        return "unsupported_url", "The URL format is not supported by yt-dlp (may need URL resolution first)"
+    if "facebook" in lowered and ("error" in lowered or "failed" in lowered):
+        return "facebook_error", "Facebook-specific download error occurred"
 
     return "unknown_error", raw_message or err.__class__.__name__
 
@@ -1803,11 +1810,31 @@ def _resolve_facebook_share_target_url(raw_url: Any, platform: str = "facebook")
         "Referer": "https://www.facebook.com/",
     }
 
-    try:
-        response = requests.get(normalized, headers=headers, allow_redirects=True, timeout=15)
-        html_candidates = _extract_facebook_html_candidates(response.url, response.text)
-    except Exception as exc:
-        logger.debug("Facebook share resolution request failed for %s: %s", normalized, exc)
+    # Try resolving with retries
+    for attempt in range(3):
+        try:
+            response = requests.get(normalized, headers=headers, allow_redirects=True, timeout=15)
+            html_candidates = _extract_facebook_html_candidates(response.url, response.text)
+            if html_candidates:
+                break
+        except Exception as exc:
+            logger.warning("Facebook share resolution request failed (attempt %d/3) for %s: %s", attempt + 1, normalized, exc)
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            # On final attempt, try to extract video ID from URL directly
+            video_id = _extract_facebook_video_id(normalized)
+            if video_id:
+                logger.info("Extracted video ID %s from share URL after HTTP failure", video_id)
+                return f"https://www.facebook.com/reel/{video_id}/"
+            return normalized
+
+    if not html_candidates:
+        # No candidates found from HTML, try extracting video ID
+        video_id = _extract_facebook_video_id(normalized)
+        if video_id:
+            logger.info("No HTML candidates found, extracted video ID %s from share URL", video_id)
+            return f"https://www.facebook.com/reel/{video_id}/"
         return normalized
 
     lower_platform = str(platform or "facebook").strip().lower()
@@ -3330,6 +3357,39 @@ class AutoModFetcher:
     def __init__(self, instance_id: str = None):
         self.instance_id = instance_id or get_instance_id()
         self.db = AutoModDB(self.instance_id)
+        self._last_download_error = ""
+
+    @staticmethod
+    def _display_video_title(video: Dict[str, Any]) -> str:
+        title = str((video or {}).get("title") or "").strip()
+        if title:
+            return title[:60]
+        vid_id = str((video or {}).get("id") or "").strip()
+        if vid_id:
+            return f"بدون عنوان ({vid_id[:20]})"
+        return "بدون عنوان"
+
+    def _remember_download_error(self, err: Any) -> None:
+        raw = str(err or "").strip()
+        if not raw:
+            self._last_download_error = ""
+            return
+        try:
+            error_code, error_reason = _classify_download_error(RuntimeError(raw))
+        except Exception:
+            error_code, error_reason = ("unknown_error", raw)
+        detail = raw.replace("\n", " ").replace("\r", " ").strip()
+        if len(detail) > 220:
+            detail = detail[:220].rstrip() + "..."
+        if error_reason and error_reason != raw:
+            self._last_download_error = f"{error_code}: {error_reason} | {detail}"
+        else:
+            self._last_download_error = detail
+
+    def _consume_last_download_error(self) -> str:
+        value = str(self._last_download_error or "").strip()
+        self._last_download_error = ""
+        return value
 
     async def fetch_videos_from_source(self, source_url: str, items_range: str = "1-10", platform: str = "youtube") -> List[Dict]:
         """
@@ -3816,6 +3876,7 @@ class AutoModFetcher:
 
     async def download_video(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
         """تنزيل فيديو من URL مع تحديد مدة قصوى اختيارية"""
+        self._last_download_error = ""
         try:
             output_dir = _ensure_runtime_dir(output_dir)
             if (video_url or "").strip().lower().startswith("container://"):
@@ -3827,6 +3888,7 @@ class AutoModFetcher:
             )
             return result
         except Exception as e:
+            self._remember_download_error(e)
             logger.error(f"Failed to download {video_url}: {e}")
             return None
 
@@ -3955,6 +4017,16 @@ class AutoModFetcher:
                         pass
                 return direct_url
 
+        # Fallback: Try extracting video ID from the share URL and construct direct URLs
+        video_id = _extract_facebook_video_id(normalized)
+        if video_id:
+            reel_url = f"https://www.facebook.com/reel/{video_id}/"
+            watch_url = f"https://www.facebook.com/watch/?v={video_id}"
+            logger.info("🎯 Extracted video ID %s from share URL, trying direct URLs: %s, %s", video_id, reel_url, watch_url)
+            for fallback_url in (reel_url, watch_url):
+                if _is_direct_facebook_video_url(fallback_url):
+                    return fallback_url
+
         return normalized
 
     def _download_sync(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
@@ -4050,6 +4122,8 @@ class AutoModFetcher:
                             logger.error(
                                 f"yt-dlp download error after {max_retries} retries ({error_code}): {error_reason} | raw={e}"
                             )
+            if last_error:
+                self._remember_download_error(last_error)
             return None
 
         remote_settings = _resolve_remote_downloader_settings()
@@ -4172,6 +4246,8 @@ class AutoModFetcher:
                         f"yt-dlp download error after {max_retries} retries ({error_code}): {error_reason} | raw={e}"
                     )
 
+        if last_error:
+            self._remember_download_error(last_error)
         return None
 
     def _download_via_remote_worker(self, video_url: str, output_dir: str, max_duration: Optional[int] = None) -> Optional[str]:
@@ -4571,6 +4647,14 @@ class AutoModFetcher:
                 "videoQuality": "1080",
                 "filenamePattern": "basic"
             }
+            # Add Facebook-specific Cobalt parameters
+            is_facebook_url = (
+                "facebook.com" in (video_url or "").lower()
+                or "fb.watch" in (video_url or "").lower()
+            )
+            if is_facebook_url:
+                payload["isNoTTWatermark"] = True
+                payload["disableMetadata"] = True
             
             # الطلب الأول يعطينا رابط التنزيل المباشر
             # ملاحظة: بعض سرفرات Cobalt تتطلب JWT، إذا فشل هذا فالبديل هو الكوكيز المحلية فقط
@@ -4674,6 +4758,12 @@ class AutoModFetcher:
         cookies_info = _resolve_cookiefile_details()
         cookies_path = cookies_info.get("path") or ""
 
+        # تحديد ما إذا كان التنزيل من فيسبوك
+        is_facebook = (
+            "facebook.com" in (video_url or "").lower()
+            or "fb.watch" in (video_url or "").lower()
+        )
+
         # الحصول على مسار FFmpeg للدمج
         try:
             from src.agent.ffmpeg_utils import ffmpeg_bin
@@ -4706,6 +4796,16 @@ class AutoModFetcher:
             "retries": 5,
             "fragment_retries": 5,
         }
+
+        # إضافة Facebook-specific headers
+        if is_facebook:
+            fb_ua = os.getenv("FB_USER_AGENT") or _MODERN_USER_AGENT
+            base_dl_extra["http_headers"] = {
+                "User-Agent": fb_ua,
+                "Accept-Language": "en-US,en;q=0.9",
+                "Origin": "https://www.facebook.com",
+                "Referer": "https://www.facebook.com/",
+            }
 
         # إضافة فلتر المدة إذا كان مطلوباً (للشورتس مثلاً)
         if max_duration:
@@ -4744,7 +4844,7 @@ class AutoModFetcher:
                 profile_label = profile.get("label") or f"profile_{profile_index}"
                 dl_extra = dict(base_dl_extra)
                 for key, value in profile.items():
-                    if key != "label":
+                    if key not in ("label", "strip_cookies"):
                         dl_extra[key] = value
 
                 ydl_opts = _build_yt_opts(dl_extra, cookies_path=cookies_info)
@@ -4756,6 +4856,11 @@ class AutoModFetcher:
 
                 if os.environ.get("YTDLP_SKIP_IMPERSONATE") == "1":
                     ydl_opts.pop("impersonate", None)
+
+                # For Facebook, remove YouTube-specific extractor args
+                if is_facebook:
+                    ydl_opts.pop("extractor_args", None)
+                    ydl_opts["extractor_args"] = {}
 
                 try:
                     logger.info(
@@ -5482,7 +5587,7 @@ class AutoModFetcher:
 
                         for video in videos:
                             vid_id = video.get("id", "")
-                            vid_title = video.get("title", "بدون عنوان")[:60]
+                            vid_title = self._display_video_title(video)
                             if not vid_id:
                                 continue
 
@@ -5601,14 +5706,18 @@ class AutoModFetcher:
                                     current_dl_path = dl_path
 
                                     if not dl_path:
-                                        err_msg = f"❌ *فشل التنزيل:* `{vid_title}`"
+                                        download_reason = self._consume_last_download_error() or "تعذر استخراج رابط قابل للتنزيل أو فشلت أداة التنزيل في هذه المحاولة."
+                                        err_msg = (
+                                            f"❌ *فشل التنزيل:* `{vid_title}`\n"
+                                            f"📛 السبب: `{download_reason[:220]}`"
+                                        )
                                         await _notify(err_msg)
-                                        errors_log.append(f"تنزيل فاشل: {vid_title}")
+                                        errors_log.append(f"تنزيل فاشل: {vid_title} | {download_reason[:80]}")
                                         logger.warning(
                                             f"❌ [AutoMod] Download failed (video={vid_id[:20]}..., channel={channel_id[:10]}..., source={src_name})"
                                         )
                                         if not preview_mode:
-                                            self.db.mark_video_failed(vid_id, channel_id, "Download failed")
+                                            self.db.mark_video_failed(vid_id, channel_id, f"Download failed: {download_reason[:250]}")
                                         results["failed"] += 1
                                         try:
                                             from src.agent.error_tracker import get_error_tracker
