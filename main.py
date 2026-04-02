@@ -50,6 +50,7 @@ except Exception:
 # ==================== Global State ====================
 START_TIME = time.time()
 _SINGLE_INSTANCE_LOCK_OWNED = False
+_WEB_SERVER_SITE = None
 
 
 def _get_single_instance_lock_path() -> str:
@@ -572,6 +573,17 @@ async def start_web_server():
     return site
 
 
+async def _run_sync_startup_step(func: Callable[..., Any], *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _run_async_startup_step_in_thread(func: Callable[..., Coroutine[Any, Any, Any]], *args, **kwargs):
+    def _runner():
+        return asyncio.run(func(*args, **kwargs))
+
+    return await asyncio.to_thread(_runner)
+
+
 # ==================== Graceful Shutdown ====================
 _shutdown_event = asyncio.Event()
 
@@ -646,19 +658,21 @@ async def main():
         admin_chat_id=admin_ids[0] if admin_ids else None,
     )
 
-    await start_web_server()
+    global _WEB_SERVER_SITE
+    _WEB_SERVER_SITE = await start_web_server()
+    await asyncio.sleep(0)
 
     # 2. التحقق من وجود FFmpeg وتثبيته إذا لزم الأمر (Self-Healing)
     try:
         from install_ffmpeg import install
-        install()
+        await _run_sync_startup_step(install)
     except Exception as e:
         logger.error(f"Failed to run auto-FFmpeg installer: {e}")
 
     # 3. استعادة البيانات من Supabase
     logger.info("📥 Restoring data from Supabase...")
     try:
-        await sync_supabase_to_local()
+        await _run_async_startup_step_in_thread(sync_supabase_to_local)
     except Exception as e:
         logger.warning(f"⚠️ Supabase sync failed (continuing with local data): {e}")
 
