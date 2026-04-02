@@ -2398,15 +2398,11 @@ class AutoModDB:
             config["instance_id"] = self.instance_id
             config["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-            supabase_payload = dict(config)
-            for _k in ("auto_fetch_interval_seconds",):
-                supabase_payload.pop(_k, None)
-
             primary = self._supabase_primary_storage()
             if primary:
                 supabase_upsert(
                     "auto_mod_config",
-                    supabase_payload,
+                    config,
                     key_field="instance_id",
                     fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
                 )
@@ -2414,7 +2410,7 @@ class AutoModDB:
                 _local_upsert_row("auto_mod_config", config, key_field="instance_id")
                 supabase_upsert(
                     "auto_mod_config",
-                    supabase_payload,
+                    config,
                     key_field="instance_id",
                     fallback_local=lambda payload: _local_upsert_row("auto_mod_config", payload, key_field="instance_id"),
                 )

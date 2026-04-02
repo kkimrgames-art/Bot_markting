@@ -780,7 +780,8 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     toggle_text = "⏸ إيقاف" if config.get("auto_fetch_enabled") else "▶️ تشغيل"
 
     keyboard = [
-        [InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources"),
+        [InlineKeyboardButton("📋 القنوات", callback_data="list_channels:0"),
+         InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources"),
          InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule")],
         [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
          InlineKeyboardButton("📊 الحالة", callback_data="am_status")],
