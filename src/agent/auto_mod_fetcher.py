@@ -2149,6 +2149,41 @@ def _sort_videos_for_fetch_order(videos: List[Dict[str, Any]], fetch_order: str)
     )
     return videos
 
+
+def _video_identity_key(video: Dict[str, Any]) -> str:
+    item = video or {}
+    raw_id = str(item.get("id") or "").strip()
+    if raw_id:
+        return raw_id
+
+    for key in ("url", "webpage_url", "original_url"):
+        value = _clean_url_candidate(item.get(key))
+        if value:
+            return value
+
+    title = str(item.get("title") or "").strip()
+    timestamp = _coerce_video_timestamp(item.get("timestamp"))
+    if title or timestamp:
+        return f"{title}::{timestamp}"
+    return ""
+
+
+def _merge_unique_videos(primary: List[Dict[str, Any]], extra: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged = list(primary or [])
+    seen = {
+        _video_identity_key(video)
+        for video in merged
+        if _video_identity_key(video)
+    }
+
+    for video in extra or []:
+        identity = _video_identity_key(video)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(video)
+    return merged
+
 # ==================== معرف النسخة ====================
 
 def get_instance_id() -> str:
@@ -3398,6 +3433,28 @@ class AutoModFetcher:
             logger.warning(f"⚠️ [FB-Scrape] Failed to scrape Facebook page: {e}")
             return []
 
+    def _enrich_facebook_videos(self, videos: List[Dict], platform: str, *scrape_urls: str) -> List[Dict]:
+        enriched = list(videos or [])
+        attempted = set()
+
+        for scrape_url in scrape_urls:
+            normalized_url = _normalize_facebook_candidate_url(scrape_url)
+            if not normalized_url or normalized_url in attempted:
+                continue
+            attempted.add(normalized_url)
+            scrape_extra = self._fetch_facebook_via_scraping(normalized_url, platform)
+            if not scrape_extra:
+                continue
+            before_count = len(enriched)
+            enriched = _merge_unique_videos(enriched, scrape_extra)
+            if len(enriched) > before_count:
+                logger.info(
+                    "✅ [FB-Enrich] Added %d extra videos from %s",
+                    len(enriched) - before_count,
+                    normalized_url,
+                )
+        return enriched
+
     def _fetch_sync(self, source_url: str, items_range: str = "1-10", platform: str = "youtube") -> List[Dict]:
         """جلب الفيديوهات بشكل متزامن عبر yt-dlp مع retry وتخطي القيود بذكاء"""
 
@@ -3461,18 +3518,16 @@ class AutoModFetcher:
                 try:
                     videos = self._fetch_sync_attempt(candidate_url, items_range, platform, ydl_opts=candidate_opts)
                     if videos:
-                        # فيسبوك: إذا حصلنا على فيديو واحد فقط، نحاول إثراء القائمة عبر scraping
                         is_fb = (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower()
                         if is_fb and len(videos) <= 2:
                             logger.info(f"🔄 [FB-Enrich] yt-dlp returned only {len(videos)} video(s). Trying scraping to find more...")
-                            scrape_extra = self._fetch_facebook_via_scraping(source_url, platform)
-                            if scrape_extra:
-                                existing_ids = {v.get("id") for v in videos}
-                                for sv in scrape_extra:
-                                    if sv.get("id") not in existing_ids:
-                                        videos.append(sv)
-                                        existing_ids.add(sv.get("id"))
-                                logger.info(f"✅ [FB-Enrich] Total after enrichment: {len(videos)} videos")
+                            videos = self._enrich_facebook_videos(
+                                videos,
+                                platform,
+                                candidate_url,
+                                source_url,
+                            )
+                            logger.info(f"✅ [FB-Enrich] Total after enrichment: {len(videos)} videos")
                         return videos
                     if videos == []:
                         break
@@ -5143,21 +5198,6 @@ class AutoModFetcher:
                     claimed_processing = False
 
                     try:
-                        # مستويات البحث المتدرجة
-                        is_facebook_source = (src_platform or "").startswith("facebook") or "facebook.com" in (source.get("source_url") or "").lower()
-                        if is_facebook_source:
-                            # فيسبوك: المستخرج العام (generic) لا يدعم ترقيم الصفحات
-                            # لذا نطاق واحد يكفي - التوسيع لا يعيد نتائج مختلفة
-                            search_ranges = ["1-50"]
-                        else:
-                            search_ranges = [
-                                "1-50",
-                                "51-250",
-                                "251-1000",
-                                "1001-5000",
-                                "5001-20000"
-                            ]
-
                         fetch_order = config.get("settings", {}).get("fetch_order", "newest")
                         videos = []
                         found_new_video = False
@@ -5193,6 +5233,21 @@ class AutoModFetcher:
                                     continue
                                 fetch_name = str(fetch_item.get("name") or "").strip() or src_name
                                 fetch_platform = (str(fetch_item.get("platform") or "").strip().lower() or str(src_platform or "").strip().lower() or "youtube")
+                                fetch_is_facebook_source = (
+                                    fetch_platform.startswith("facebook")
+                                    or "facebook.com" in fetch_url.lower()
+                                    or "fb.watch" in fetch_url.lower()
+                                )
+                                if fetch_is_facebook_source:
+                                    search_ranges = ["1-50"]
+                                else:
+                                    search_ranges = [
+                                        "1-50",
+                                        "51-250",
+                                        "251-1000",
+                                        "1001-5000",
+                                        "5001-20000"
+                                    ]
 
                                 for idx, s_range in enumerate(search_ranges):
                                     if found_new_video:
@@ -5222,16 +5277,8 @@ class AutoModFetcher:
                                         await _notify(f"⏹️ لا توجد فيديوهات إضافية بعد النطاق {search_ranges[idx-1]}.")
                                         break
 
-                                    # اكتشاف تكرار نفس الفيديوهات (خاصية مهمة لفيسبوك)
                                     current_batch_ids = {v.get("id", "") for v in batch_videos if v.get("id")}
-                                    if current_batch_ids and current_batch_ids == _prev_batch_ids:
-                                        logger.info(
-                                            f"🔄 [AutoMod] Detected duplicate batch (same {len(current_batch_ids)} video IDs). "
-                                            f"Stopping range expansion for {fetch_name}."
-                                        )
-                                        await _notify(f"🔄 تم اكتشاف تكرار نفس الفيديوهات. إيقاف البحث في نطاقات أعمق.")
-                                        break
-                                    _prev_batch_ids = current_batch_ids
+                                    duplicate_batch_detected = bool(current_batch_ids) and current_batch_ids == _prev_batch_ids
 
                                     # فحص الفيديوهات في هذا النطاق
                                     potential_videos = []
@@ -5274,8 +5321,7 @@ class AutoModFetcher:
                                             if status == 'failed':
                                                 try:
                                                     time_since_update = datetime.now(timezone.utc) - updated_at
-                                                    # فيسبوك: إعادة المحاولة بعد 6 ساعات بدل 24
-                                                    retry_hours = 6 if is_facebook_source else 24
+                                                    retry_hours = 6 if fetch_is_facebook_source else 24
                                                     if time_since_update > timedelta(hours=retry_hours):
                                                         logger.info(f"🔎 [AutoMod] Video {v_id} was 'failed' {time_since_update} ago (retry after {retry_hours}h). Retrying it now.")
                                                         potential_videos.append(v)
@@ -5322,6 +5368,8 @@ class AutoModFetcher:
                                         )
                                     except Exception:
                                         pass
+
+                                    _prev_batch_ids = current_batch_ids
                                 
                                     if potential_videos:
                                         found_new_video = True
@@ -5334,8 +5382,15 @@ class AutoModFetcher:
                                         await _notify(f"🎯 وجدنا *{len(potential_videos)}* فيديو جديد في النطاق {s_range} ({fetch_order}).")
                                         break
                                     else:
+                                        if duplicate_batch_detected and current_batch_ids and published_count >= len(current_batch_ids):
+                                            logger.info(
+                                                f"🔄 [AutoMod] Source {fetch_name} returned the same already-published batch "
+                                                f"({len(current_batch_ids)} IDs). Stopping deeper range expansion."
+                                            )
+                                            await _notify("🔄 المصدر أعاد نفس الفيديوهات المنشورة سابقاً، لذلك تم إيقاف البحث في نطاقات أعمق.")
+                                            break
                                         if idx < len(search_ranges) - 1:
-                                            await _notify(f"🔄 جميع فيديوهات النطاق {s_range} تمت معالجتها. *جاري البحث في النطاق التالي...*")
+                                            await _notify(f"🔄 تم فحص فيديوهات النطاق {s_range} ولم نجد فيديوهات قابلة للنشر الآن. *جاري البحث في النطاق التالي...*")
                                         else:
                                             depth_msg = f"تم الوصول لأقصى عمق بحث ولم نجد فيديوهات جديدة."
                                             await _notify(f"📭 {depth_msg}")
