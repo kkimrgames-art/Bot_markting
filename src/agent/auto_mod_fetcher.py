@@ -4811,7 +4811,24 @@ class AutoModFetcher:
             ffmpeg_path = None
 
         # أولوية الجودة: أعلى جودة ممكنة مع دعم دقة الشورتس العمودية (1920x1080)
-        if ffmpeg_path:
+        if is_facebook:
+            # Facebook-specific format: تفضيل الفيديوهات المدمجة (بدون حاجة لدمج FFmpeg)
+            # DASH VP9 streams من فيسبوك تفشل عند الدمج بصمت مع quiet:True
+            # لذلك نفضل الفورمات المدمجة أولاً ثم DASH كـ fallback
+            if ffmpeg_path:
+                fmt = (
+                    "best[ext=mp4][height<=1920]/"
+                    "best[ext=mp4]/"
+                    "hd/sd/"
+                    "best/"
+                    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+                    "bestvideo+bestaudio/"
+                    "b"
+                )
+            else:
+                fmt = "best[ext=mp4]/hd/sd/best/b"
+            logger.info("📘 Using Facebook-optimized format selector (combined streams first)")
+        elif ffmpeg_path:
             fmt = (
                 "bestvideo[height<=1920][width<=1920][ext=mp4]+bestaudio[ext=m4a]/"
                 "bestvideo[height<=1920][width<=1920]+bestaudio/"
@@ -4827,6 +4844,23 @@ class AutoModFetcher:
                 "(typically max ~720p)"
             )
 
+        # متتبع التقدم لمعرفة ما إذا تم تنزيل أي بيانات فعلياً
+        _download_progress_state = {"downloaded_bytes": 0, "last_filename": None, "finished": False}
+
+        def _progress_hook(d):
+            status = d.get("status", "")
+            if status == "downloading":
+                _download_progress_state["downloaded_bytes"] = d.get("downloaded_bytes") or _download_progress_state["downloaded_bytes"]
+                _download_progress_state["last_filename"] = d.get("filename") or _download_progress_state["last_filename"]
+            elif status == "finished":
+                _download_progress_state["finished"] = True
+                _download_progress_state["last_filename"] = d.get("filename") or _download_progress_state["last_filename"]
+                logger.info(
+                    "📦 [yt-dlp] Fragment/file finished: %s (%s bytes)",
+                    d.get("filename", "?"),
+                    d.get("downloaded_bytes") or d.get("total_bytes") or "?",
+                )
+
         base_dl_extra = {
             "format": fmt,
             "outtmpl": output_template,
@@ -4834,7 +4868,15 @@ class AutoModFetcher:
             "merge_output_format": "mp4" if ffmpeg_path else None,
             "retries": 5,
             "fragment_retries": 5,
+            "progress_hooks": [_progress_hook],
         }
+
+        # Facebook: الحفاظ على الفيديو/الصوت المنفصلين إذا فشل الدمج
+        if is_facebook:
+            base_dl_extra["keepvideo"] = True
+            # تعطيل الوضع الصامت لفيسبوك لالتقاط أخطاء FFmpeg
+            base_dl_extra["quiet"] = False
+            base_dl_extra["no_warnings"] = False
 
         # إضافة Facebook-specific headers
         if is_facebook:
@@ -4940,16 +4982,34 @@ class AutoModFetcher:
                                 # محاولة استخراج معرف الفيديو من المعلومات أو الرابط
                                 file_id = info.get("id") or _extract_video_id(video_url)
                                 candidates = []
+                                fragment_video = None
+                                fragment_audio = None
                                 for f in ResilientFS.listdir(output_dir):
                                     f_path = os.path.join(output_dir, f)
                                     if not ResilientFS.isfile(f_path):
                                         continue
-                                    if f.lower().endswith((".mp4", ".mkv", ".webm")):
-                                        # التحقق من وجود المعرف في اسم الملف أو أن هذا هو الملف الوحيد/الأكبر في المجلد
-                                        if file_id and file_id in f:
-                                            candidates.append((os.path.getsize(f_path), f_path))
-                                        elif not file_id:
-                                             candidates.append((os.path.getsize(f_path), f_path))
+                                    f_lower = f.lower()
+                                    # البحث عن ملفات الفيديو المدمجة
+                                    if f_lower.endswith((".mp4", ".mkv", ".webm")):
+                                        # تجاهل ملفات الأجزاء DASH (.f*.ext)
+                                        if ".f" not in f_lower or not any(c.isdigit() for c in f_lower.split(".f")[-1].split(".")[0]):
+                                            if file_id and file_id in f:
+                                                candidates.append((os.path.getsize(f_path), f_path))
+                                            elif not file_id:
+                                                 candidates.append((os.path.getsize(f_path), f_path))
+                                    # البحث عن أجزاء DASH المنفصلة (video + audio)
+                                    if file_id and file_id in f:
+                                        if f_lower.endswith((".mp4", ".webm", ".mkv", ".m4a")):
+                                            fsize = os.path.getsize(f_path)
+                                            if fsize > 1000:  # أكبر من 1KB
+                                                # كشف أجزاء الفيديو والصوت
+                                                if ".f" in f_lower:
+                                                    if not fragment_video or fsize > os.path.getsize(fragment_video):
+                                                        if fragment_video and os.path.getsize(fragment_video) < fsize:
+                                                            fragment_audio = fragment_audio or fragment_video
+                                                        fragment_video = f_path
+                                                    elif not fragment_audio:
+                                                        fragment_audio = f_path
                                 
                                 if candidates:
                                     # نأخذ أكبر ملف فيديو موجود (غالباً هو الفيديو المدمج النهائي)
@@ -4957,14 +5017,56 @@ class AutoModFetcher:
                                     found_path = candidates[0][1]
                                     logger.info(f"✅ Scavenger found file: {found_path} ({os.path.getsize(found_path)} bytes)")
                                     return found_path
+
+                                # 3. محاولة دمج أجزاء DASH يدوياً إذا وُجدت
+                                if fragment_video and ffmpeg_path:
+                                    merged_output = os.path.join(output_dir, f"{file_id}_merged.mp4")
+                                    merge_cmd = [ffmpeg_path, "-y"]
+                                    merge_cmd += ["-i", fragment_video]
+                                    if fragment_audio:
+                                        merge_cmd += ["-i", fragment_audio]
+                                    merge_cmd += ["-c", "copy", "-movflags", "+faststart", merged_output]
+                                    logger.info(
+                                        "🔧 [FB-Merge] Attempting manual FFmpeg merge: video=%s audio=%s -> %s",
+                                        fragment_video, fragment_audio or "(none)", merged_output,
+                                    )
+                                    try:
+                                        merge_proc = subprocess.run(
+                                            merge_cmd, capture_output=True, timeout=120,
+                                        )
+                                        if merge_proc.returncode == 0 and ResilientFS.exists(merged_output) and os.path.getsize(merged_output) > 10000:
+                                            logger.info("✅ [FB-Merge] Manual merge successful: %s (%s bytes)", merged_output, os.path.getsize(merged_output))
+                                            return merged_output
+                                        else:
+                                            stderr_tail = (merge_proc.stderr or b"").decode("utf-8", errors="replace")[-500:]
+                                            logger.warning("⚠️ [FB-Merge] Manual merge failed (rc=%s): %s", merge_proc.returncode, stderr_tail)
+                                    except Exception as merge_err:
+                                        logger.warning("⚠️ [FB-Merge] Manual merge exception: %s", merge_err)
+
+                                    # Fallback: إرجاع ملف الفيديو المنفصل إذا كان كبيراً بما يكفي
+                                    if os.path.getsize(fragment_video) > 50000:
+                                        logger.info("📹 [FB-Fragment] Returning video-only fragment as fallback: %s", fragment_video)
+                                        return fragment_video
+
                             except Exception as ex:
                                 logger.warning(f"⚠️ Scavenger Mode failed: {ex}")
 
                             # إذا وصلنا هنا، يعني لم نجد الملف رغم نجاح extract_info
-                            # نقوم بطباعة محتويات المجلد للتشخيص
+                            # نقوم بطباعة محتويات المجلد والتشخيصات المفصلة
                             try:
                                 files = ResilientFS.listdir(output_dir)
-                                logger.warning(f"❌ File not found after download success! Dir content: {files}")
+                                logger.warning(
+                                    "❌ File not found after download success! Dir content: %s | "
+                                    "progress_bytes=%s | progress_finished=%s | progress_last_file=%s | "
+                                    "format_id=%s | vcodec=%s | expected=%s",
+                                    files,
+                                    _download_progress_state.get("downloaded_bytes", 0),
+                                    _download_progress_state.get("finished", False),
+                                    _download_progress_state.get("last_filename", "?"),
+                                    info.get("format_id", "?"),
+                                    info.get("vcodec", "?"),
+                                    filename,
+                                )
                             except:
                                 pass
 
