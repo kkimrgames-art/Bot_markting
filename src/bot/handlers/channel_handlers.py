@@ -690,6 +690,7 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         f"🎬 <b>خيارات المعالجة:</b>\n"
         f"✨ <b>جودة الفيديو:</b> <code>{quality}</code>\n"
+        f"✂️ <b>القص التلقائي:</b> {'✅ مفعل' if extra.get('auto_trim_enabled', True) else '❌ معطل'}\n"
         f"👤 <b>كاميرا الوجه:</b> {facecam}\n"
         f"🅰️ <b>نص التعليق:</b> {overlay}\n"
         f"✏️ <b>نص مخصص:</b> {custom_overlay_info}\n"
@@ -720,6 +721,9 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("🎞 الجودة", callback_data=f"edit_quality:{channel_id}"),
             InlineKeyboardButton("🎥 FaceCam", callback_data=f"edit_facecam:{channel_id}"),
+            InlineKeyboardButton("✂️ القص", callback_data=f"edit_trim:{channel_id}")
+        ],
+        [
             InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}")
         ]
     ]

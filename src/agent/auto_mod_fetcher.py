@@ -46,6 +46,13 @@ def _release_runtime_dir_keepalive(marker_path: str) -> None:
         with suppress(Exception):
             ResilientFS.remove(marker_path)
 
+class _VideoDurationExceeded(Exception):
+    """Raised when yt-dlp's match_filter rejects a video for being too long."""
+    def __init__(self, duration: float, max_duration: float):
+        self.duration = duration
+        self.max_duration = max_duration
+        super().__init__(f"Video is too long ({duration}s > {max_duration}s)")
+
 import logging
 import asyncio
 import time
@@ -55,6 +62,52 @@ import json
 import re
 import random
 import shutil
+import base64
+import threading
+import requests
+import os
+
+def _get_video_duration_ffprobe(filepath: str) -> Optional[float]:
+    """استخراج مدة الفيديو بالثواني باستخدام ffprobe"""
+    if not os.path.exists(filepath):
+        return None
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", filepath
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+def _auto_trim_video(filepath: str, max_duration: int) -> Optional[str]:
+    """قص الفيديو من النهاية ليطابق المدة القصوى المسموحة بدون إعادة ترميز (Stream Copy)"""
+    if not os.path.exists(filepath):
+        return None
+    
+    dir_name = os.path.dirname(filepath)
+    base_name = os.path.basename(filepath)
+    name, ext = os.path.splitext(base_name)
+    out_path = os.path.join(dir_name, f"{name}_trimmed{ext}")
+    
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-i", filepath,
+            "-t", str(max_duration),
+            "-c", "copy",
+            out_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        if res.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return out_path
+    except Exception:
+        pass
+    
+    if os.path.exists(out_path):
+        with suppress(Exception):
+            os.remove(out_path)
+    return None
 import base64
 import threading
 import requests
@@ -4128,6 +4181,13 @@ class AutoModFetcher:
                             time.sleep(wait_time)
                             continue
                         break
+                    except _VideoDurationExceeded as dur_err:
+                        logger.info(
+                            "⏭️ [AutoMod] Video too long (%.1fs > %.1fs), skipping without retry: %s",
+                            dur_err.duration, dur_err.max_duration, candidate_url,
+                        )
+                        self._last_download_error = f"duration_exceeded: الفيديو طويل جداً ({dur_err.duration:.0f}s > الحد {dur_err.max_duration:.0f}s)"
+                        return None
                     except Exception as e:
                         last_error = e
                         error_code, error_reason = _classify_download_error(e)
@@ -4207,6 +4267,13 @@ class AutoModFetcher:
                     logger.warning(f"⏳ Download attempt {attempt}/{max_retries} returned None. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
+                return None
+            except _VideoDurationExceeded as dur_err:
+                logger.info(
+                    "⏭️ [AutoMod] Video too long (%.1fs > %.1fs), skipping without retry: %s",
+                    dur_err.duration, dur_err.max_duration, video_url,
+                )
+                self._last_download_error = f"duration_exceeded: الفيديو طويل جداً ({dur_err.duration:.0f}s > الحد {dur_err.max_duration:.0f}s)"
                 return None
             except Exception as e:
                 last_error = e
@@ -4968,6 +5035,23 @@ class AutoModFetcher:
                                 f"format={dl_format} | format_id={dl_format_id} | "
                                 f"vcodec={dl_vcodec} | url={video_url[:60]}"
                             )
+
+                            # === فحص رفض فلتر المدة ===
+                            # yt-dlp يعيد info بنجاح حتى لو match_filter رفض التنزيل
+                            # نكتشف ذلك من: progress_bytes==0 + المدة تتجاوز الحد المسموح
+                            if max_duration and _download_progress_state.get("downloaded_bytes", 0) == 0:
+                                video_duration = info.get("duration")
+                                if video_duration:
+                                    try:
+                                        if float(video_duration) > float(max_duration):
+                                            logger.warning(
+                                                "⏭️ [Duration] Video rejected by duration filter: %.1fs > %ss. "
+                                                "Skipping ALL profiles and retries for this video.",
+                                                float(video_duration), max_duration,
+                                            )
+                                            raise _VideoDurationExceeded(float(video_duration), float(max_duration))
+                                    except (ValueError, TypeError):
+                                        pass
 
                             filename = ydl.prepare_filename(info)
                             
@@ -5912,10 +5996,53 @@ class AutoModFetcher:
                                     await _notify(f"⬇️ *جاري التنزيل:* `{vid_title}`...")
                                     dl_dir = _ensure_runtime_dir(_project_local_path(".temp", "auto_mod_downloads"))
 
+                                    # ===== إعدادات المدة القصوى والقص التلقائي =====
+                                    # تحميل إعدادات القناة
+                                    _trim_cfg = {}
+                                    try:
+                                        from src.agent.supabase_storage import load_channel_config
+                                        _trim_cfg = load_channel_config(channel_id) or {}
+                                    except Exception:
+                                        pass
+
+                                    _auto_trim_enabled = bool(_trim_cfg.get("auto_trim_enabled", True))
+                                    _max_download_dur = int(_trim_cfg.get("max_download_duration", 120))
+                                    _auto_trim_target = int(_trim_cfg.get("auto_trim_target_duration", 60))
+
                                     # تحديد المدة القصوى بناءً على النوع المختار
-                                    max_dur = 60 if effective_platform in ("youtube_shorts", "facebook_reels") else None
+                                    if effective_platform in ("youtube_shorts", "facebook_reels"):
+                                        if _auto_trim_enabled:
+                                            # السماح بتحميل حتى max_download_dur ثم القص
+                                            max_dur = _max_download_dur
+                                        else:
+                                            # القص معطل: استخدام الحد الأصلي 60 ثانية
+                                            max_dur = _auto_trim_target
+                                    else:
+                                        max_dur = None
+
                                     dl_path = await self.download_video(video["url"], dl_dir, max_duration=max_dur)
                                     current_dl_path = dl_path
+
+                                    # ===== القص التلقائي: إذا كان الفيديو أطول من الحد المستهدف =====
+                                    if dl_path and _auto_trim_enabled and max_dur and _auto_trim_target:
+                                        try:
+                                            _vid_dur = _get_video_duration_ffprobe(dl_path)
+                                            if _vid_dur and _vid_dur > _auto_trim_target:
+                                                logger.info(
+                                                    "✂️ [AutoTrim] Video %.1fs > target %ss, trimming to %ss...",
+                                                    _vid_dur, _auto_trim_target, _auto_trim_target,
+                                                )
+                                                trimmed_path = _auto_trim_video(dl_path, _auto_trim_target)
+                                                if trimmed_path:
+                                                    dl_path = trimmed_path
+                                                    current_dl_path = dl_path
+                                                    await _notify(
+                                                        f"✂️ تم قص الفيديو تلقائياً من {_vid_dur:.0f}ث إلى {_auto_trim_target}ث"
+                                                    )
+                                                else:
+                                                    logger.warning("⚠️ [AutoTrim] Trim failed, using original video")
+                                        except Exception as trim_err:
+                                            logger.warning("⚠️ [AutoTrim] Error: %s", trim_err)
 
                                     if not dl_path:
                                         download_reason = self._consume_last_download_error() or "تعذر استخراج رابط قابل للتنزيل أو فشلت أداة التنزيل في هذه المحاولة."
