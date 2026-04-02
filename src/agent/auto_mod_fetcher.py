@@ -2205,10 +2205,20 @@ def get_instance_id() -> str:
     يستخدم INSTANCE_ID من المتغيرات البيئية، أو الملف المحلي .data/instance_id، أو RENDER_SERVICE_NAME، أو يولد واحدًا ويحفظه
     """
     # 1. فحص المتغيرات البيئية (أولوية قصوى)
+    explicit_id = (os.environ.get("INSTANCE_ID") or "").strip()
+    if explicit_id:
+        return explicit_id
+
+    render_service_id = (os.environ.get("RENDER_SERVICE_ID") or "").strip()
+    render_instance_id = (os.environ.get("RENDER_INSTANCE_ID") or "").strip()
+    if render_service_id:
+        return f"render_service_{render_service_id}"
+    if render_instance_id:
+        return f"render_instance_{render_instance_id}"
+
     env_id = (
-        os.environ.get("INSTANCE_ID")
-        or os.environ.get("RENDER_SERVICE_NAME")
-        or os.environ.get("HOSTNAME")
+        (os.environ.get("RENDER_SERVICE_NAME") or "").strip()
+        or (os.environ.get("HOSTNAME") or "").strip()
     )
     if env_id:
         return env_id
@@ -2347,7 +2357,7 @@ class AutoModDB:
 
     # ---------- الإعدادات العامة ----------
 
-    def get_config(self, use_cache: bool = True) -> Dict[str, Any]:
+    def get_config(self, use_cache: bool = True, *, return_none_if_missing: bool = False) -> Optional[Dict[str, Any]]:
         """جلب إعدادات النسخة"""
         now = time.time()
         if use_cache and self.instance_id in _config_cache:
@@ -2364,6 +2374,8 @@ class AutoModDB:
             if result:
                 _config_cache[self.instance_id] = (now, result)
                 return result
+            if return_none_if_missing:
+                return None
         except Exception as e:
             logger.warning(f"Failed to get config: {e}")
         
@@ -2553,6 +2565,11 @@ class AutoModDB:
         """حذف مصدر جلب"""
         try:
             from src.agent.supabase_client import supabase_delete
+            try:
+                from src.agent.supabase_storage import delete_all_facecam_for_source
+                delete_all_facecam_for_source(source_id)
+            except Exception:
+                pass
             primary = self._supabase_primary_storage()
             if primary:
                 supabase_delete(
@@ -6374,23 +6391,30 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
         except Exception as notify_exc:
             logger.warning(f"⚠️ Failed to send automation notification: {notify_exc}")
     
-    # التأكد من وجود الإعدادات في Supabase للنسخة الحالية
+    # التأكد من وجود الإعدادات للنسخة الحالية
     try:
-        config = _normalize_auto_fetch_loop_config(db.get_config(use_cache=False), interval_seconds)
-        if not config or config.get("instance_id") != instance_id:
+        existing = db.get_config(use_cache=False, return_none_if_missing=True)
+        if existing is None:
+            config = _normalize_auto_fetch_loop_config(None, interval_seconds)
+            config["instance_id"] = instance_id
+            config["auto_fetch_enabled"] = True
             logger.info(f"📝 Initializing config for new instance: {instance_id}")
             db.save_config(config)
-            
+        else:
+            config = _normalize_auto_fetch_loop_config(existing, interval_seconds)
+            if config.get("instance_id") != instance_id:
+                config["instance_id"] = instance_id
+                db.save_config(config)
+
         # تنظيف أي فيديوهات علقت قيد المعالجة بسبب انهيار سابق
         stale_count = db.reset_stale_processing(
             stale_minutes=_processing_lock_stale_minutes(),
-            force_reset_all=_should_force_reset_processing_on_boot(),
+            force_reset=_should_force_reset_processing_on_boot(),
         )
-        if stale_count > 0:
-            logger.info(f"🧹 Cleaned up {stale_count} stale processing locks for instance {instance_id}")
-
+        if stale_count:
+            logger.warning(f"🧹 Reset {stale_count} stale processing locks")
     except Exception as e:
-        logger.warning(f"Could not initialize config: {e}")
+        logger.warning(f"⚠️ Failed to initialize AutoMod config: {e}")
 
     while True:
         loop_started_monotonic = time.monotonic()

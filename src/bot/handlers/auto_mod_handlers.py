@@ -27,6 +27,7 @@ from ...agent.auto_mod_fetcher import (
     resolve_facecam_layout_config,
 )
 from ...agent.ffmpeg_utils import convert_still_image_to_loop_video
+from ...agent.supabase_storage import upload_facecam_to_storage, delete_facecam_from_storage, delete_all_facecam_for_source
 # from .channel_handlers import list_channels  # Removed to avoid circular import
 
 async def _list_channels_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,7 +63,8 @@ logger = logging.getLogger(__name__)
     AM_COOKIES_UPLOAD,
     AM_VIEW_CONTAINERS,
     AM_VIEW_CONTAINER_VIDEOS,
-) = range(22)
+    AM_VIEW_FACECAM_VIDEOS,
+) = range(23)
 
 
 async def _safe_answer(query, **kwargs):
@@ -335,6 +337,12 @@ def _facecam_document_is_image(document: Any) -> bool:
 
 
 def _delete_facecam_clip_file(clip: Dict[str, Any]) -> None:
+    clip_id = str((clip or {}).get("id") or "").strip()
+    if clip_id:
+        try:
+            delete_facecam_from_storage(clip_id)
+        except Exception:
+            pass
     raw_path = str((clip or {}).get("path") or "").strip()
     if not raw_path:
         return
@@ -351,7 +359,18 @@ def _cleanup_source_facecam_storage(source: Optional[Dict[str, Any]]) -> None:
     source_id = str(source.get("id") or "").strip()
     facecam_cfg = normalize_source_settings(source.get("settings")).get("facecam") or {}
     for clip in list(facecam_cfg.get("clips") or []):
+        clip_id = str(clip.get("id") or "").strip()
+        if clip_id:
+            try:
+                delete_facecam_from_storage(clip_id)
+            except Exception:
+                pass
         _delete_facecam_clip_file(clip)
+    if source_id:
+        try:
+            delete_all_facecam_for_source(source_id)
+        except Exception:
+            pass
     if not source_id:
         return
     source_dir = _project_local_path(".data", "facecam_sources", source_id)
@@ -439,6 +458,11 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
         file_name = f"{os.path.splitext(file_name)[0] or 'facecam'}.mp4"
+
+    try:
+        await asyncio.to_thread(upload_facecam_to_storage, source_id, clip_id, abs_path)
+    except Exception:
+        pass
 
     return {
         "id": clip_id,
@@ -760,8 +784,8 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule")],
         [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
          InlineKeyboardButton("📊 الحالة", callback_data="am_status")],
-        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config"),
-         InlineKeyboardButton("📺 القنوات", callback_data="list_channels:0")],
+        [InlineKeyboardButton("🎬 فيديوهات الفيس كام", callback_data="am_fc_viewer"),
+         InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config")],
         [InlineKeyboardButton("🤖 الذكاء الاصطناعي", callback_data="ai_main_menu"),
          InlineKeyboardButton("🔑 مفاتيح API", callback_data="api_keys_menu")],
         [InlineKeyboardButton(toggle_text, callback_data="am_toggle"),
@@ -1322,10 +1346,7 @@ async def edit_source_fetch_sources_menu(update: Update, context: ContextTypes.D
             InlineKeyboardButton(toggle_label, callback_data=f"am_edit_fetch_toggle:{idx}"),
             InlineKeyboardButton("🗑 حذف", callback_data=f"am_edit_fetch_del:{idx}"),
         ])
-    keyboard.append([
-        InlineKeyboardButton("➕ إضافة يوتيوب", callback_data="am_edit_fetch_add:youtube"),
-        InlineKeyboardButton("➕ إضافة فيسبوك", callback_data="am_edit_fetch_add:facebook")
-    ])
+    keyboard.append([InlineKeyboardButton("➕ إضافة قناة جلب", callback_data="am_edit_fetch_add")])
     keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
 
     if query:
@@ -1339,21 +1360,14 @@ async def edit_source_fetch_add_prompt(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     if query:
         await _safe_answer(query)
-    
-    parts = (query.data or "").split(":")
-    platform = parts[1] if len(parts) > 1 else "youtube"
-    
     src = await _get_edit_source(context)
     if not src:
         return await sources_menu(update, context)
 
     context.user_data["am_text_input_mode"] = "edit_fetch_add"
-    context.user_data["am_edit_fetch_platform"] = platform
-
-    plat_label = "يوتيوب" if platform == "youtube" else "فيسبوك"
     text = (
-        f"➕ <b>إضافة رابط {plat_label}</b>\n\n"
-        "أرسل رابط واحد فقط.\n"
+        "➕ <b>إضافة قناة جلب</b>\n\n"
+        "أرسل رابط واحد فقط (قناة / قائمة تشغيل / رابط فيديو).\n"
         "يجب أن يبدأ بـ <code>http</code>.\n\n"
         "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
     )
@@ -2437,14 +2451,12 @@ async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_T
         "📍 <b>اختر طريقة المصدر:</b>\n\n"
         "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
         "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
-        "• <b>🔗 دمج</b>: جلب عشوائي من يوتيوب وفيسبوك معاً\n"
         "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)\n\n"
         "سيتم بعد ذلك تحديد المصدر الذي يعتمد عليه البوت ضمن أتمتة الجلب."
     )
     keyboard = [
         [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
         [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
-        [InlineKeyboardButton("🔗 دمج (YT + FB)", callback_data="am_src_kind:mix")],
         [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
@@ -2496,18 +2508,11 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
     await _safe_answer(query)
 
     kind = (query.data.split(":", 1)[1] if query and query.data else "").strip().lower()
-    if kind not in {"youtube", "container", "facebook", "mix"}:
+    if kind not in {"youtube", "container", "facebook"}:
         return AM_ADD_SOURCE_KIND
 
     context.user_data.setdefault("am_new_source", {})
     context.user_data["am_new_source"]["source_kind"] = kind
-
-    if kind == "mix":
-        context.user_data["am_new_source"]["platform"] = "mix"
-        context.user_data["am_new_source"]["mix_step"] = "youtube"
-        # التقصير التلقائي لـ Shorts/Reels في وضع الدمج
-        context.user_data["am_new_source"]["video_duration_type"] = "any" 
-        return await _ask_source_url(update, context)
 
     if kind == "container":
         return await _show_container_picker(update, context, page=0)
@@ -3005,22 +3010,7 @@ async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     new_src = context.user_data.get("am_new_source", {}) or {}
     platform = (new_src.get("platform") or "youtube").strip().lower()
-    mix_step = new_src.get("mix_step")
-
-    if platform == "mix":
-        if mix_step == "youtube":
-            text = (
-                "🔗 <b>(1/2) أدخل رابط يوتيوب للمصدر:</b>\n\n"
-                "هذا هو المصدر الرئيسي الذي سيتم البدء به.\n"
-                "• <code>https://www.youtube.com/@channel/shorts</code>"
-            )
-        else:
-            text = (
-                "🔗 <b>(2/2) الآن أدخل رابط فيس بوك الاحتياطي:</b>\n\n"
-                "سيتم استخدامه تلقائياً في حال فشل يوتيوب.\n"
-                "• <code>https://www.facebook.com/page</code>"
-            )
-    elif platform == "container":
+    if platform == "container":
         text = (
             "📦 <b>أدخل معرف الحاوية (Container ID):</b>\n\n"
             "أمثلة:\n"
@@ -3032,13 +3022,14 @@ async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_reels = platform == "facebook_reels"
         text = (
             "🔗 <b>أدخل رابط فيس بوك المصدر:</b>\n\n"
-            + ("📱 <b>وضع ريلز فقط:</b> يمكنك إدخال رابط الصفحة مباشرة وسيتم تلقائياً استخدام <code>/reels</code> لجلب الفيديوهات القصيرة.\n\n" if is_reels else "")
-            + "أمثلة للروابط المدعومة:\n"
-            + ("• رابط الصفحة: <code>https://www.facebook.com/&lt;page_name&gt;</code>\n" if is_reels else "")
-            + "• رابط فيديو محدد: <code>https://www.facebook.com/watch/?v=...</code>\n"
-            + "• رابط ريل محدد: <code>https://www.facebook.com/reel/...</code>\n\n"
-            + "💡 <b>نصيحة:</b> الأفضل عادة الفيديوهات من صفحات عامة لضمان استقرار الجلب.\n"
-            "⚠️ إذا واجهت مشكلة، قد تحتاج لإضافة Cookies في خيارات الإعدادات."
+            + ("📱 <b>وضع ريلز فقط:</b> يمكنك إدخال رابط الصفحة مباشرة وسيتم تلقائياً استخدام <code>/reels</code>.\n\n" if is_reels else "")
+            + "أمثلة (قد يختلف الدعم حسب نوع الرابط):\n"
+            + ("• <code>https://www.facebook.com/&lt;page&gt;</code>\n" if is_reels else "")
+            + ("• <code>https://www.facebook.com/&lt;page&gt;/reels</code>\n" if is_reels else "")
+            + "• <code>https://www.facebook.com/watch/?v=...</code>\n"
+            + "• <code>https://www.facebook.com/reel/...</code>\n\n"
+            + "💡 الأفضل عادةً إرسال رابط ريل مباشر لضمان نجاح الجلب.\n"
+            "⚠️ إذا فشل الجلب، جرّب تزويد Cookies عبر متغير البيئة <code>YTDLP_COOKIES_PATH</code>."
         )
     else:
         text = (
@@ -3064,31 +3055,7 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source_data = context.user_data.get("am_new_source", {}) or {}
     platform = (source_data.get("platform") or "youtube").strip().lower()
 
-    if platform == "mix":
-        mix_step = source_data.get("mix_step", "youtube")
-        if mix_step == "youtube":
-            if not raw.startswith("http"):
-                await update.message.reply_text("❌ أدخل رابط يوتيوب صالح.")
-                return AM_ADD_SOURCE_URL
-            context.user_data["am_new_source"]["yt_url"] = raw
-            context.user_data["am_new_source"]["mix_step"] = "facebook"
-            return await _ask_source_url(update, context)
-        else:
-            if not raw.startswith("http"):
-                await update.message.reply_text("❌ أدخل رابط فيس بوك صالح.")
-                return AM_ADD_SOURCE_URL
-            yt_url = source_data.get("yt_url")
-            fb_url = raw
-            # إعداد fetch_sources مدمج
-            fetch_sources = [
-                {"url": yt_url, "platform": "youtube", "enabled": True},
-                {"url": fb_url, "platform": "facebook", "enabled": True}
-            ]
-            context.user_data["am_new_source"].setdefault("source_settings", {})["fetch_sources"] = fetch_sources
-            context.user_data["am_new_source"]["source_url"] = yt_url # الرابط الأساسي للعرض
-            context.user_data["am_new_source"]["platform"] = "youtube" # المنصة الافتراضية، fetcher سيستخدم fetch_sources
-
-    elif platform == "container":
+    if platform == "container":
         cid = raw
         if cid.lower().startswith("container:"):
             cid = cid.split(":", 1)[1].strip()
@@ -3441,21 +3408,16 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_urls = {str((x or {}).get("url") or "").strip().rstrip("/") for x in items}
         if normalized_url in existing_urls:
             context.user_data.pop("am_text_input_mode", None)
-            context.user_data.pop("am_edit_fetch_platform", None)
             await update.message.reply_text("ℹ️ هذا الرابط موجود بالفعل ضمن قنوات الجلب.")
             return await edit_source_fetch_sources_menu(update, context)
-            
-        target_platform = context.user_data.get("am_edit_fetch_platform") or str(src.get("platform") or "").strip().lower()
-        
         items.append({
             "url": url,
             "name": "",
-            "platform": target_platform,
+            "platform": str(src.get("platform") or "").strip().lower(),
             "enabled": True,
         })
         success = await _update_edit_source_settings(context, {"fetch_sources": items})
         context.user_data.pop("am_text_input_mode", None)
-        context.user_data.pop("am_edit_fetch_platform", None)
         await update.message.reply_text("✅ تم إضافة قناة الجلب." if success else "❌ تعذر إضافة القناة.")
         return await edit_source_fetch_sources_menu(update, context)
 
@@ -4077,6 +4039,165 @@ async def container_videos_viewer(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_VIEW_CONTAINER_VIDEOS
 
+# ==================== عرض وإدارة فيديوهات الفيس كام ====================
+
+async def facecam_videos_viewer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض جميع فيديوهات الفيس كام المخزنة في قاعدة البيانات"""
+    query = update.callback_query
+    if query:
+        await _safe_answer(query)
+
+    try:
+        from ...agent.supabase_storage import FACECAM_STORAGE_LOCAL_PATH, _load_local_list
+        from ...agent.supabase_client import supabase_select, USE_SUPABASE, is_online
+
+        if USE_SUPABASE and is_online():
+            rows = await asyncio.to_thread(supabase_select, "facecam_storage") or []
+        else:
+            rows = _load_local_list(FACECAM_STORAGE_LOCAL_PATH)
+    except Exception as e:
+        logger.error(f"Error listing facecam videos: {e}")
+        rows = []
+
+    if not rows:
+        text = "🎬 <b>فيديوهات الفيس كام</b>\n\n⚠️ لا توجد فيديوهات فيس كام مخزنة حالياً."
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+        if query:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        else:
+            await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_MENU
+
+    text = f"🎬 <b>فيديوهات الفيس كام</b>\n\nإجمالي: <code>{len(rows)}</code> فيديو\n\n"
+    keyboard: List[List[InlineKeyboardButton]] = []
+
+    for i, row in enumerate(rows[:20], 1):
+        clip_id = row.get("id", "")[:8]
+        source_id = row.get("source_id", "")[:8]
+        created = ""
+        if row.get("created_at"):
+            try:
+                dt = datetime.fromisoformat(row.get("created_at").replace("Z", "+00:00"))
+                created = dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        text += f"{i}. 🎬 <code>{clip_id}</code> | مصدر: <code>{source_id}</code> | {created}\n"
+        keyboard.append([
+            InlineKeyboardButton(f"🗑 حذف {clip_id}", callback_data=f"am_fc_del:{row.get('id')}")
+        ])
+
+    if len(rows) > 20:
+        text += f"\n<i>... وعندك {len(rows) - 20} فيديو آخر</i>"
+
+    keyboard.append([InlineKeyboardButton("🗑 حذف الكل", callback_data="am_fc_del_all_confirm")])
+    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="am_fc_viewer")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+
+    if query:
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        except Exception:
+            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+    return AM_VIEW_FACECAM_VIDEOS
+
+
+async def facecam_video_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف فيديو فيس كام واحد"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    clip_id = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
+    if not clip_id:
+        await query.answer("❌ معرف الفيديو غير صالح", show_alert=True)
+        return await facecam_videos_viewer_menu(update, context)
+
+    try:
+        from ...agent.supabase_storage import delete_facecam_from_storage
+        success = await asyncio.to_thread(delete_facecam_from_storage, clip_id)
+        if success:
+            await query.answer("🗑 تم حذف الفيديو بنجاح", show_alert=False)
+        else:
+            await query.answer("❌ فشل حذف الفيديو", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error deleting facecam video: {e}")
+        await query.answer(f"❌ خطأ: {str(e)[:50]}", show_alert=True)
+
+    return await facecam_videos_viewer_menu(update, context)
+
+
+async def facecam_delete_all_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تأكيد حذف جميع فيديوهات الفيس كام"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    text = (
+        "⚠️ <b>تأكيد حذف جميع فيديوهات الفيس كام</b>\n\n"
+        "هل أنت متأكد من حذف جميع فيديوهات الفيس كام من قاعدة البيانات؟\n"
+        "هذا الإجراء لا يمكن التراجع عنه!"
+    )
+    keyboard = [
+        [InlineKeyboardButton("✅ نعم، احذف الكل", callback_data="am_fc_del_all_yes")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="am_fc_viewer")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_VIEW_FACECAM_VIDEOS
+
+
+async def facecam_delete_all_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تنفيذ حذف جميع فيديوهات الفيس كام"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent.supabase_storage import (
+            FACECAM_STORAGE_BUCKET,
+            FACECAM_STORAGE_LOCAL_PATH,
+            _load_local_list,
+            _save_local_list,
+        )
+        from ...agent.supabase_client import (
+            supabase_select,
+            supabase_delete,
+            supabase_storage_delete,
+            USE_SUPABASE,
+            is_online,
+        )
+
+        count = 0
+        if USE_SUPABASE and is_online():
+            rows = await asyncio.to_thread(supabase_select, "facecam_storage") or []
+            for row in rows:
+                clip_id = row.get("id")
+                bucket = row.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+                obj = row.get("storage_path")
+                if obj:
+                    supabase_storage_delete(bucket, obj)
+                if clip_id:
+                    supabase_delete("facecam_storage", "id", clip_id)
+                    count += 1
+
+        local_items = _load_local_list(FACECAM_STORAGE_LOCAL_PATH)
+        if local_items:
+            for item in local_items:
+                clip_id = item.get("id")
+                bucket = item.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+                obj = item.get("storage_path")
+                if obj:
+                    supabase_storage_delete(bucket, obj)
+                count += 1
+            _save_local_list(FACECAM_STORAGE_LOCAL_PATH, [])
+
+        await query.answer(f"🗑 تم حذف {count} فيديو", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error deleting all facecam videos: {e}")
+        await query.answer(f"❌ خطأ: {str(e)[:50]}", show_alert=True)
+
+    return await facecam_videos_viewer_menu(update, context)
+
+
 # ==================== تسجيل المعالجات ====================
 
 async def _end_auto_mod_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4095,6 +4216,7 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(status_view, pattern=r"^am_status$"),
         CallbackQueryHandler(config_menu, pattern=r"^am_config$"),
         CallbackQueryHandler(containers_viewer_menu, pattern=r"^am_view_containers$"),
+        CallbackQueryHandler(facecam_videos_viewer_menu, pattern=r"^am_fc_viewer$"),
         CallbackQueryHandler(toggle_auto_fetch, pattern=r"^am_toggle$"),
         CallbackQueryHandler(run_now, pattern=r"^am_run_now$"),
         CallbackQueryHandler(test_render_menu, pattern=r"^am_test_render$"),
@@ -4116,10 +4238,6 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             CommandHandler("start", auto_mod_menu),
             CommandHandler("menu", auto_mod_menu),
             CallbackQueryHandler(auto_mod_menu, pattern=r"^(am_menu|auto_mod)$"),
-            CallbackQueryHandler(edit_source_start, pattern=r"^am_edit_src:"),
-            CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
-            CallbackQueryHandler(edit_source_fetch_sources_menu, pattern=r"^am_edit_fetch_menu$"),
-            CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add:"),
         ],
         states={
             AM_MENU: [
@@ -4133,6 +4251,13 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(containers_viewer_menu, pattern=r"^am_view_containers$"),
                 *_auto_mod_common_nav_handlers(),
             ],
+            AM_VIEW_FACECAM_VIDEOS: [
+                CallbackQueryHandler(facecam_video_delete, pattern=r"^am_fc_del:"),
+                CallbackQueryHandler(facecam_delete_all_confirm, pattern=r"^am_fc_del_all_confirm$"),
+                CallbackQueryHandler(facecam_delete_all_execute, pattern=r"^am_fc_del_all_yes$"),
+                CallbackQueryHandler(facecam_videos_viewer_menu, pattern=r"^am_fc_viewer$"),
+                *_auto_mod_common_nav_handlers(),
+            ],
             AM_SOURCES: [
                 CallbackQueryHandler(add_source_start, pattern=r"^am_add_source$"),
                 CallbackQueryHandler(toggle_source, pattern=r"^am_toggle_src:"),
@@ -4143,7 +4268,7 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             AM_EDIT_SOURCE_CHANNEL: [
                 CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
                 CallbackQueryHandler(edit_source_fetch_sources_menu, pattern=r"^am_edit_fetch_menu$"),
-                CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add:"),
+                CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add$"),
                 CallbackQueryHandler(edit_source_fetch_toggle, pattern=r"^am_edit_fetch_toggle:"),
                 CallbackQueryHandler(edit_source_fetch_delete, pattern=r"^am_edit_fetch_del:"),
                 CallbackQueryHandler(edit_source_privacy_menu, pattern=r"^am_edit_priv_menu$"),

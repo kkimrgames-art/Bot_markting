@@ -6,9 +6,16 @@ import os
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
+from .config import get_project_root
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(os.environ.get("JOB_QUEUE_DB_PATH", ".data/job_queue.db"))
+DB_PATH = Path(
+    os.environ.get(
+        "JOB_QUEUE_DB_PATH",
+        str(Path(get_project_root()) / ".data" / "job_queue.db"),
+    )
+)
 
 class JobQueue:
     _instance = None

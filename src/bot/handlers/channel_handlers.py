@@ -641,7 +641,13 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_icon = "❓"
     try:
         from pathlib import Path
-        token_path = Path(".data/youtube_tokens") / f"{channel.youtube_channel_id}.json"
+        try:
+            from ...agent.config import load_config
+            cfg = load_config()
+            base_dir = os.path.dirname(getattr(cfg, "TELEGRAM_DB_PATH", "") or "") or ".data"
+        except Exception:
+            base_dir = ".data"
+        token_path = Path(base_dir) / "youtube_tokens" / f"{channel.youtube_channel_id}.json"
         
         def _check_auth():
             if not token_path.exists():

@@ -447,8 +447,12 @@ class ChannelManager:
         - إمكان تحميل Credentials بهذه الصلاحيات وتجديدها عند الحاجة
         """
         try:
-            tokens_dir = Path(".data/youtube_tokens")
-            token_file = tokens_dir / f"{youtube_channel_id}.json"
+            try:
+                cfg = load_config()
+                base_dir = os.path.dirname(getattr(cfg, "TELEGRAM_DB_PATH", "") or "") or ".data"
+            except Exception:
+                base_dir = ".data"
+            token_file = Path(base_dir) / "youtube_tokens" / f"{youtube_channel_id}.json"
             if not token_file.exists() or token_file.stat().st_size <= 0:
                 return False, "🔒 لا يوجد توكن مصادقة (Re-auth مطلوب)"
             try:

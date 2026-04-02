@@ -21,6 +21,7 @@ from .supabase_client import (
     supabase_insert_many,
     supabase_storage_upload,
     supabase_storage_download_to_file,
+    supabase_storage_delete,
     is_online,
     queue_sync_operation,
     sync_pending_operations,
@@ -358,8 +359,6 @@ def save_channel_config(channel: Dict[str, Any]) -> bool:
         data["intro_videos"] = json.dumps(data["intro_videos"])
     if "outro_videos" in data and isinstance(data["outro_videos"], list):
         data["outro_videos"] = json.dumps(data["outro_videos"])
-    if "platform_credentials" in data and isinstance(data["platform_credentials"], dict):
-        data["platform_credentials"] = json.dumps(data["platform_credentials"])
     
     # Supabase schema doesn't have custom_overlay_texts, so drop it before upsert
     data.pop("custom_overlay_texts", None)
@@ -1228,6 +1227,136 @@ def download_container_video_to_file(video_id: str, dest_path: str) -> bool:
     if obj:
         return bool(supabase_storage_download_to_file(bucket, obj, dest_path))
     return False
+
+
+# ========== Facecam Storage (Supabase) ==========
+
+FACECAM_STORAGE_BUCKET = (os.environ.get("FACECAM_STORAGE_BUCKET") or "facecam_videos").strip() or "facecam_videos"
+FACECAM_STORAGE_LOCAL_PATH = _project_data_path("facecam_storage_index.json")
+
+
+def upload_facecam_to_storage(source_id: str, clip_id: str, file_path: str) -> Optional[Dict[str, str]]:
+    """رفع فيديو الفيس كام إلى Supabase Storage وإرجاع معلومات التخزين"""
+    if not (source_id and clip_id and file_path and os.path.exists(file_path)):
+        return None
+    ext = Path(file_path).suffix or ".mp4"
+    object_path = f"facecam/{source_id}/{clip_id}{ext}"
+    
+    content_type = "video/mp4"
+    if ext.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        content_type = f"image/{ext.lower().lstrip('.')}"
+    
+    uploaded_key = supabase_storage_upload(FACECAM_STORAGE_BUCKET, object_path, file_path, content_type=content_type, upsert=True)
+    if uploaded_key:
+        record = {
+            "id": clip_id,
+            "source_id": source_id,
+            "storage_bucket": FACECAM_STORAGE_BUCKET,
+            "storage_path": uploaded_key,
+            "local_path": os.path.abspath(file_path),
+            "created_at": datetime.now().isoformat(),
+        }
+        supabase_upsert("facecam_storage", record, "id", lambda data: _local_upsert_by_id(FACECAM_STORAGE_LOCAL_PATH, data))
+        return {"storage_bucket": FACECAM_STORAGE_BUCKET, "storage_path": uploaded_key}
+    return None
+
+
+def download_facecam_from_storage(clip_id: str, dest_path: str) -> bool:
+    """تحميل فيديو الفيس كام من Supabase Storage"""
+    def _fallback():
+        for x in _load_local_list(FACECAM_STORAGE_LOCAL_PATH):
+            if x.get("id") == clip_id:
+                return [x]
+        return []
+    
+    row = supabase_select_one("facecam_storage", "id", clip_id, _fallback)
+    if not row:
+        return False
+    
+    bucket = row.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+    obj = row.get("storage_path")
+    if obj:
+        ok = bool(supabase_storage_download_to_file(bucket, obj, dest_path))
+        if ok:
+            return True
+    
+    local_path = row.get("local_path")
+    if local_path and os.path.exists(local_path):
+        try:
+            import shutil
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_path, dest_path)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def delete_facecam_from_storage(clip_id: str) -> bool:
+    """حذف فيديو الفيس كام من Supabase Storage وقاعدة البيانات"""
+    def _fallback_local(cid: str):
+        _local_delete_by_id(FACECAM_STORAGE_LOCAL_PATH, cid)
+    
+    def _fallback():
+        for x in _load_local_list(FACECAM_STORAGE_LOCAL_PATH):
+            if x.get("id") == clip_id:
+                return [x]
+        return []
+    
+    row = supabase_select_one("facecam_storage", "id", clip_id, _fallback)
+    if row:
+        bucket = row.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+        obj = row.get("storage_path")
+        if obj:
+            supabase_storage_delete(bucket, obj)
+    
+    return bool(supabase_delete("facecam_storage", "id", clip_id, _fallback_local))
+
+
+def delete_all_facecam_for_source(source_id: str) -> int:
+    """حذف جميع فيديوهات الفيس كام المرتبطة بمصدر معين"""
+    if not source_id:
+        return 0
+    
+    def _fallback():
+        return [x for x in _load_local_list(FACECAM_STORAGE_LOCAL_PATH) if x.get("source_id") == source_id]
+    
+    rows = supabase_select("facecam_storage", {"source_id": source_id}, _fallback) or []
+    count = 0
+    for row in rows:
+        clip_id = row.get("id")
+        if clip_id:
+            bucket = row.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+            obj = row.get("storage_path")
+            if obj:
+                supabase_storage_delete(bucket, obj)
+            supabase_delete("facecam_storage", "id", clip_id, lambda cid: _local_delete_by_id(FACECAM_STORAGE_LOCAL_PATH, cid))
+            count += 1
+    
+    if not rows:
+        local_items = _load_local_list(FACECAM_STORAGE_LOCAL_PATH)
+        remaining = []
+        for x in local_items:
+            if x.get("source_id") == source_id:
+                count += 1
+            else:
+                remaining.append(x)
+        if count > 0:
+            _save_local_list(FACECAM_STORAGE_LOCAL_PATH, remaining)
+    
+    return count
+
+
+def get_facecam_storage_info(clip_id: str) -> Optional[Dict[str, Any]]:
+    """الحصول على معلومات تخزين فيديو الفيس كام"""
+    def _fallback():
+        for x in _load_local_list(FACECAM_STORAGE_LOCAL_PATH):
+            if x.get("id") == clip_id:
+                return [x]
+        return []
+    
+    row = supabase_select_one("facecam_storage", "id", clip_id, _fallback)
+    return dict(row) if row else None
 
 
 if __name__ == "__main__":

@@ -713,6 +713,24 @@ def supabase_storage_download_to_file(bucket: str, object_path: str, dest_path: 
         return False
 
 
+def supabase_storage_delete(bucket: str, object_path: str) -> bool:
+    """حذف ملف من Supabase Storage"""
+    if not (bucket and object_path):
+        return False
+    if not USE_SUPABASE or not is_online():
+        return False
+    try:
+        client = _get_supabase()
+        if not client:
+            return False
+        obj = str(object_path).strip().lstrip("/")
+        client.storage.from_(bucket).remove([obj])
+        return True
+    except Exception as e:
+        logger.error(f"❌ فشل حذف الملف من Supabase Storage: {e}")
+        return False
+
+
 # ========== اختبار الاتصال ==========
 
 def test_connection() -> Dict[str, Any]:
