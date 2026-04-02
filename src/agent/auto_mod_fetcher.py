@@ -53,6 +53,110 @@ class _VideoDurationExceeded(Exception):
         self.max_duration = max_duration
         super().__init__(f"Video is too long ({duration}s > {max_duration}s)")
 
+
+# ==================== Processing State (استئناف بعد إعادة التشغيل) ====================
+_PROCESSING_STATE_FILE = _project_local_path(".temp", "processing_state.json")
+
+
+def _save_processing_state(video_id: str, channel_id: str, stage: str, **extra) -> None:
+    """حفظ حالة المعالجة الحالية لاستئنافها بعد إعادة التشغيل."""
+    try:
+        state = {
+            "video_id": video_id,
+            "channel_id": channel_id,
+            "stage": stage,
+            "started_at": time.time(),
+            "pid": os.getpid(),
+            **extra,
+        }
+        state_dir = os.path.dirname(_PROCESSING_STATE_FILE)
+        os.makedirs(state_dir, exist_ok=True)
+        with open(_PROCESSING_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to save processing state: {e}")
+
+
+def _clear_processing_state() -> None:
+    """مسح حالة المعالجة (بعد النجاح أو الفشل المعالج)."""
+    try:
+        if os.path.exists(_PROCESSING_STATE_FILE):
+            os.remove(_PROCESSING_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _load_interrupted_processing_state() -> Optional[Dict[str, Any]]:
+    """تحميل حالة معالجة متوقفة (إن وجدت) بعد إعادة تشغيل البوت."""
+    try:
+        if not os.path.exists(_PROCESSING_STATE_FILE):
+            return None
+        with open(_PROCESSING_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        # فقط إذا كانت الحالة من PID مختلف (يعني البوت أعاد التشغيل)
+        saved_pid = state.get("pid", 0)
+        if saved_pid == os.getpid():
+            return None  # نفس العملية = ما زالت قيد التشغيل
+        return state
+    except Exception:
+        return None
+
+
+def _recover_interrupted_processing() -> None:
+    """فحص واستعادة فيديوهات كانت قيد المعالجة عند إعادة تشغيل البوت.
+    
+    يعيد تعيين الفيديو كـ 'new' في قاعدة البيانات حتى تتم إعادة محاولته
+    في الدورة القادمة بدلاً من فقدانه.
+    """
+    state = _load_interrupted_processing_state()
+    if not state:
+        return
+    
+    video_id = state.get("video_id", "?")
+    channel_id = state.get("channel_id", "?")
+    stage = state.get("stage", "?")
+    started_at = state.get("started_at", 0)
+    age_seconds = time.time() - started_at if started_at else 0
+    
+    logger.warning(
+        "🔄 [Recovery] Detected interrupted video processing! "
+        "video_id=%s, channel_id=%s, stage=%s, interrupted_%.0fs_ago",
+        video_id, channel_id[:20], stage, age_seconds,
+    )
+    
+    # إعادة تعيين حالة الفيديو في قاعدة البيانات
+    try:
+        from src.agent.supabase_client import get_supabase_client
+        sb = get_supabase_client()
+        if sb:
+            # إعادة تعيين الحالة إلى None (جديد) حتى يتم إعادة محاولته
+            sb.table("auto_mod_processed").upsert({
+                "video_id": str(video_id),
+                "status": None,  # إعادة تعيين كفيديو جديد
+            }, on_conflict="video_id").execute()
+            logger.info(
+                "✅ [Recovery] Reset video %s status to 'new' — will be retried next cycle.",
+                video_id,
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ [Recovery] Failed to reset video status: {e}")
+    
+    # تنظيف الملفات المؤقتة المتبقية
+    try:
+        temp_dir = _project_local_path(".temp", "auto_mod")
+        if os.path.isdir(temp_dir):
+            for f in os.listdir(temp_dir):
+                if str(video_id) in f:
+                    try:
+                        os.remove(os.path.join(temp_dir, f))
+                        logger.info(f"🗑️ [Recovery] Cleaned up temp file: {f}")
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    
+    _clear_processing_state()
+
 import logging
 import asyncio
 import time
@@ -72,8 +176,13 @@ def _get_video_duration_ffprobe(filepath: str) -> Optional[float]:
     if not os.path.exists(filepath):
         return None
     try:
+        from src.agent.ffmpeg_utils import ffprobe_bin
+        _ffprobe = ffprobe_bin() or "ffprobe"
+    except Exception:
+        _ffprobe = "ffprobe"
+    try:
         cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            _ffprobe, "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", filepath
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
@@ -85,6 +194,11 @@ def _auto_trim_video(filepath: str, max_duration: int) -> Optional[str]:
     """قص الفيديو من النهاية ليطابق المدة القصوى المسموحة بدون إعادة ترميز (Stream Copy)"""
     if not os.path.exists(filepath):
         return None
+    try:
+        from src.agent.ffmpeg_utils import ffmpeg_bin
+        _ffmpeg = ffmpeg_bin() or "ffmpeg"
+    except Exception:
+        _ffmpeg = "ffmpeg"
     
     dir_name = os.path.dirname(filepath)
     base_name = os.path.basename(filepath)
@@ -93,7 +207,7 @@ def _auto_trim_video(filepath: str, max_duration: int) -> Optional[str]:
     
     try:
         cmd = [
-            "ffmpeg", "-y", "-i", filepath,
+            _ffmpeg, "-y", "-i", filepath,
             "-t", str(max_duration),
             "-c", "copy",
             out_path
@@ -3433,6 +3547,9 @@ class AutoModFetcher:
         self.instance_id = instance_id or get_instance_id()
         self.db = AutoModDB(self.instance_id)
         self._last_download_error = ""
+        
+        # 🔄 محاولة استعادة أي فيديوهات كانت قيد المعالجة وتوقفت بشكل غير متوقع (مثلاً OOM Kill)
+        _recover_interrupted_processing()
 
     @staticmethod
     def _display_video_title(video: Dict[str, Any]) -> str:
@@ -5229,6 +5346,15 @@ class AutoModFetcher:
         try:
             from src.agent.mod_video_processor import ModVideoProcessor
 
+            # 🔧 حفظ حالة المعالجة للاستئناف عند إعادة التشغيل
+            _save_processing_state(
+                video_id=video_id,
+                channel_id=getattr(self, '_current_channel_id', '') or '',
+                stage="process_video_start",
+                video_type=video_type,
+                input_path=input_path,
+            )
+
             output_dir = _project_local_path(".output", "auto_mod_shorts" if video_type == "shorts" else "auto_mod_long")
             ResilientFS.makedirs(output_dir, exist_ok=True)
 
@@ -5252,12 +5378,20 @@ class AutoModFetcher:
                 )
                 ok = await asyncio.wait_for(loop.run_in_executor(None, opt_func), timeout=process_timeout_s)
                 if ok and ResilientFS.exists(final_path):
+                    _clear_processing_state()
                     return final_path
                 # fallback: نسخ مباشر
                 ResilientFS.copy2(input_path, final_path)
+                _clear_processing_state()
                 return final_path if ResilientFS.exists(final_path) else None
             else:
                 # --- مسار الشورتس ---
+                _save_processing_state(
+                    video_id=video_id,
+                    channel_id=getattr(self, '_current_channel_id', '') or '',
+                    stage="shorts_encoding",
+                    video_type=video_type,
+                )
                 loop = asyncio.get_running_loop()
                 try:
                     process_timeout_s = int((os.getenv("AUTO_MOD_PROCESS_TIMEOUT_SECONDS", "1800") or "1800").strip())
@@ -5280,12 +5414,15 @@ class AutoModFetcher:
                     hflip=hflip,
                 )
                 out_path, info = await asyncio.wait_for(loop.run_in_executor(None, process_func), timeout=process_timeout_s)
+                _clear_processing_state()
                 return out_path
         except asyncio.TimeoutError:
             logger.error(f"Failed to process video {video_id}: processing timed out")
+            _clear_processing_state()
             return None
         except Exception as e:
             logger.error(f"Failed to process video {video_id}: {e}")
+            _clear_processing_state()
             return None
 
     async def _apply_source_tail_trim(self, input_path: str, video_id: str, trim_seconds: float) -> Optional[str]:

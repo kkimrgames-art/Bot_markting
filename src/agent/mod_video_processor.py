@@ -87,6 +87,23 @@ def _safe_processing_fps(raw_fps: Optional[float]) -> float:
 """معالج فيديوهات المودات"""
 
 
+def _ffmpeg_memory_guard_args() -> list:
+    """إرجاع وسيطات حماية الذاكرة لـ FFmpeg في بيئات الموارد المحدودة (Render).
+    
+    يحد من تخصيص الذاكرة لمنع OOM kill أثناء الترميز الثقيل.
+    """
+    if not _is_low_resource_env():
+        return []
+    
+    try:
+        max_alloc_mb = int((os.getenv("FFMPEG_MAX_ALLOC_MB", "256") or "256").strip())
+    except Exception:
+        max_alloc_mb = 256
+    max_alloc_bytes = max(64, max_alloc_mb) * 1024 * 1024
+    
+    return ["-max_alloc", str(max_alloc_bytes)]
+
+
 def _get_shorts_encoder_settings() -> dict:
     """
     Get optimal encoder settings for shorts. Auto-detects GPU encoders.
@@ -2175,7 +2192,7 @@ class ModVideoProcessor:
 
         # 🔧 استخدام _shorts_x264_settings() لاحترام RENDER / LOW_RESOURCE_MODE
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
-        trim_mode = _env_str("FFMPEG_TRIM_MODE", "encode").lower()
+        trim_mode = _env_str("FFMPEG_TRIM_MODE", "copy").lower()
         if _env_bool("FFMPEG_LOW_CPU", False) and trim_mode == "encode":
             trim_mode = "copy"
 
@@ -2185,6 +2202,7 @@ class ModVideoProcessor:
         if trim_mode == "copy":
             cmd = [
                 ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
                 "-y",
                 "-ss", str(start),
                 "-i", input_path,
@@ -2201,6 +2219,7 @@ class ModVideoProcessor:
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
             cmd = [
                 ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
                 "-y",
                 "-ss", str(start),  # البداية
                 "-i", input_path,
@@ -2294,6 +2313,7 @@ class ModVideoProcessor:
 
         cmd = [
             ffmpeg_bin(),
+            *_ffmpeg_memory_guard_args(),
             "-y",
             "-i", input_path,
         ]
