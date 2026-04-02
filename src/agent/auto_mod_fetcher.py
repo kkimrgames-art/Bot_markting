@@ -1621,8 +1621,14 @@ def _classify_download_error(err: Exception) -> Tuple[str, str]:
 def _is_facebook_reel_url(url: str) -> bool:
     if not url:
         return False
-    u = url.lower()
-    return ("/reel/" in u) or ("/reels/" in u) or ("facebook.com/reel/" in u) or ("facebook.com/reels/" in u)
+    normalized = _normalize_facebook_candidate_url(url)
+    if not normalized:
+        return False
+    parsed = urlparse(normalized)
+    if "facebook.com" not in (parsed.netloc or "").lower():
+        return False
+    path = (parsed.path or "").strip("/")
+    return bool(re.fullmatch(r"reel/[0-9A-Za-z_-]{6,}", path, re.IGNORECASE))
 
 
 def _clean_url_candidate(raw_url: Any) -> str:
@@ -1878,12 +1884,19 @@ def _facebook_candidate_priority(raw_url: Any, platform: str = "facebook") -> Tu
         return (99, "")
 
     lower_platform = str(platform or "facebook").strip().lower()
+    parsed = urlparse(normalized)
+    query = parse_qs(parsed.query)
+    section_tab = str(query.get("sk", [""])[0]).strip().lower()
     if _is_facebook_reel_url(normalized):
         return (0 if lower_platform == "facebook_reels" else 1, normalized)
     if _is_direct_facebook_video_url(normalized):
         return (1 if lower_platform == "facebook_reels" else 0, normalized)
     if _is_facebook_section_url(normalized):
+        if lower_platform == "facebook_reels" and section_tab in {"reels_tab", "owner_reels"}:
+            return (2, normalized)
         if lower_platform == "facebook_reels" and "/reels" in normalized.lower():
+            return (3, normalized)
+        if lower_platform != "facebook_reels" and section_tab == "videos":
             return (2, normalized)
         return (3, normalized)
     if _is_facebook_share_url(normalized):
@@ -1908,7 +1921,7 @@ def _expand_facebook_source_candidates(source_url: str, platform: str = "faceboo
             candidates.append(f"https://www.facebook.com/reel/{extracted_id}/")
 
         path = parsed.path or ""
-        if host != "fb.watch" and not _is_direct_facebook_video_url(normalized) and not _is_facebook_section_url(normalized):
+        if host != "fb.watch" and not _is_facebook_share_url(normalized) and not _is_direct_facebook_video_url(normalized) and not _is_facebook_section_url(normalized):
             base = normalized.split("?", 1)[0].rstrip("/")
             if base:
                 candidates.append(f"{base}/reels")
@@ -3640,11 +3653,24 @@ class AutoModFetcher:
         # إذا فشل yt-dlp في استخراج فيديوهات من فيسبوك، نجرب الـ scraping المباشر
         is_facebook = (platform or "").startswith("facebook") or "facebook.com" in (source_url or "").lower()
         if is_facebook:
-            logger.info("🔄 [FB-Fallback] yt-dlp returned no results. Trying HTTP scraping fallback...")
-            scrape_results = self._fetch_facebook_via_scraping(source_url, platform)
-            if scrape_results:
-                logger.info(f"✅ [FB-Fallback] Scraping found {len(scrape_results)} videos!")
-                return scrape_results
+            fallback_results: List[Dict[str, Any]] = []
+            attempted_scrape_urls = set()
+            for scrape_url in source_candidates or [source_url]:
+                normalized_scrape_url = _normalize_facebook_candidate_url(scrape_url)
+                if not normalized_scrape_url or normalized_scrape_url in attempted_scrape_urls:
+                    continue
+                attempted_scrape_urls.add(normalized_scrape_url)
+                logger.info(
+                    "🔄 [FB-Fallback] yt-dlp returned no results for %s. Trying HTTP scraping fallback...",
+                    normalized_scrape_url,
+                )
+                scrape_results = self._fetch_facebook_via_scraping(normalized_scrape_url, platform)
+                if not scrape_results:
+                    continue
+                fallback_results = _merge_unique_videos(fallback_results, scrape_results)
+            if fallback_results:
+                logger.info(f"✅ [FB-Fallback] Scraping found {len(fallback_results)} videos across fallback candidates!")
+                return fallback_results
 
         return []
 
@@ -3786,6 +3812,33 @@ class AutoModFetcher:
         except Exception as e:
             logger.error(f"Failed to download {video_url}: {e}")
             return None
+
+    def _preflight_youtube_upload_auth(self, channel_id: str) -> None:
+        from src.agent.error_tracker import get_error_tracker
+        from src.agent.uploader import _creds_from_token_file
+        from src.bot.channel_manager import ChannelManager
+
+        et = get_error_tracker()
+        cm = ChannelManager()
+        channel = cm.get_channel(channel_id)
+        if not channel:
+            logger.error(f"Channel {channel_id} not found for upload preflight")
+            et.record_error("upload", "channel_not_found", channel_id)
+            raise RuntimeError(f"القناة {channel_id} غير موجودة")
+
+        token_path = channel.token_path
+        if not token_path or not os.path.exists(token_path):
+            logger.error(f"Token not found for channel {channel_id} during upload preflight")
+            et.record_error("upload", "token_missing", channel_id)
+            raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
+
+        try:
+            _creds_from_token_file(token_path)
+            logger.debug(f"✅ Upload auth preflight passed for {channel_id[:20]}")
+        except Exception as tok_err:
+            logger.warning(f"⚠️ Token pre-validation failed: {tok_err}")
+            et.record_error("upload", "token_invalid", str(tok_err))
+            raise
 
     def _download_container_sync(self, video_url: str, output_dir: str) -> Optional[str]:
         try:
@@ -5433,6 +5486,9 @@ class AutoModFetcher:
                                 f"   🆔 `{vid_id[:20]}`"
                             )
 
+                            if not preview_mode:
+                                self._preflight_youtube_upload_auth(channel_id)
+
                             # ========== فحص الموارد قبل التنزيل ==========
                             try:
                                 from .disk_guard import should_allow_download
@@ -6087,7 +6143,7 @@ class AutoModFetcher:
         """رفع فيديو إلى YouTube عبر ChannelManager مع تجديد التوكن مسبقاً"""
         try:
             from src.agent.config import load_config
-            from src.agent.uploader import upload_video_with_token, _creds_from_token_file
+            from src.agent.uploader import upload_video_with_token
             from src.bot.channel_manager import ChannelManager
             from src.agent.ai import generate_ai_metadata
             from src.agent.error_tracker import get_error_tracker
@@ -6109,14 +6165,7 @@ class AutoModFetcher:
                 et.record_error("upload", "token_missing", channel_id)
                 return None
 
-            # === فحص التوكن مسبقاً وتجديده إذا لزم الأمر ===
-            try:
-                _creds_from_token_file(token_path)
-                logger.debug(f"✅ Token pre-validated for {channel_id[:20]}")
-            except Exception as tok_err:
-                logger.warning(f"⚠️ Token pre-validation failed: {tok_err}")
-                et.record_error("upload", "token_invalid", str(tok_err))
-                raise  # سيتم التقاطها من run_cycle كخطأ حرج
+            self._preflight_youtube_upload_auth(channel_id)
 
             # استخدام لغة القناة بدل اللغة المُثبتة
             target_lang = getattr(channel, "language", "ar") or "ar"
