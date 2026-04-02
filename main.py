@@ -649,6 +649,7 @@ async def main():
         return
 
     telegram_app = build_application(token)
+    await telegram_app.initialize()
     globals()["_TELEGRAM_APPLICATION"] = telegram_app
 
     cfg = load_config()
