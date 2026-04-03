@@ -410,13 +410,8 @@ class ModVideoProcessor:
                 step_timings["trim"] = time.time() - step_start
                 logger.info(f"✅ Step 1/5 completed in {step_timings['trim']:.2f}s")
             
-            # الخطوة 1.5: قلب الفيديو أفقياً (إذا تم طلبه)
-            if hflip:
-                logger.info("↔️ Flipping video horizontally (mirroring)...")
-                self._flip_video(current_path, flipped_path)
-                current_path = str(flipped_path)
-            
-            # الخطوة 2: تحويل لصيغة شورتس (9:16)
+            # التحقق المبكر: هل سيتم تحويل الفيديو فعلاً إلى صيغة Shorts بترميز كامل؟
+            will_convert_to_shorts = False
             if convert_to_shorts:
                 fmt = (shorts_format or "crop").strip().lower()
                 try:
@@ -431,7 +426,19 @@ class ModVideoProcessor:
                     except Exception:
                         should_skip_conversion = False
 
-                if should_skip_conversion:
+                if not should_skip_conversion:
+                    will_convert_to_shorts = True
+
+            # الخطوة 1.5: قلب الفيديو أفقياً (إذا تم طلبه)
+            # 🔧 تحسين: إذا كنا سنقوم بترجميز الفيديو لتحويله إلى Shorts، سنمرر طلب القلب له هناك لتجنب ترميز مزدوج.
+            if hflip and not will_convert_to_shorts:
+                logger.info("↔️ Flipping video horizontally (separate encode)...")
+                self._flip_video(current_path, flipped_path)
+                current_path = str(flipped_path)
+            
+            # الخطوة 2: تحويل لصيغة شورتس (9:16)
+            if convert_to_shorts:
+                if not will_convert_to_shorts:
                     logger.info(f"📐 Step 2/5: Skipping shorts conversion (already 9:16: {width}x{height})")
                     if progress_callback:
                         try: progress_callback("2/5 📐 تخطي التحويل (الفيديو عمودي 9:16 مسبقاً)...")
@@ -439,11 +446,14 @@ class ModVideoProcessor:
                     step_timings["convert"] = 0.0
                 else:
                     step_start = time.time()
-                    logger.info("📐 Step 2/5: Converting to shorts format...")
+                    if hflip:
+                        logger.info("📐 Step 2/5: Converting to shorts format (incl. horizontal flip)...")
+                    else:
+                        logger.info("📐 Step 2/5: Converting to shorts format...")
                     if progress_callback:
                         try: progress_callback("2/5 📐 تحويل لصيغة شورتس...")
                         except Exception: pass
-                    self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format)
+                    self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format, hflip=hflip)
                     current_path = str(resized_path)
                     final_width, final_height = 1080, 1920
                     step_timings["convert"] = time.time() - step_start
@@ -2248,7 +2258,7 @@ class ModVideoProcessor:
         
         logger.info(f"✅ Video trimmed: {start}s from start, {end}s from end")
     
-    def _convert_to_shorts(self, input_path: str, output_path: str, orig_width: int, orig_height: int, shorts_format: str = "crop"):
+    def _convert_to_shorts(self, input_path: str, output_path: str, orig_width: int, orig_height: int, shorts_format: str = "crop", hflip: bool = False):
         """تحويل الفيديو لصيغة شورتس (9:16 - 1080x1920)
 
         shorts_format:
@@ -2256,6 +2266,14 @@ class ModVideoProcessor:
             - fit_blur: عرض كامل + خلفية ضبابية من نفس الفيديو
             - partial_blur: تكبير متوسط (إظهار جزء أكبر من الأعلى/الأسفل) + خلفية ضبابية
         """
+        if hflip:
+            hf_filter = "hflip,"
+            hf_graph = "[0:v]hflip[vin];"
+            vin = "vin"
+        else:
+            hf_filter = ""
+            hf_graph = ""
+            vin = "0:v"
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         
@@ -2322,11 +2340,12 @@ class ModVideoProcessor:
             # خلفية: تكبير لملء 9:16 ثم قص + ضبابية
             # مقدمة: scale ليلائم الإطار (بدون قص) ثم overlay في المنتصف
             filter_complex = (
-                f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"{hf_graph}"
+                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                 f"crop={target_width}:{target_height},"
                 f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={v_pix_fmt}[outv]"
             )
@@ -2365,11 +2384,12 @@ class ModVideoProcessor:
             fg_w = _even(int(target_width * zoom))
             fg_h = _even(int(target_height * zoom))
             filter_complex = (
-                f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"{hf_graph}"
+                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                 f"crop={target_width}:{target_height},"
                 f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[0:v]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                 f"crop={target_width}:{target_height}[fg];"
                 f"[bg][fg]overlay=0:0,format={v_pix_fmt}[outv]"
@@ -2400,13 +2420,13 @@ class ModVideoProcessor:
                 return n if (n % 2 == 0) else (n - 1)
 
             if abs(input_ratio - target_ratio) < 0.01:
-                vf = f"scale={target_width}:{target_height}:flags=lanczos"
+                vf = f"{hf_filter}scale={target_width}:{target_height}:flags=lanczos"
             elif input_ratio > target_ratio:
                 # IMPORTANT: for yuv420p, crop width/height and offsets should be even
                 safe_h = _even(orig_height)
                 new_width = _even(int(safe_h * target_ratio))
                 crop_x = _even((orig_width - new_width) // 2)
-                vf = f"crop={new_width}:{safe_h}:{crop_x}:0,scale={target_width}:{target_height}:flags=lanczos"
+                vf = f"{hf_filter}crop={new_width}:{safe_h}:{crop_x}:0,scale={target_width}:{target_height}:flags=lanczos"
             else:
                 scale_height = target_height
                 scale_width = int(scale_height * input_ratio)
@@ -2421,7 +2441,7 @@ class ModVideoProcessor:
                 pad_x = (target_width - scale_width) // 2
                 pad_y = (target_height - scale_height) // 2
 
-                vf = f"scale={scale_width}:{scale_height}:flags=lanczos,pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
+                vf = f"{hf_filter}scale={scale_width}:{scale_height}:flags=lanczos,pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
 
             cmd += [
                 "-vf", vf,
