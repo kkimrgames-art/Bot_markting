@@ -738,12 +738,15 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
-        try:
-            default_timeout = "300" if is_low else "1800"
-            timeout_s = int((os.getenv("SHORTS_EFFECTS_TIMEOUT_SECONDS", default_timeout) or default_timeout).strip())
-        except Exception:
-            timeout_s = 300 if is_low else 1800
-        timeout_s = max(120, timeout_s)
+        timeout_s = self._resolve_ffmpeg_timeout(
+            input_path,
+            "SHORTS_EFFECTS_TIMEOUT_SECONDS",
+            300,
+            1800,
+            10.0,
+            12.0,
+            extra_seconds=120,
+        )
         logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s): {' '.join(cmd[-6:])}")
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         if res.returncode != 0:
@@ -886,7 +889,15 @@ class ModVideoProcessor:
                     str(tmp_out),
                 ]
 
-                _timeout = 300 if is_low else 600
+                _timeout = self._resolve_ffmpeg_timeout(
+                    input_path,
+                    "FFMPEG_FINAL_ENCODE_TIMEOUT_SECONDS",
+                    300,
+                    600,
+                    10.0,
+                    8.0,
+                    extra_seconds=90,
+                )
                 result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=_timeout)
                 stderr = (result.stderr or b"").decode(errors="ignore")
                 if result.returncode != 0:
@@ -2110,7 +2121,20 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self._resolve_ffmpeg_timeout(
+                input_path,
+                "SHORTS_SIMPLE_EFFECTS_TIMEOUT_SECONDS",
+                300,
+                600,
+                8.0,
+                8.0,
+                extra_seconds=90,
+            ),
+        )
         if res.returncode != 0:
             raise RuntimeError((res.stderr or "")[-2500:])
     
@@ -2243,6 +2267,86 @@ class ModVideoProcessor:
             ff_threads = 1
 
         return ff_threads, preset, crf
+
+    def _resolve_ffmpeg_timeout(
+        self,
+        input_path: str,
+        env_name: str,
+        default_low: int,
+        default_high: int,
+        multiplier_low: float,
+        multiplier_high: float,
+        extra_seconds: int = 120,
+        minimum_seconds: int = 120,
+        maximum_seconds: int = 7200,
+    ) -> int:
+        is_low = _is_low_resource_env()
+        default_timeout = default_low if is_low else default_high
+        try:
+            timeout_s = int((os.getenv(env_name, str(default_timeout)) or str(default_timeout)).strip())
+        except Exception:
+            timeout_s = default_timeout
+
+        duration_s = 0.0
+        try:
+            duration_s = max(0.0, float(self._get_video_duration(input_path) or 0.0))
+        except Exception:
+            duration_s = 0.0
+
+        multiplier = multiplier_low if is_low else multiplier_high
+        if duration_s > 0 and multiplier > 0:
+            timeout_s = max(timeout_s, int(round(duration_s * multiplier)) + int(extra_seconds))
+
+        timeout_s = max(int(minimum_seconds), timeout_s)
+        if maximum_seconds > 0:
+            timeout_s = min(timeout_s, int(maximum_seconds))
+        return timeout_s
+
+    def _iter_retry_short_resolutions(self, target_width: int, target_height: int) -> list[Tuple[int, int]]:
+        def _normalize_pair(width: int, height: int) -> Optional[Tuple[int, int]]:
+            try:
+                width = int(width)
+                height = int(height)
+            except Exception:
+                return None
+            width = max(144, width)
+            height = max(256, height)
+            if width % 2 != 0:
+                width -= 1
+            if height % 2 != 0:
+                height -= 1
+            if width <= 0 or height <= 0:
+                return None
+            return width, height
+
+        candidates: list[Tuple[int, int]] = []
+        seen: set[Tuple[int, int]] = set()
+
+        primary = _normalize_pair(target_width, target_height)
+        if primary:
+            candidates.append(primary)
+            seen.add(primary)
+
+        env_width = os.getenv("SHORTS_FALLBACK_WIDTH")
+        env_height = os.getenv("SHORTS_FALLBACK_HEIGHT")
+        if env_width and env_height:
+            fallback = _normalize_pair(env_width, env_height)
+            if fallback and fallback not in seen and fallback[0] <= target_width and fallback[1] <= target_height:
+                candidates.append(fallback)
+                seen.add(fallback)
+
+        for width, height in ((540, 960), (360, 640)):
+            fallback = _normalize_pair(width, height)
+            if not fallback:
+                continue
+            if fallback in seen:
+                continue
+            if fallback[0] > target_width or fallback[1] > target_height:
+                continue
+            candidates.append(fallback)
+            seen.add(fallback)
+
+        return candidates
     
     def _trim_video(self, input_path: str, output_path: str, start: float, end: float, force_encode: bool = False):
         """قص الفيديو من البداية والنهاية"""
@@ -2400,198 +2504,301 @@ class ModVideoProcessor:
             except Exception:
                 pass
 
-        cmd = [
-            ffmpeg_bin(),
-            *_ffmpeg_memory_guard_args(),
-            "-hide_banner",
-            "-loglevel", "error",
-            "-nostats",
-            "-y",
-            "-i", input_path,
-        ]
-
-        if fmt == "fit_blur":
-            # خلفية: تكبير لملء 9:16 ثم قص + ضبابية
-            # مقدمة: scale ليلائم الإطار (بدون قص) ثم overlay في المنتصف
-            filter_complex = (
-                f"{hf_graph}"
-                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags={scale_flags},"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                f"crop={target_width}:{target_height},"
-                f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags={scale_flags},"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={v_pix_fmt}[outv]"
-            )
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "[outv]",
-                "-c:v", "libx264",
-                "-preset", x264_preset,
-                "-crf", str(x264_crf),
-                "-profile:v", v_profile,
-                "-level", level,
-                "-pix_fmt", v_pix_fmt,
-                "-vsync", "cfr",
-                "-r", f"{fps:.6f}",
-                "-g", str(gop),
-                "-threads", str(ff_threads),
-            ]
-        elif fmt == "partial_blur":
-            # نفس فكرة الخلفية الضبابية، لكن نجعل المقدمة أكبر قليلاً (Zoom متوسط)
-            # لتقليل الفراغ العلوي/السفلي مع قص جزء من اليمين/اليسار.
-            # zoom=1.25 => المقدمة 1350x2400 ثم crop إلى 1080x1920.
-            zoom = float(os.getenv("SHORTS_PARTIAL_ZOOM", "1.25") or "1.25")
-            if zoom < 1.0:
-                zoom = 1.0
-            if zoom > 2.0:
-                zoom = 2.0
-            def _even(n: int) -> int:
-                try:
-                    n = int(n)
-                except Exception:
-                    return 2
-                if n <= 0:
-                    return 2
-                return n if (n % 2 == 0) else (n - 1)
-
-            fg_w = _even(int(target_width * zoom))
-            fg_h = _even(int(target_height * zoom))
-            filter_complex = (
-                f"{hf_graph}"
-                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags={scale_flags},"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                f"crop={target_width}:{target_height},"
-                f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags={scale_flags},"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                f"crop={target_width}:{target_height}[fg];"
-                f"[bg][fg]overlay=0:0,format={v_pix_fmt}[outv]"
-            )
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "[outv]",
-                "-c:v", "libx264",
-                "-preset", x264_preset,
-                "-crf", str(x264_crf),
-                "-profile:v", v_profile,
-                "-level", level,
-                "-pix_fmt", v_pix_fmt,
-                "-vsync", "cfr",
-                "-r", f"{fps:.6f}",
-                "-g", str(gop),
-                "-threads", str(ff_threads),
-            ]
-        else:
-            # تحديد استراتيجية التحويل (قص/ملء أو pad عند الحاجة)
-            def _even(n: int) -> int:
-                try:
-                    n = int(n)
-                except Exception:
-                    return 2
-                if n <= 0:
-                    return 2
-                return n if (n % 2 == 0) else (n - 1)
-
-            if abs(input_ratio - target_ratio) < 0.01:
-                vf = f"{hf_filter}scale={target_width}:{target_height}:flags={scale_flags}"
-            elif input_ratio > target_ratio:
-                # IMPORTANT: for yuv420p, crop width/height and offsets should be even
-                safe_h = _even(orig_height)
-                new_width = _even(int(safe_h * target_ratio))
-                crop_x = _even((orig_width - new_width) // 2)
-                vf = f"{hf_filter}crop={new_width}:{safe_h}:{crop_x}:0,scale={target_width}:{target_height}:flags={scale_flags}"
-            else:
-                scale_height = target_height
-                scale_width = int(scale_height * input_ratio)
-                if scale_width > target_width:
-                    scale_width = target_width
-                    scale_height = int(scale_width / input_ratio)
-
-                # IMPORTANT: for yuv420p, intermediate scaled dimensions should be even
-                scale_width = _even(scale_width)
-                scale_height = _even(scale_height)
-
-                pad_x = (target_width - scale_width) // 2
-                pad_y = (target_height - scale_height) // 2
-
-                vf = f"{hf_filter}scale={scale_width}:{scale_height}:flags={scale_flags},pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
-
-            cmd += [
-                "-vf", vf,
-                "-map", "0:v",
-                "-c:v", "libx264",
-                "-preset", x264_preset,
-                "-crf", str(x264_crf),
-                "-profile:v", v_profile,
-                "-level", level,
-                "-pix_fmt", v_pix_fmt,
-                "-vsync", "cfr",
-                "-r", f"{fps:.6f}",
-                "-g", str(gop),
-                "-threads", str(ff_threads),
-            ]
         has_audio = self._has_audio(input_path)
-        if has_audio:
-            cmd += [
-                "-map", "0:a?",
-                "-c:a", "aac",
-                "-b:a", audio_bitrate,
-                "-ar", "48000",  # YouTube recommended: 48kHz
-                "-af", f"volume={shorts_vol}",
-                "-movflags", "+faststart",  # Essential for YouTube streaming
-                "-shortest",
-            ]
-        else:
-            cmd += ["-an", "-movflags", "+faststart"]
-        out_s = str(output_path)
-        if out_s.lower().endswith(".mp4"):
-            tmp_out = out_s[:-4] + ".tmp.mp4"
-        else:
-            tmp_out = out_s + ".tmp.mp4"
-        try:
-            if os.path.exists(tmp_out):
-                os.remove(tmp_out)
-        except Exception:
-            pass
-        # Ensure ffmpeg picks correct container even for temporary paths
-        cmd += ["-f", "mp4"]
-        cmd.append(str(tmp_out))
 
-        try:
-            timeout_s = int((os.getenv("FFMPEG_TIMEOUT_SECONDS", "600") or "600").strip())
-        except Exception:
-            timeout_s = 600
-        if timeout_s <= 0:
-            timeout_s = 600
-
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout_s)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to convert to shorts: {result.stderr.decode()}")
-
-        # Validate output container to avoid later 'moov atom not found'
-        try:
-            self._validate_video_file(str(tmp_out))
-        except Exception as e:
-            raise RuntimeError(f"Failed to convert to shorts: output invalid: {e}")
-
-        try:
-            if os.path.exists(str(output_path)):
-                os.remove(str(output_path))
-        except Exception:
-            pass
-        try:
-            os.replace(str(tmp_out), str(output_path))
-        except Exception:
-            # fallback copy if replace fails
-            import shutil
-            shutil.copy2(str(tmp_out), str(output_path))
+        def _even(n: int) -> int:
             try:
-                os.remove(str(tmp_out))
+                n = int(n)
+            except Exception:
+                return 2
+            if n <= 0:
+                return 2
+            return n if (n % 2 == 0) else (n - 1)
+
+        def _stderr_tail(raw: Any) -> str:
+            if raw is None:
+                return ""
+            if isinstance(raw, bytes):
+                return raw.decode(errors="ignore")[-2500:]
+            return str(raw)[-2500:]
+
+        def _build_cmd(
+            attempt_width: int,
+            attempt_height: int,
+            attempt_scale_flags: str,
+            attempt_preset: str,
+            attempt_crf: int,
+            attempt_profile: str,
+            attempt_pix_fmt: str,
+            attempt_audio_bitrate: str,
+            apply_audio_filter: bool,
+            tmp_out: str,
+        ) -> list[str]:
+            attempt_ratio = attempt_width / attempt_height
+            cmd = [
+                ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
+                "-hide_banner",
+                "-loglevel", "error",
+                "-nostats",
+                "-y",
+                "-i", input_path,
+            ]
+
+            if fmt == "fit_blur":
+                filter_complex = (
+                    f"{hf_graph}"
+                    f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    f"crop={attempt_width}:{attempt_height},"
+                    f"boxblur=luma_radius=20:luma_power=1[bg];"
+                    f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=decrease:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={attempt_pix_fmt}[outv]"
+                )
+                cmd += [
+                    "-filter_complex", filter_complex,
+                    "-map", "[outv]",
+                    "-c:v", "libx264",
+                    "-preset", attempt_preset,
+                    "-crf", str(attempt_crf),
+                    "-profile:v", attempt_profile,
+                    "-level", level,
+                    "-pix_fmt", attempt_pix_fmt,
+                    "-vsync", "cfr",
+                    "-r", f"{fps:.6f}",
+                    "-g", str(gop),
+                    "-threads", str(ff_threads),
+                ]
+            elif fmt == "partial_blur":
+                zoom = float(os.getenv("SHORTS_PARTIAL_ZOOM", "1.25") or "1.25")
+                if zoom < 1.0:
+                    zoom = 1.0
+                if zoom > 2.0:
+                    zoom = 2.0
+
+                fg_w = _even(int(attempt_width * zoom))
+                fg_h = _even(int(attempt_height * zoom))
+                filter_complex = (
+                    f"{hf_graph}"
+                    f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    f"crop={attempt_width}:{attempt_height},"
+                    f"boxblur=luma_radius=20:luma_power=1[bg];"
+                    f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    f"crop={attempt_width}:{attempt_height}[fg];"
+                    f"[bg][fg]overlay=0:0,format={attempt_pix_fmt}[outv]"
+                )
+                cmd += [
+                    "-filter_complex", filter_complex,
+                    "-map", "[outv]",
+                    "-c:v", "libx264",
+                    "-preset", attempt_preset,
+                    "-crf", str(attempt_crf),
+                    "-profile:v", attempt_profile,
+                    "-level", level,
+                    "-pix_fmt", attempt_pix_fmt,
+                    "-vsync", "cfr",
+                    "-r", f"{fps:.6f}",
+                    "-g", str(gop),
+                    "-threads", str(ff_threads),
+                ]
+            else:
+                if abs(input_ratio - attempt_ratio) < 0.01:
+                    vf = f"{hf_filter}scale={attempt_width}:{attempt_height}:flags={attempt_scale_flags}"
+                elif input_ratio > attempt_ratio:
+                    safe_h = _even(orig_height)
+                    new_width = _even(int(safe_h * attempt_ratio))
+                    crop_x = _even((orig_width - new_width) // 2)
+                    vf = f"{hf_filter}crop={new_width}:{safe_h}:{crop_x}:0,scale={attempt_width}:{attempt_height}:flags={attempt_scale_flags}"
+                else:
+                    scale_height = attempt_height
+                    scale_width = int(scale_height * input_ratio)
+                    if scale_width > attempt_width:
+                        scale_width = attempt_width
+                        scale_height = int(scale_width / input_ratio)
+
+                    scale_width = _even(scale_width)
+                    scale_height = _even(scale_height)
+
+                    pad_x = (attempt_width - scale_width) // 2
+                    pad_y = (attempt_height - scale_height) // 2
+
+                    vf = f"{hf_filter}scale={scale_width}:{scale_height}:flags={attempt_scale_flags},pad={attempt_width}:{attempt_height}:{pad_x}:{pad_y}:black"
+
+                cmd += [
+                    "-vf", vf,
+                    "-map", "0:v",
+                    "-c:v", "libx264",
+                    "-preset", attempt_preset,
+                    "-crf", str(attempt_crf),
+                    "-profile:v", attempt_profile,
+                    "-level", level,
+                    "-pix_fmt", attempt_pix_fmt,
+                    "-vsync", "cfr",
+                    "-r", f"{fps:.6f}",
+                    "-g", str(gop),
+                    "-threads", str(ff_threads),
+                ]
+
+            if has_audio:
+                cmd += [
+                    "-map", "0:a?",
+                    "-c:a", "aac",
+                    "-b:a", attempt_audio_bitrate,
+                    "-ar", "48000",
+                ]
+                if apply_audio_filter:
+                    cmd += ["-af", f"volume={shorts_vol}"]
+                cmd += [
+                    "-movflags", "+faststart",
+                    "-shortest",
+                ]
+            else:
+                cmd += ["-an", "-movflags", "+faststart"]
+
+            cmd += ["-f", "mp4", str(tmp_out)]
+            return cmd
+
+        primary_timeout = self._resolve_ffmpeg_timeout(
+            input_path,
+            "FFMPEG_TIMEOUT_SECONDS",
+            600,
+            600,
+            12.0,
+            8.0,
+            extra_seconds=120,
+        )
+        fallback_timeout = self._resolve_ffmpeg_timeout(
+            input_path,
+            "FFMPEG_FALLBACK_TIMEOUT_SECONDS",
+            420,
+            540,
+            7.0,
+            6.0,
+            extra_seconds=90,
+        )
+
+        attempts: list[Dict[str, Any]] = [
+            {
+                "label": "primary",
+                "width": target_width,
+                "height": target_height,
+                "scale_flags": scale_flags,
+                "preset": x264_preset,
+                "crf": x264_crf,
+                "profile": v_profile,
+                "pix_fmt": v_pix_fmt,
+                "audio_bitrate": audio_bitrate,
+                "apply_audio_filter": True,
+                "timeout": primary_timeout,
+            }
+        ]
+        for index, (fallback_width, fallback_height) in enumerate(self._iter_retry_short_resolutions(target_width, target_height)[1:], start=1):
+            attempts.append(
+                {
+                    "label": f"fallback_{index}",
+                    "width": fallback_width,
+                    "height": fallback_height,
+                    "scale_flags": "fast_bilinear",
+                    "preset": "ultrafast",
+                    "crf": 30 if index == 1 else 32,
+                    "profile": "high",
+                    "pix_fmt": "yuv420p",
+                    "audio_bitrate": "96k" if has_audio else audio_bitrate,
+                    "apply_audio_filter": False,
+                    "timeout": fallback_timeout,
+                }
+            )
+
+        out_s = str(output_path)
+        last_error = ""
+        for attempt_index, attempt in enumerate(attempts, start=1):
+            if out_s.lower().endswith(".mp4"):
+                tmp_out = out_s[:-4] + f".{attempt['label']}.tmp.mp4"
+            else:
+                tmp_out = out_s + f".{attempt['label']}.tmp.mp4"
+            try:
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
             except Exception:
                 pass
+
+            cmd = _build_cmd(
+                attempt_width=int(attempt["width"]),
+                attempt_height=int(attempt["height"]),
+                attempt_scale_flags=str(attempt["scale_flags"]),
+                attempt_preset=str(attempt["preset"]),
+                attempt_crf=int(attempt["crf"]),
+                attempt_profile=str(attempt["profile"]),
+                attempt_pix_fmt=str(attempt["pix_fmt"]),
+                attempt_audio_bitrate=str(attempt["audio_bitrate"]),
+                apply_audio_filter=bool(attempt["apply_audio_filter"]),
+                tmp_out=tmp_out,
+            )
+            timeout_s = max(120, int(attempt["timeout"]))
+            logger.info(
+                f"🎛️ Shorts conversion attempt {attempt_index}/{len(attempts)} "
+                f"({attempt['label']}, {attempt['width']}x{attempt['height']}, preset={attempt['preset']}, timeout={timeout_s}s)"
+            )
+
+            try:
+                result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                last_error = f"ffmpeg timed out after {timeout_s}s"
+                stderr_tail = _stderr_tail(getattr(exc, "stderr", None))
+                if stderr_tail:
+                    last_error = f"{last_error}: {stderr_tail}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} timed out. {last_error[-1200:]}")
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+                continue
+
+            stderr_text = _stderr_tail(result.stderr)
+            if result.returncode != 0:
+                last_error = stderr_text or f"ffmpeg exited with status {result.returncode}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} failed. {last_error[-1200:]}")
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+                continue
+
+            try:
+                self._validate_video_file(str(tmp_out))
+            except Exception as e:
+                last_error = f"output invalid: {e}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} produced invalid output. {last_error[-1200:]}")
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+                continue
+
+            try:
+                if os.path.exists(str(output_path)):
+                    os.remove(str(output_path))
+            except Exception:
+                pass
+            try:
+                os.replace(str(tmp_out), str(output_path))
+            except Exception:
+                import shutil
+                shutil.copy2(str(tmp_out), str(output_path))
+                try:
+                    os.remove(str(tmp_out))
+                except Exception:
+                    pass
+            logger.info(f"✅ Video converted to shorts format: {attempt['width']}x{attempt['height']}")
+            return
         
-        logger.info(f"✅ Video converted to shorts format: {target_width}x{target_height}")
+        raise RuntimeError(f"Failed to convert to shorts after {len(attempts)} attempts: {last_error}")
     
     def _add_cta_text(self, input_path: str, output_path: str, text: str, duration: float, custom_font: Optional[str] = None):
         """إضافة نص الدعوة في نهاية الفيديو"""
