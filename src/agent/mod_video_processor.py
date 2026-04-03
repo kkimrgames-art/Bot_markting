@@ -104,6 +104,36 @@ def _ffmpeg_memory_guard_args() -> list:
     return ["-max_alloc", str(max_alloc_bytes)]
 
 
+def _shorts_target_resolution() -> Tuple[int, int]:
+    def _env_int(name: str, default: int) -> int:
+        try:
+            return int(float((os.getenv(name, str(default)) or str(default)).strip()))
+        except Exception:
+            return default
+
+    is_low = _is_low_resource_env()
+    if is_low:
+        default_width = _env_int("SHORTS_LOW_RESOURCE_WIDTH", 720)
+        default_height = _env_int("SHORTS_LOW_RESOURCE_HEIGHT", 1280)
+    else:
+        default_width = 1080
+        default_height = 1920
+
+    width = _env_int("SHORTS_TARGET_WIDTH", default_width)
+    height = _env_int("SHORTS_TARGET_HEIGHT", default_height)
+
+    width = max(144, width)
+    height = max(256, height)
+    if width % 2 != 0:
+        width -= 1
+    if height % 2 != 0:
+        height -= 1
+
+    if width <= 0 or height <= 0:
+        return (720, 1280) if is_low else (1080, 1920)
+    return width, height
+
+
 def _get_shorts_encoder_settings() -> dict:
     """
     Get optimal encoder settings for shorts. Auto-detects GPU encoders.
@@ -455,7 +485,7 @@ class ModVideoProcessor:
                         except Exception: pass
                     self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format, hflip=hflip)
                     current_path = str(resized_path)
-                    final_width, final_height = 1080, 1920
+                    final_width, final_height = _shorts_target_resolution()
                     step_timings["convert"] = time.time() - step_start
                     logger.info(f"✅ Step 2/5 completed in {step_timings['convert']:.2f}s")
             
@@ -751,6 +781,7 @@ class ModVideoProcessor:
 
                 cmd = [
                     ffmpeg_bin(),
+                    *_ffmpeg_memory_guard_args(),
                     "-y",
                     "-fflags", "+genpts+igndts",
                     "-i", input_path,
@@ -856,7 +887,7 @@ class ModVideoProcessor:
             # Fallback to libx264 if GPU encoder fails
             if str(settings.get("encoder") or "").lower() != "libx264":
                 ff_threads, preset, crf = self._shorts_x264_settings()
-                lvl = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+                lvl = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
                 fallback = {
                     "encoder": "libx264",
                     "preset": preset,
@@ -1325,7 +1356,7 @@ class ModVideoProcessor:
 
             def _run_filter(vf: str) -> subprocess.CompletedProcess:
                 cmd = list(base_cmd)
-                cmd[5] = vf
+                cmd[cmd.index("-vf") + 1] = vf
                 return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
             attempts = []
@@ -1841,14 +1872,15 @@ class ModVideoProcessor:
 
             # 🔧 استخدام إعدادات وسيط محسّنة
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-            if os.getenv("LOW_RESOURCE_MODE") == "1":
+            if _is_low_resource_env():
                 base_preset = "ultrafast"
                 base_crf = 26
             preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
             crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-            level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+            level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
             base_cmd = [
                 ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
                 "-y",
                 "-i", input_path,
                 "-vf", "",
@@ -2003,12 +2035,12 @@ class ModVideoProcessor:
 
         # 🔧 استخدام إعدادات وسيط محسّنة
         ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-        if os.getenv("LOW_RESOURCE_MODE") == "1":
+        if _is_low_resource_env():
             base_preset = "ultrafast"
             base_crf = 26
         preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
         crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-        level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+        level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
         has_audio = self._has_audio(input_path)
         fps = self._get_video_fps(input_path)
         if not fps or fps <= 0:
@@ -2018,6 +2050,7 @@ class ModVideoProcessor:
             gop = 30
         cmd = [
             ffmpeg_bin(),
+            *_ffmpeg_memory_guard_args(),
             "-y",
             "-i", input_path,
             "-vf", vf,
@@ -2306,8 +2339,7 @@ class ModVideoProcessor:
 
         shorts_vol = _parse_volume_ratio(os.getenv("SHORTS_AUDIO_VOLUME", "60"), 0.6)
 
-        target_width = 1080
-        target_height = 1920
+        target_width, target_height = _shorts_target_resolution()
         
         # حساب نسبة العرض للارتفاع
         input_ratio = orig_width / orig_height
@@ -2517,7 +2549,7 @@ class ModVideoProcessor:
             except Exception:
                 pass
         
-        logger.info(f"✅ Video converted to shorts format: 1080x1920")
+        logger.info(f"✅ Video converted to shorts format: {target_width}x{target_height}")
     
     def _add_cta_text(self, input_path: str, output_path: str, text: str, duration: float, custom_font: Optional[str] = None):
         """إضافة نص الدعوة في نهاية الفيديو"""

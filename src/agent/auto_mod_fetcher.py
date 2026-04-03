@@ -2,13 +2,22 @@
 محرك الجلب التلقائي لفيديوهات المودات
 نظام مستقل يعمل على Render مع دعم نسخ متعددة عبر Supabase
 """
+import json
+import logging
 import os
 import sys
+import time
+from contextlib import suppress
+from typing import Any, Dict, Optional
+
+from src.utils.resilient_fs import ResilientFS
 
 # إضافة مسار المشروع للجذر للسماح بالتشغيل المباشر
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+
+logger = logging.getLogger(__name__)
 
 
 def _project_local_path(*parts: str) -> str:
