@@ -111,4 +111,4 @@ def install():
         return False
 
 if __name__ == "__main__":
-    install()
+    sys.exit(0 if install() else 1)
