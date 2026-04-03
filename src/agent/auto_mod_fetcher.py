@@ -5426,11 +5426,11 @@ class AutoModFetcher:
                 _clear_processing_state()
                 return out_path
         except asyncio.TimeoutError:
-            logger.error(f"Failed to process video {video_id}: processing timed out")
+            logger.error(f"Failed to process video {video_id}: processing timed out after {process_timeout_s}s")
             _clear_processing_state()
             return None
         except Exception as e:
-            logger.error(f"Failed to process video {video_id}: {e}")
+            logger.exception(f"Failed to process video {video_id}: {e}")
             _clear_processing_state()
             return None
 

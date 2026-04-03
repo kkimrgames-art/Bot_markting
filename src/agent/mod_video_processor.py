@@ -9,7 +9,10 @@ import time
 import re
 import uuid
 import hashlib
+import queue
+import threading
 from typing import Optional, Tuple, Dict, Any
+from collections import deque
 from pathlib import Path
 from .ffmpeg_utils import ffmpeg_bin, ffprobe_bin
 from .config import load_config
@@ -30,6 +33,141 @@ except ImportError:
     HAS_ARABIC_SUPPORT = False
 
 logger = logging.getLogger(__name__)
+
+
+def _terminate_subprocess_tree(proc: subprocess.Popen) -> None:
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+
+    for stop in ("terminate", "kill"):
+        try:
+            getattr(proc, stop)()
+        except Exception:
+            continue
+        try:
+            proc.wait(timeout=8)
+            return
+        except Exception:
+            continue
+
+
+def _run_ffmpeg_command_with_progress(
+    cmd: list[str],
+    *,
+    timeout_s: int,
+    idle_timeout_s: Optional[int] = None,
+    progress_label: str = "FFmpeg",
+) -> Tuple[int, str, str]:
+    progress_cmd = list(cmd)
+    try:
+        if "-progress" not in progress_cmd:
+            progress_cmd[1:1] = ["-progress", "pipe:1"]
+        if "-nostats" not in progress_cmd:
+            progress_cmd[1:1] = ["-nostats"]
+    except Exception:
+        pass
+
+    popen_kwargs: Dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "ignore",
+        "bufsize": 1,
+    }
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            popen_kwargs["creationflags"] = creation_flag
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(progress_cmd, **popen_kwargs)
+    events: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+    stderr_tail_parts: deque[str] = deque(maxlen=160)
+
+    def _pump(stream: Any, stream_name: str) -> None:
+        try:
+            while True:
+                line = stream.readline()
+                if line == "":
+                    break
+                events.put((stream_name, line.rstrip()))
+        except Exception:
+            pass
+        finally:
+            events.put((stream_name, None))
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    stdout_thread = threading.Thread(target=_pump, args=(proc.stdout, "stdout"), daemon=True)
+    stderr_thread = threading.Thread(target=_pump, args=(proc.stderr, "stderr"), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    start_ts = time.monotonic()
+    last_activity_ts = start_ts
+    last_progress_ts = start_ts
+    last_log_ts = start_ts
+    closed_streams = set()
+    current_out_time = ""
+
+    while True:
+        now = time.monotonic()
+        if timeout_s > 0 and (now - start_ts) >= timeout_s:
+            _terminate_subprocess_tree(proc)
+            stderr_tail = "\n".join(stderr_tail_parts)[-2500:]
+            return -1, stderr_tail, f"ffmpeg timed out after {int(timeout_s)}s"
+
+        effective_idle_timeout = int(idle_timeout_s or 0)
+        if effective_idle_timeout > 0 and (now - last_progress_ts) >= effective_idle_timeout:
+            _terminate_subprocess_tree(proc)
+            stderr_tail = "\n".join(stderr_tail_parts)[-2500:]
+            return -1, stderr_tail, f"ffmpeg stalled with no progress for {effective_idle_timeout}s"
+
+        try:
+            stream_name, payload = events.get(timeout=1.0)
+        except queue.Empty:
+            if proc.poll() is not None and len(closed_streams) >= 2:
+                break
+            continue
+
+        if payload is None:
+            closed_streams.add(stream_name)
+            if proc.poll() is not None and len(closed_streams) >= 2:
+                break
+            continue
+
+        last_activity_ts = time.monotonic()
+        if stream_name == "stderr":
+            if payload:
+                stderr_tail_parts.append(payload)
+            continue
+
+        if payload.startswith("out_time="):
+            current_out_time = payload.split("=", 1)[1].strip()
+            last_progress_ts = last_activity_ts
+        elif payload.startswith("out_time_ms="):
+            current_out_time = payload.split("=", 1)[1].strip()
+            last_progress_ts = last_activity_ts
+        elif payload.startswith("progress="):
+            state = payload.split("=", 1)[1].strip()
+            last_progress_ts = last_activity_ts
+            if (last_activity_ts - last_log_ts) >= 20:
+                suffix = f" | out_time={current_out_time}" if current_out_time else ""
+                logger.info(f"⏱️ {progress_label}: state={state}{suffix}")
+                last_log_ts = last_activity_ts
+        elif payload:
+            stderr_tail_parts.append(payload)
+
+    proc.wait(timeout=5)
+    stderr_tail = "\n".join(stderr_tail_parts)[-2500:]
+    return int(proc.returncode or 0), stderr_tail, ""
 
 
 def _parse_volume_ratio(raw: str, default_ratio: float) -> float:
@@ -61,10 +199,35 @@ def _is_low_resource_env() -> bool:
     """Detect if running in a low-resource environment (Render free tier, etc.).
     Uses multiple signals to avoid missing detection."""
     render_explicit = str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}
-    render_platform = bool(os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
+    render_platform = bool(
+        os.getenv("RENDER_SERVICE_ID")
+        or os.getenv("RENDER_INSTANCE_ID")
+        or os.getenv("RENDER_EXTERNAL_URL")
+        or os.getenv("RENDER_SERVICE_NAME")
+        or os.getenv("RENDER_GIT_REPOSITORY")
+    )
     low_res = str(os.getenv("LOW_RESOURCE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
     low_cpu = str(os.getenv("FFMPEG_LOW_CPU", "")).strip().lower() in {"1", "true", "yes", "on"}
-    return render_explicit or render_platform or low_res or low_cpu
+    if render_explicit or render_platform or low_res or low_cpu:
+        return True
+
+    try:
+        from .resource_guard import get_resource_snapshot
+
+        snap = get_resource_snapshot()
+        total_mb = int(snap.ram_total_mb or 0)
+        available_mb = int(snap.ram_available_mb or 0)
+        cpu_count = int(os.cpu_count() or 0)
+        if total_mb and total_mb <= 3584:
+            return True
+        if available_mb and available_mb <= 900:
+            return True
+        if cpu_count and cpu_count <= 2 and total_mb and total_mb <= 6144:
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _safe_processing_fps(raw_fps: Optional[float]) -> float:
@@ -2447,6 +2610,7 @@ class ModVideoProcessor:
             hf_filter = ""
             hf_graph = ""
             vin = "0:v"
+        is_low = _is_low_resource_env()
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         
@@ -2470,19 +2634,26 @@ class ModVideoProcessor:
             v_profile = "high444"
             v_pix_fmt = "yuv444p"
         else:
-            # 🆕 Improved settings: Lower CRF with fast preset, respecting RENDER mode
             _, base_preset, base_crf = self._shorts_x264_settings()
-            x264_preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
-            x264_crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+            if is_low:
+                x264_preset = base_preset
+                x264_crf = base_crf
+            else:
+                x264_preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                x264_crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             v_profile = "high"
-            v_pix_fmt = "yuv420p"  # No color space conversion later
+            v_pix_fmt = "yuv420p"
 
         shorts_vol = _parse_volume_ratio(os.getenv("SHORTS_AUDIO_VOLUME", "60"), 0.6)
-        is_low = _is_low_resource_env()
         scale_flags = "fast_bilinear" if is_low else "lanczos"
         audio_bitrate = "128k" if is_low else "384k"
 
         target_width, target_height = _shorts_target_resolution()
+        if is_low and (target_width > 720 or target_height > 1280):
+            logger.warning(
+                f"⚠️ Shorts target resolution {target_width}x{target_height} is too heavy for low-resource mode; clamping to 720x1280"
+            )
+            target_width, target_height = 720, 1280
         
         # حساب نسبة العرض للارتفاع
         input_ratio = orig_width / orig_height
@@ -2679,6 +2850,14 @@ class ModVideoProcessor:
             6.0,
             extra_seconds=90,
         )
+        idle_timeout_default = 120 if is_low else 180
+        try:
+            progress_idle_timeout_s = int(
+                (os.getenv("FFMPEG_PROGRESS_IDLE_TIMEOUT_SECONDS", str(idle_timeout_default)) or str(idle_timeout_default)).strip()
+            )
+        except Exception:
+            progress_idle_timeout_s = idle_timeout_default
+        progress_idle_timeout_s = max(45, min(progress_idle_timeout_s, max(45, primary_timeout - 15)))
 
         attempts: list[Dict[str, Any]] = [
             {
@@ -2743,14 +2922,18 @@ class ModVideoProcessor:
                 f"({attempt['label']}, {attempt['width']}x{attempt['height']}, preset={attempt['preset']}, timeout={timeout_s}s)"
             )
 
-            try:
-                result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout_s)
-            except subprocess.TimeoutExpired as exc:
-                last_error = f"ffmpeg timed out after {timeout_s}s"
-                stderr_tail = _stderr_tail(getattr(exc, "stderr", None))
-                if stderr_tail:
-                    last_error = f"{last_error}: {stderr_tail}"
-                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} timed out. {last_error[-1200:]}")
+            returncode, stderr_text, stop_reason = _run_ffmpeg_command_with_progress(
+                cmd,
+                timeout_s=timeout_s,
+                idle_timeout_s=min(progress_idle_timeout_s, max(45, timeout_s - 15)),
+                progress_label=f"Shorts {attempt['label']}",
+            )
+            stderr_text = _stderr_tail(stderr_text)
+            if stop_reason:
+                last_error = stop_reason
+                if stderr_text:
+                    last_error = f"{last_error}: {stderr_text}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} timed out/stalled. {last_error[-1200:]}")
                 try:
                     if os.path.exists(tmp_out):
                         os.remove(tmp_out)
@@ -2758,9 +2941,8 @@ class ModVideoProcessor:
                     pass
                 continue
 
-            stderr_text = _stderr_tail(result.stderr)
-            if result.returncode != 0:
-                last_error = stderr_text or f"ffmpeg exited with status {result.returncode}"
+            if returncode != 0:
+                last_error = stderr_text or f"ffmpeg exited with status {returncode}"
                 logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} failed. {last_error[-1200:]}")
                 try:
                     if os.path.exists(tmp_out):
