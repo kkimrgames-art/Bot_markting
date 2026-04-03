@@ -640,25 +640,22 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_status = "⌛ جاري الفحص..."
     auth_icon = "❓"
     try:
-        from pathlib import Path
-        try:
-            from ...agent.config import load_config
-            cfg = load_config()
-            base_dir = os.path.dirname(getattr(cfg, "TELEGRAM_DB_PATH", "") or "") or ".data"
-        except Exception:
-            base_dir = ".data"
-        token_path = Path(base_dir) / "youtube_tokens" / f"{channel.youtube_channel_id}.json"
-        
+        from ..channel_manager import ChannelManager, resolve_channel_token_path
+
         def _check_auth():
-            if not token_path.exists():
+            token_path = resolve_channel_token_path(channel)
+            if not token_path or not os.path.exists(token_path):
                 return "مفقودة (يرجى الربط)", "❌"
             try:
-                from google.oauth2.credentials import Credentials
-                creds = Credentials.from_authorized_user_file(str(token_path))
-                if creds.valid or (creds.expired and creds.refresh_token):
+                cm = ChannelManager()
+                ok, reason = cm._validate_platform_auth(channel)
+                if ok:
                     return "متصلة وجاهزة", "✅"
-                else:
+                if reason:
+                    if "لا يوجد توكن" in reason:
+                        return "مفقودة (يرجى الربط)", "❌"
                     return "تحتاج إعادة مصادقة", "⚠️"
+                return "خطأ في الاتصال", "⚠️"
             except Exception:
                 return "خطأ في الاتصال", "⚠️"
 

@@ -8,7 +8,7 @@ import html
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from ..channel_manager import ChannelManager
+from ..channel_manager import ChannelManager, resolve_youtube_token_path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -41,6 +41,28 @@ def _tokens_dir_from_cfg(cfg) -> str:
     return path
 
 
+def _resolve_publish_token_path(cfg, youtube_channel_id: str, publish_channel: Optional[Dict[str, Any]] = None) -> str:
+    channel_id = str(youtube_channel_id or "").strip()
+    if not channel_id:
+        return ""
+
+    try:
+        explicit = str((publish_channel or {}).get("token_path") or "").strip()
+    except Exception:
+        explicit = ""
+    if explicit and os.path.exists(explicit):
+        return explicit
+
+    resolved = resolve_youtube_token_path(channel_id, cfg)
+    if resolved and os.path.exists(resolved):
+        return resolved
+
+    token_guess = os.path.join(_tokens_dir_from_cfg(cfg), f"{channel_id}.json")
+    if os.path.exists(token_guess):
+        return token_guess
+    return resolved or ""
+
+
 async def publish_auth_waiting_for_channel(context: ContextTypes.DEFAULT_TYPE, youtube_channel_id: str) -> None:
     cfg = load_config()
     state = load_state(cfg)
@@ -57,16 +79,11 @@ async def publish_auth_waiting_for_channel(context: ContextTypes.DEFAULT_TYPE, y
     token_path = None
     try:
         for w in targets:
-            tp = ((w.get("publish_channel") or {}).get("token_path") or "").strip()
-            if tp and os.path.exists(tp):
-                token_path = tp
+            token_path = _resolve_publish_token_path(cfg, youtube_channel_id, w.get("publish_channel") or {})
+            if token_path and os.path.exists(token_path):
                 break
     except Exception:
         token_path = None
-    if not token_path:
-        token_guess = os.path.join(_tokens_dir_from_cfg(cfg), f"{youtube_channel_id}.json")
-        if os.path.exists(token_guess):
-            token_path = token_guess
     if not token_path:
         return
 
