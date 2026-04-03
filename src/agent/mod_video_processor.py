@@ -425,6 +425,17 @@ class ModVideoProcessor:
         try:
             current_path = input_video
             target_fps = self._get_video_fps(current_path)
+            explicit_effects = video_effects if isinstance(video_effects, dict) else None
+            intro_cfg = self._normalize_explicit_video_effect((explicit_effects or {}).get("intro") or {})
+            outro_cfg = self._normalize_explicit_video_effect((explicit_effects or {}).get("outro") or {})
+            has_post_convert_processing = bool(
+                top_text
+                or enhance
+                or apply_processing_effects
+                or intro_cfg.get("enabled")
+                or outro_cfg.get("enabled")
+            )
+            skip_final_encode = False
             
             # الخطوة 1: قص البداية والنهاية (فقط إذا كانت القيم أكبر من 0)
             # 🔧 استخدام stream copy للحفاظ على الجودة الأصلية
@@ -488,6 +499,8 @@ class ModVideoProcessor:
                     final_width, final_height = _shorts_target_resolution()
                     step_timings["convert"] = time.time() - step_start
                     logger.info(f"✅ Step 2/5 completed in {step_timings['convert']:.2f}s")
+                    if not has_post_convert_processing:
+                        skip_final_encode = True
             
             # الخطوة 3: إضافة نص علوي (اختياري)
             if top_text:
@@ -542,18 +555,37 @@ class ModVideoProcessor:
             
             # الخطوة 6: الترميز النهائي
             encode_start = time.time()
-            logger.info("🎬 Step 6/6: Final encoding...")
-            if progress_callback:
-                try: progress_callback("6/6 🎬 الترميز النهائي...")
-                except Exception: pass
-            if convert_to_shorts:
-                ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
-                if not ok_final:
-                    raise RuntimeError(f"Failed to encode final shorts: {final_path}")
+            if convert_to_shorts and skip_final_encode:
+                logger.info("⏭️ Step 6/6: Skipping final encoding and reusing the shorts-converted file directly...")
+                if progress_callback:
+                    try: progress_callback("6/6 ⏭️ تخطي الترميز النهائي...")
+                    except Exception: pass
+                try:
+                    if os.path.exists(str(final_path)):
+                        os.remove(str(final_path))
+                except Exception:
+                    pass
+                try:
+                    os.replace(current_path, str(final_path))
+                except Exception:
+                    import shutil
+                    shutil.copy2(current_path, str(final_path))
+                current_path = str(final_path)
+                step_timings["encode"] = time.time() - encode_start
+                logger.info(f"✅ Step 6/6 skipped in {step_timings['encode']:.2f}s")
             else:
-                self._optimize_for_youtube(current_path, str(final_path))
-            step_timings["encode"] = time.time() - encode_start
-            logger.info(f"✅ Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
+                logger.info("🎬 Step 6/6: Final encoding...")
+                if progress_callback:
+                    try: progress_callback("6/6 🎬 الترميز النهائي...")
+                    except Exception: pass
+                if convert_to_shorts:
+                    ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
+                    if not ok_final:
+                        raise RuntimeError(f"Failed to encode final shorts: {final_path}")
+                else:
+                    self._optimize_for_youtube(current_path, str(final_path))
+                step_timings["encode"] = time.time() - encode_start
+                logger.info(f"✅ Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
             
             # معلومات الفيديو المعالج
             info = {
@@ -762,6 +794,7 @@ class ModVideoProcessor:
                 if gop < 1:
                     gop = 30
                 has_audio = self._has_audio(input_path)
+                is_low = _is_low_resource_env()
 
                 out_s = str(output_path)
                 if out_s.lower().endswith(".mp4"):
@@ -782,6 +815,9 @@ class ModVideoProcessor:
                 cmd = [
                     ffmpeg_bin(),
                     *_ffmpeg_memory_guard_args(),
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-nostats",
                     "-y",
                     "-fflags", "+genpts+igndts",
                     "-i", input_path,
@@ -850,8 +886,8 @@ class ModVideoProcessor:
                     str(tmp_out),
                 ]
 
-                _timeout = 300 if _is_low_resource_env() else 600
-                result = subprocess.run(cmd, capture_output=True, timeout=_timeout)
+                _timeout = 300 if is_low else 600
+                result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=_timeout)
                 stderr = (result.stderr or b"").decode(errors="ignore")
                 if result.returncode != 0:
                     return False, stderr
@@ -2338,6 +2374,9 @@ class ModVideoProcessor:
             v_pix_fmt = "yuv420p"  # No color space conversion later
 
         shorts_vol = _parse_volume_ratio(os.getenv("SHORTS_AUDIO_VOLUME", "60"), 0.6)
+        is_low = _is_low_resource_env()
+        scale_flags = "fast_bilinear" if is_low else "lanczos"
+        audio_bitrate = "128k" if is_low else "384k"
 
         target_width, target_height = _shorts_target_resolution()
         
@@ -2364,6 +2403,9 @@ class ModVideoProcessor:
         cmd = [
             ffmpeg_bin(),
             *_ffmpeg_memory_guard_args(),
+            "-hide_banner",
+            "-loglevel", "error",
+            "-nostats",
             "-y",
             "-i", input_path,
         ]
@@ -2373,11 +2415,11 @@ class ModVideoProcessor:
             # مقدمة: scale ليلائم الإطار (بدون قص) ثم overlay في المنتصف
             filter_complex = (
                 f"{hf_graph}"
-                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags={scale_flags},"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                 f"crop={target_width}:{target_height},"
                 f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags={scale_flags},"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={v_pix_fmt}[outv]"
             )
@@ -2417,11 +2459,11 @@ class ModVideoProcessor:
             fg_h = _even(int(target_height * zoom))
             filter_complex = (
                 f"{hf_graph}"
-                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"[{vin}]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags={scale_flags},"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                 f"crop={target_width}:{target_height},"
                 f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags={scale_flags},"
                 f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                 f"crop={target_width}:{target_height}[fg];"
                 f"[bg][fg]overlay=0:0,format={v_pix_fmt}[outv]"
@@ -2452,13 +2494,13 @@ class ModVideoProcessor:
                 return n if (n % 2 == 0) else (n - 1)
 
             if abs(input_ratio - target_ratio) < 0.01:
-                vf = f"{hf_filter}scale={target_width}:{target_height}:flags=lanczos"
+                vf = f"{hf_filter}scale={target_width}:{target_height}:flags={scale_flags}"
             elif input_ratio > target_ratio:
                 # IMPORTANT: for yuv420p, crop width/height and offsets should be even
                 safe_h = _even(orig_height)
                 new_width = _even(int(safe_h * target_ratio))
                 crop_x = _even((orig_width - new_width) // 2)
-                vf = f"{hf_filter}crop={new_width}:{safe_h}:{crop_x}:0,scale={target_width}:{target_height}:flags=lanczos"
+                vf = f"{hf_filter}crop={new_width}:{safe_h}:{crop_x}:0,scale={target_width}:{target_height}:flags={scale_flags}"
             else:
                 scale_height = target_height
                 scale_width = int(scale_height * input_ratio)
@@ -2473,7 +2515,7 @@ class ModVideoProcessor:
                 pad_x = (target_width - scale_width) // 2
                 pad_y = (target_height - scale_height) // 2
 
-                vf = f"{hf_filter}scale={scale_width}:{scale_height}:flags=lanczos,pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
+                vf = f"{hf_filter}scale={scale_width}:{scale_height}:flags={scale_flags},pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
 
             cmd += [
                 "-vf", vf,
@@ -2494,7 +2536,7 @@ class ModVideoProcessor:
             cmd += [
                 "-map", "0:a?",
                 "-c:a", "aac",
-                "-b:a", "384k",  # YouTube recommended: 384kbps stereo
+                "-b:a", audio_bitrate,
                 "-ar", "48000",  # YouTube recommended: 48kHz
                 "-af", f"volume={shorts_vol}",
                 "-movflags", "+faststart",  # Essential for YouTube streaming
@@ -2523,7 +2565,7 @@ class ModVideoProcessor:
         if timeout_s <= 0:
             timeout_s = 600
 
-        result = subprocess.run(cmd, capture_output=True, timeout=timeout_s)
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout_s)
         if result.returncode != 0:
             raise RuntimeError(f"Failed to convert to shorts: {result.stderr.decode()}")
 
