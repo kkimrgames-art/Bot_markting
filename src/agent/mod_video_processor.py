@@ -54,6 +54,102 @@ def _terminate_subprocess_tree(proc: subprocess.Popen) -> None:
             continue
 
 
+def _run_ffmpeg_with_idle_timeout(
+    cmd: list[str],
+    *,
+    timeout_s: int = 300,
+    idle_timeout_s: int = 90,
+    label: str = "FFmpeg",
+) -> Tuple[int, str]:
+    """Run an FFmpeg command with both hard-timeout AND idle-timeout.
+
+    Unlike ``subprocess.run(timeout=N)`` which only enforces a hard wall-clock
+    timeout, this function monitors stderr output and kills the process if
+    **no output at all** is produced for ``idle_timeout_s`` seconds.  This is
+    critical on Render free-tier where FFmpeg can stall at 0% CPU due to
+    resource throttling, causing the bot to appear frozen for the entire
+    hard-timeout duration.
+
+    Returns (returncode, stderr_tail).  returncode == -1 indicates a timeout.
+    """
+    popen_kwargs: Dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+        "bufsize": 0,
+    }
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            popen_kwargs["creationflags"] = creation_flag
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    stderr_parts: deque[bytes] = deque(maxlen=200)
+
+    # Background thread to drain stderr so the pipe buffer never fills up
+    # (which would block FFmpeg and cause a deadlock).
+    drain_done = threading.Event()
+
+    def _drain_stderr() -> None:
+        try:
+            while True:
+                chunk = proc.stderr.read(4096)
+                if not chunk:
+                    break
+                stderr_parts.append(chunk)
+        except Exception:
+            pass
+        finally:
+            drain_done.set()
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+
+    drain_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    drain_thread.start()
+
+    start_ts = time.monotonic()
+    last_activity_ts = start_ts
+    last_output_len = 0
+
+    while True:
+        try:
+            proc.wait(timeout=2.0)
+            break  # Process finished
+        except subprocess.TimeoutExpired:
+            pass
+
+        now = time.monotonic()
+
+        # Hard timeout
+        if timeout_s > 0 and (now - start_ts) >= timeout_s:
+            logger.warning(f"⏰ [{label}] Hard timeout after {int(now - start_ts)}s — killing FFmpeg")
+            _terminate_subprocess_tree(proc)
+            drain_done.wait(timeout=5)
+            stderr_text = b"".join(stderr_parts).decode(errors="ignore")[-2500:]
+            return -1, stderr_text
+
+        # Idle timeout: check if stderr has produced new output
+        current_len = sum(len(p) for p in stderr_parts)
+        if current_len != last_output_len:
+            last_output_len = current_len
+            last_activity_ts = now
+        elif idle_timeout_s > 0 and (now - last_activity_ts) >= idle_timeout_s:
+            logger.warning(
+                f"⏰ [{label}] Idle timeout — no output for {int(now - last_activity_ts)}s — killing FFmpeg"
+            )
+            _terminate_subprocess_tree(proc)
+            drain_done.wait(timeout=5)
+            stderr_text = b"".join(stderr_parts).decode(errors="ignore")[-2500:]
+            return -1, stderr_text
+
+    drain_done.wait(timeout=5)
+    stderr_text = b"".join(stderr_parts).decode(errors="ignore")[-2500:]
+    return int(proc.returncode or 0), stderr_text
+
+
 def _run_ffmpeg_command_with_progress(
     cmd: list[str],
     *,
@@ -910,10 +1006,13 @@ class ModVideoProcessor:
             12.0,
             extra_seconds=120,
         )
-        logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s): {' '.join(cmd[-6:])}")
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-        if res.returncode != 0:
-            raise RuntimeError((res.stderr or "")[-2500:])
+        idle_timeout_s = min(90, max(30, timeout_s // 4))
+        logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s, idle={idle_timeout_s}s): {' '.join(cmd[-6:])}")
+        rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=timeout_s, idle_timeout_s=idle_timeout_s, label="Effects"
+        )
+        if rc != 0:
+            raise RuntimeError(stderr_text[-2500:] or f"Effects FFmpeg exited with code {rc}")
     
     def _optimize_for_youtube(self, input_path: str, output_path: str) -> bool:
         # Ensure temp and output dirs exist
@@ -939,8 +1038,13 @@ class ModVideoProcessor:
                 output_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode == 0 and os.path.exists(output_path):
+            _opt_timeout = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_YOUTUBE_OPT_TIMEOUT_SECONDS", 120, 300, 3.0, 3.0, extra_seconds=30,
+            )
+            rc, _stderr = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=_opt_timeout, idle_timeout_s=60, label="YouTubeOpt"
+            )
+            if rc == 0 and os.path.exists(output_path):
                 logger.debug("✅ YouTube optimization successful")
                 return True
             else:
@@ -1061,9 +1165,12 @@ class ModVideoProcessor:
                     8.0,
                     extra_seconds=90,
                 )
-                result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=_timeout)
-                stderr = (result.stderr or b"").decode(errors="ignore")
-                if result.returncode != 0:
+                _idle_timeout = min(120, max(45, _timeout // 4))
+                logger.info(f"🎬 [FinalEncode] timeout={_timeout}s idle={_idle_timeout}s encoder={enc_settings.get('encoder')}")
+                rc, stderr = _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_timeout, idle_timeout_s=_idle_timeout, label="FinalEncode"
+                )
+                if rc != 0:
                     return False, stderr
                 try:
                     self._validate_video_file(str(tmp_out))
@@ -1206,10 +1313,15 @@ class ModVideoProcessor:
                     # x264 lossless is not supported with profile=high/yuv420p
                     # use high444 for intermediates
                     cmd[cmd.index("-c:v") + 2:cmd.index("-c:v") + 2] = ["-profile:v", v_profile]
-                result = subprocess.run(cmd, capture_output=True, timeout=300 if _is_low_resource_env() else 600)
-                stderr = (result.stderr or b"").decode(errors="ignore")
-                ok = (result.returncode == 0) and os.path.exists(output_path) and os.path.getsize(output_path) > 0
-                return ok, stderr
+                _enh_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_ENHANCE_TIMEOUT_SECONDS", 300, 600, 8.0, 8.0, extra_seconds=90,
+                )
+                _enh_idle = min(120, max(45, _enh_timeout // 4))
+                rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_enh_timeout, idle_timeout_s=_enh_idle, label="Enhance"
+                )
+                ok = (rc == 0) and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+                return ok, stderr_text
 
             # Try 1: eq + colorbalance (highlights) + blend (intensity)
             fc1 = (
@@ -1564,10 +1676,15 @@ class ModVideoProcessor:
                 str(output_path)
             ]
 
-            def _run_filter(vf: str) -> subprocess.CompletedProcess:
+            def _run_filter(vf: str) -> Tuple[int, str]:
                 cmd = list(base_cmd)
                 cmd[cmd.index("-vf") + 1] = vf
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                _ovl_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                return _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_ovl_timeout, idle_timeout_s=90, label="TopOverlay"
+                )
 
             attempts = []
 
@@ -1592,11 +1709,11 @@ class ModVideoProcessor:
             last_stderr = ""
             for vf in attempts:
                 logger.debug(f"Applying VF filter: {vf}")
-                result = _run_filter(vf)
-                if result.returncode == 0:
+                rc, stderr_text = _run_filter(vf)
+                if rc == 0:
                     logger.info("✅ Top overlay text added to video")
                     return
-                last_stderr = (result.stderr or "")[-2500:]
+                last_stderr = (stderr_text or "")[-2500:]
                 logger.error(f"FFmpeg failed to add top overlay text: {last_stderr}")
 
             raise RuntimeError(f"Failed to add top overlay text via FFmpeg drawtext. Last error: {last_stderr}")
@@ -1767,10 +1884,15 @@ class ModVideoProcessor:
                 str(output_path)
             ]
 
-            def _run_filter(vf: str) -> subprocess.CompletedProcess:
+            def _run_filter(vf: str) -> Tuple[int, str]:
                 cmd = list(base_cmd)
                 cmd[5] = vf
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                _ovl_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                return _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_ovl_timeout, idle_timeout_s=90, label="CustomOverlay"
+                )
 
             attempts = [drawtext_filter]
             attempts.append(drawtext_filter.replace(":fix_bounds=1", ""))
@@ -1782,11 +1904,11 @@ class ModVideoProcessor:
             last_stderr = ""
             for vf in attempts:
                 logger.debug(f"Custom overlay attempt: {vf}")
-                result = _run_filter(vf)
-                if result.returncode == 0:
+                rc, stderr_text = _run_filter(vf)
+                if rc == 0:
                     logger.info("✅ Custom overlay text added to video")
                     return
-                last_stderr = (result.stderr or "")[-2500:]
+                last_stderr = (stderr_text or "")[-2500:]
                 logger.error(f"FFmpeg custom overlay failed: {last_stderr}")
 
             raise RuntimeError(f"Failed to add custom overlay text via FFmpeg. Last error: {last_stderr}")
@@ -1990,9 +2112,14 @@ class ModVideoProcessor:
 
         try:
             logger.debug("Custom animated overlay filter: %s", filter_complex)
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or "")[-2500:] or "Animated overlay failed")
+            _anim_timeout = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+            )
+            rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=_anim_timeout, idle_timeout_s=90, label="AnimatedOverlay"
+            )
+            if rc != 0:
+                raise RuntimeError(stderr_text[-2500:] or "Animated overlay failed")
             if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
                 raise RuntimeError("Animated overlay output file missing or empty")
             logger.info("✅ Custom animated overlay text added to video")
@@ -2105,10 +2232,15 @@ class ModVideoProcessor:
                 str(output_path),
             ]
 
-            def _run_filter(vf: str) -> subprocess.CompletedProcess:
+            def _run_filter(vf: str) -> Tuple[int, str]:
                 cmd = list(base_cmd)
                 cmd[5] = vf
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                _wm_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_WATERMARK_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                return _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_wm_timeout, idle_timeout_s=90, label="Watermark"
+                )
 
             attempts = [
                 drawtext_filter,
@@ -2119,10 +2251,10 @@ class ModVideoProcessor:
 
             last_stderr = ""
             for vf in attempts:
-                result = _run_filter(vf)
-                if result.returncode == 0:
+                rc, stderr_text = _run_filter(vf)
+                if rc == 0:
                     return
-                last_stderr = (result.stderr or "")[-2500:]
+                last_stderr = (stderr_text or "")[-2500:]
 
             raise RuntimeError(f"Failed to add watermark via FFmpeg drawtext. Last error: {last_stderr}")
         finally:
@@ -2148,9 +2280,9 @@ class ModVideoProcessor:
                 "-use_editlist", "0",
                 str(output_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if res.returncode != 0:
-                raise RuntimeError((res.stderr or "")[-2500:])
+            rc, _stderr = _run_ffmpeg_with_idle_timeout(cmd, timeout_s=300, idle_timeout_s=60, label="SimpleEffectsCopy")
+            if rc != 0:
+                raise RuntimeError(_stderr[-2500:] if _stderr else "SimpleEffects copy failed")
             return
 
         duration_s = None
@@ -2284,22 +2416,21 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
-        res = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=self._resolve_ffmpeg_timeout(
-                input_path,
-                "SHORTS_SIMPLE_EFFECTS_TIMEOUT_SECONDS",
-                300,
-                600,
-                8.0,
-                8.0,
-                extra_seconds=90,
-            ),
+        _fx_timeout = self._resolve_ffmpeg_timeout(
+            input_path,
+            "SHORTS_SIMPLE_EFFECTS_TIMEOUT_SECONDS",
+            300,
+            600,
+            8.0,
+            8.0,
+            extra_seconds=90,
         )
-        if res.returncode != 0:
-            raise RuntimeError((res.stderr or "")[-2500:])
+        _fx_idle = min(90, max(30, _fx_timeout // 4))
+        rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_fx_timeout, idle_timeout_s=_fx_idle, label="SimpleEffects"
+        )
+        if rc != 0:
+            raise RuntimeError(stderr_text[-2500:] or f"SimpleEffects FFmpeg exited with code {rc}")
     
     def _get_video_duration(self, video_path: str) -> float:
         """الحصول على مدة الفيديو"""
@@ -2587,10 +2718,15 @@ class ModVideoProcessor:
                 str(output_path),
             ]
         
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        _trim_timeout = self._resolve_ffmpeg_timeout(
+            input_path, "FFMPEG_TRIM_TIMEOUT_SECONDS", 120, 180, 2.0, 2.0, extra_seconds=30,
+        )
+        rc, _stderr = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_trim_timeout, idle_timeout_s=60, label="Trim"
+        )
         
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to trim video: {result.stderr.decode()}")
+        if rc != 0:
+            raise RuntimeError(f"Failed to trim video: {_stderr[-500:]}")
         
         logger.info(f"✅ Video trimmed: {start}s from start, {end}s from end")
     
@@ -2717,12 +2853,13 @@ class ModVideoProcessor:
             ]
 
             if fmt == "fit_blur":
+                blur_val = 10 if is_low else 20
                 filter_complex = (
                     f"{hf_graph}"
                     f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
                     f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                     f"crop={attempt_width}:{attempt_height},"
-                    f"boxblur=luma_radius=20:luma_power=1[bg];"
+                    f"boxblur=luma_radius={blur_val}:luma_power=1[bg];"
                     f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=decrease:flags={attempt_scale_flags},"
                     f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
                     f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={attempt_pix_fmt}[outv]"
@@ -2748,6 +2885,7 @@ class ModVideoProcessor:
                 if zoom > 2.0:
                     zoom = 2.0
 
+                blur_val = 10 if is_low else 20
                 fg_w = _even(int(attempt_width * zoom))
                 fg_h = _even(int(attempt_height * zoom))
                 filter_complex = (
@@ -2755,7 +2893,7 @@ class ModVideoProcessor:
                     f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
                     f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                     f"crop={attempt_width}:{attempt_height},"
-                    f"boxblur=luma_radius=20:luma_power=1[bg];"
+                    f"boxblur=luma_radius={blur_val}:luma_power=1[bg];"
                     f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
                     f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
                     f"crop={attempt_width}:{attempt_height}[fg];"
@@ -3086,8 +3224,13 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd.append(str(output_path))
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
-        if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        _outro_timeout = self._resolve_ffmpeg_timeout(
+            input_path, "FFMPEG_OUTRO_BLUR_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+        )
+        rc, _stderr = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_outro_timeout, idle_timeout_s=90, label="OutroBlur"
+        )
+        if rc != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             import shutil
             shutil.copy2(input_path, output_path)
 
@@ -3439,9 +3582,15 @@ class ModVideoProcessor:
                 "-movflags", "+faststart",
                 str(output_path)
             ]
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                raise RuntimeError((result.stderr or b"").decode())
+            _cta_timeout = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_CTA_TIMEOUT_SECONDS", 300, 600, 8.0, 8.0, extra_seconds=90,
+            )
+            _cta_idle = min(120, max(45, _cta_timeout // 4))
+            rc, _stderr = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=_cta_timeout, idle_timeout_s=_cta_idle, label="CTAReliable"
+            )
+            if rc != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                raise RuntimeError(_stderr[-2500:] if _stderr else "CTA Reliable overlay failed")
         finally:
             try:
                 if text_file.exists():
@@ -3654,14 +3803,21 @@ class ModVideoProcessor:
             "-c:a", "copy",
             str(output_path)
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        
+        _cta2_timeout = self._resolve_ffmpeg_timeout(
+            input_path, "FFMPEG_CTA_TIMEOUT_SECONDS", 300, 600, 8.0, 8.0, extra_seconds=90,
+        )
+        _cta2_idle = min(120, max(45, _cta2_timeout // 4))
+        rc, _stderr = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_cta2_timeout, idle_timeout_s=_cta2_idle, label="CTAImageOverlay"
+        )
         try:
             if overlay_path.exists():
                 overlay_path.unlink()
         except Exception:
             pass
-        if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            raise RuntimeError(result.stderr.decode() if result.stderr else "CTA image overlay failed")
+        if rc != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError(_stderr[-2500:] if _stderr else "CTA image overlay failed")
 
     def _flip_video(self, input_path: str, output_path: Path) -> None:
         """قلب الفيديو أفقياً (Mirror)"""
@@ -3685,9 +3841,14 @@ class ModVideoProcessor:
                 str(output_path)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode != 0 or not os.path.exists(output_path):
-                raise RuntimeError(f"FFmpeg hflip failed: {result.stderr.decode()[:500]}")
+            timeout_s = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_FLIP_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+            )
+            rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=timeout_s, idle_timeout_s=90, label="Flip"
+            )
+            if rc != 0 or not os.path.exists(output_path):
+                raise RuntimeError(f"FFmpeg hflip failed: {stderr_text[-500:]}")
                 
         except Exception as e:
             logger.error(f"Error flipping video: {e}")

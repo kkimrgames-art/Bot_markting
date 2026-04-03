@@ -5455,9 +5455,14 @@ class AutoModFetcher:
         import functools
 
         trim_func = functools.partial(mvp._trim_video, input_path, output_path, 0.0, seconds)
-        await loop.run_in_executor(None, trim_func)
-        if ResilientFS.exists(output_path):
-            return output_path
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, trim_func), timeout=300.0)
+            if ResilientFS.exists(output_path):
+                return output_path
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ Source tail trim timed out for {video_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Source tail trim failed for {video_id}: {e}")
         return None
 
     @staticmethod
@@ -6411,13 +6416,17 @@ class AutoModFetcher:
                                             intro_animation=overlay_cfg.get("intro_animation"),
                                             outro_animation=overlay_cfg.get("outro_animation"),
                                         )
-                                        await loop.run_in_executor(None, _ov_func)
-                                        if ResilientFS.exists(_ov_out):
-                                            self._cleanup_file(out_path)
-                                            out_path = _ov_out
-                                            await _notify("✅ تم إضافة النص المخصص.")
-                                        else:
-                                            await _notify("⚠️ فشل إضافة النص المخصص، سيتم الرفع بدونه.")
+                                        try:
+                                            await asyncio.wait_for(loop.run_in_executor(None, _ov_func), timeout=300.0)
+                                            if ResilientFS.exists(_ov_out):
+                                                self._cleanup_file(out_path)
+                                                out_path = _ov_out
+                                                await _notify("✅ تم إضافة النص المخصص.")
+                                            else:
+                                                await _notify("⚠️ فشل إضافة النص المخصص، سيتم الرفع بدونه.")
+                                        except asyncio.TimeoutError:
+                                            logger.warning(f"⚠️ Custom overlay text timed out for {vid_id}")
+                                            await _notify("⚠️ نفذ الوقت المخصص لإضافة النص.")
                                 except Exception as ov_err:
                                     logger.warning(f"Custom overlay text failed: {ov_err}")
                                     await _notify(f"⚠️ فشل النص المخصص: `{str(ov_err)[:80]}`")
@@ -6455,13 +6464,17 @@ class AutoModFetcher:
                                             facecam_shape=fc_shape,
                                             facecam_scale=fc_scale,
                                         )
-                                        fc_out = await loop.run_in_executor(None, render_func)
-                                        if fc_out and ResilientFS.exists(fc_out):
-                                            self._cleanup_file(out_path)
-                                            out_path = fc_out
-                                            await _notify("✅ تم إضافة الفيس كام.")
-                                        else:
-                                            await _notify("⚠️ فشل إضافة الفيس كام، سيتم الرفع بدونه.")
+                                        try:
+                                            fc_out = await asyncio.wait_for(loop.run_in_executor(None, render_func), timeout=300.0)
+                                            if fc_out and ResilientFS.exists(fc_out):
+                                                self._cleanup_file(out_path)
+                                                out_path = fc_out
+                                                await _notify("✅ تم إضافة الفيس كام.")
+                                            else:
+                                                await _notify("⚠️ فشل إضافة الفيس كام، سيتم الرفع بدونه.")
+                                        except asyncio.TimeoutError:
+                                            logger.warning(f"⚠️ Facecam overlay timed out for {vid_id}")
+                                            await _notify("⚠️ نفذ الوقت المخصص لدمج الفيس كام.")
                                     else:
                                         await _notify(
                                             f"⚠️ لا توجد مقاطع فيس كام صالحة للمصدر `{source.get('source_name', '')[:20]}...`\n"
