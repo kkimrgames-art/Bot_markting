@@ -289,6 +289,16 @@ _RUN_CYCLE_META_LOCK = threading.Lock()
 _RUN_CYCLE_STARTED_MONOTONIC = 0.0
 
 
+def _auto_mod_multi_instance_enabled() -> bool:
+    raw = (os.getenv("AUTOMODBOT_ALLOW_MULTI_INSTANCE", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _auto_mod_instance_fallback_enabled() -> bool:
+    raw = (os.getenv("AUTO_MOD_INSTANCE_FALLBACK_ENABLED", "true") or "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _processing_lock_stale_minutes(default_minutes: int = 90) -> int:
     try:
         raw = (os.getenv("AUTO_MOD_PROCESSING_STALE_MINUTES", str(default_minutes)) or str(default_minutes)).strip()
@@ -2572,6 +2582,47 @@ class AutoModDB:
 
     def __init__(self, instance_id: str = None):
         self.instance_id = instance_id or get_instance_id()
+        self._cached_instance_fallback_ids: Optional[List[str]] = None
+
+    def _instance_fallback_ids(self) -> List[str]:
+        if _auto_mod_multi_instance_enabled() or not _auto_mod_instance_fallback_enabled():
+            return []
+        if self._cached_instance_fallback_ids is not None:
+            return list(self._cached_instance_fallback_ids)
+
+        candidates: List[str] = []
+        seen = {self.instance_id}
+
+        def _add(value: Any):
+            val = str(value or "").strip()
+            if not val or val in seen:
+                return
+            seen.add(val)
+            candidates.append(val)
+
+        try:
+            id_file = _project_local_path(".data", "instance_id")
+            if ResilientFS.exists(id_file):
+                with ResilientFS.open(id_file, "r", encoding="utf-8") as fh:
+                    _add(fh.read().strip())
+        except Exception:
+            pass
+
+        try:
+            counts: Dict[str, int] = {}
+            for table in ("auto_mod_config", "auto_mod_schedule", "auto_mod_sources"):
+                for row in _local_select_rows(table, None):
+                    iid = str((row or {}).get("instance_id") or "").strip()
+                    if not iid or iid == self.instance_id:
+                        continue
+                    counts[iid] = counts.get(iid, 0) + 1
+            for iid, _ in sorted(counts.items(), key=lambda item: item[1], reverse=True):
+                _add(iid)
+        except Exception:
+            pass
+
+        self._cached_instance_fallback_ids = list(candidates[:5])
+        return list(self._cached_instance_fallback_ids)
 
     def _supabase_primary_storage(self) -> bool:
         try:
@@ -2599,6 +2650,22 @@ class AutoModDB:
             if result:
                 _config_cache[self.instance_id] = (now, result)
                 return result
+
+            for fallback_instance in self._instance_fallback_ids():
+                fallback_result = supabase_select_one(
+                    "auto_mod_config",
+                    "instance_id",
+                    fallback_instance,
+                    fallback_local=lambda iid=fallback_instance: _local_select_rows("auto_mod_config", {"instance_id": iid}),
+                )
+                if fallback_result:
+                    logger.warning(
+                        "⚠️ AutoMod config for instance '%s' not found; using fallback instance '%s'.",
+                        self.instance_id,
+                        fallback_instance,
+                    )
+                    _config_cache[self.instance_id] = (now, fallback_result)
+                    return fallback_result
             if return_none_if_missing:
                 return None
         except Exception as e:
@@ -2670,7 +2737,25 @@ class AutoModDB:
                 filters,
                 fallback_local=lambda: _local_select_rows("auto_mod_sources", filters),
             )
-            return result or []
+            if result:
+                return result
+
+            for fallback_instance in self._instance_fallback_ids():
+                fb_filters = dict(filters)
+                fb_filters["instance_id"] = fallback_instance
+                fb_result = supabase_select(
+                    "auto_mod_sources",
+                    fb_filters,
+                    fallback_local=lambda f=fb_filters: _local_select_rows("auto_mod_sources", f),
+                )
+                if fb_result:
+                    logger.warning(
+                        "⚠️ AutoMod sources for instance '%s' not found; using fallback instance '%s'.",
+                        self.instance_id,
+                        fallback_instance,
+                    )
+                    return fb_result
+            return []
         except Exception as e:
             logger.error(f"Failed to get sources: {e}")
             return []
@@ -2920,7 +3005,25 @@ class AutoModDB:
                 filters,
                 fallback_local=lambda: _local_select_rows("auto_mod_schedule", filters),
             )
-            return result[0] if result else None
+            if result:
+                return result[0]
+
+            for fallback_instance in self._instance_fallback_ids():
+                fb_filters = dict(filters)
+                fb_filters["instance_id"] = fallback_instance
+                fb_result = supabase_select(
+                    "auto_mod_schedule",
+                    fb_filters,
+                    fallback_local=lambda f=fb_filters: _local_select_rows("auto_mod_schedule", f),
+                )
+                if fb_result:
+                    logger.warning(
+                        "⚠️ AutoMod schedule lookup for instance '%s' used fallback instance '%s'.",
+                        self.instance_id,
+                        fallback_instance,
+                    )
+                    return fb_result[0]
+            return None
         except Exception as e:
             logger.error(f"Failed to get schedule: {e}")
             return None
@@ -2934,7 +3037,24 @@ class AutoModDB:
                 {"instance_id": self.instance_id},
                 fallback_local=lambda: _local_select_rows("auto_mod_schedule", {"instance_id": self.instance_id}),
             )
-            return result or []
+            if result:
+                return result
+
+            for fallback_instance in self._instance_fallback_ids():
+                fb_filters = {"instance_id": fallback_instance}
+                fb_result = supabase_select(
+                    "auto_mod_schedule",
+                    fb_filters,
+                    fallback_local=lambda f=fb_filters: _local_select_rows("auto_mod_schedule", f),
+                )
+                if fb_result:
+                    logger.warning(
+                        "⚠️ AutoMod schedules for instance '%s' not found; using fallback instance '%s'.",
+                        self.instance_id,
+                        fallback_instance,
+                    )
+                    return fb_result
+            return []
         except Exception as e:
             logger.error(f"Failed to get schedules: {e}")
             return []
@@ -5504,10 +5624,16 @@ class AutoModFetcher:
         enqueued_count = 0
         
         for schedule in active:
-            channel_id = schedule["channel_id"]
+            channel_id = str(schedule.get("channel_id") or "").strip()
+            if not channel_id:
+                continue
+            content_type = str(schedule.get("content_type") or "minecraft_mods")
+            agent_key = f"{channel_id}::{content_type}"
             
             # 1. Check if agent is already in queue or processing
-            if queue.is_agent_busy_or_queued(channel_id):
+            # Compatibility: also check legacy key (channel_id only) to avoid duplicate
+            # processing while older queue rows still use the previous format.
+            if queue.is_agent_busy_or_queued(agent_key) or queue.is_agent_busy_or_queued(channel_id):
                 continue
                 
             # 2. Check time and limits
@@ -5518,11 +5644,11 @@ class AutoModFetcher:
                 
             # 3. Add to queue
             queue.add_job(
-                agent_id=channel_id,
+                agent_id=agent_key,
                 task_type="process_schedule",
                 payload={
                     "channel_id": channel_id,
-                    "content_type": schedule.get("content_type", "minecraft_mods"),
+                    "content_type": content_type,
                     "force": True # Worker execution is always "forced" in terms of bypassing time checks again, or we re-check inside? run_cycle checks again.
                 }
             )
@@ -5530,6 +5656,11 @@ class AutoModFetcher:
             
         if enqueued_count > 0:
             logger.info(f"🗓️ Scheduled {enqueued_count} jobs.")
+            if notify_func:
+                try:
+                    await notify_func(f"🗓️ تم جدولة {enqueued_count} مهمة جديدة للمعالجة.")
+                except Exception:
+                    pass
             
         return {"status": "ok", "enqueued": enqueued_count}
 
@@ -6921,8 +7052,8 @@ class AutoModFetcher:
 
 
 def _normalize_auto_fetch_loop_config(config: Any, default_interval_seconds: int) -> Dict[str, Any]:
-    # Increased default fallback to 15 minutes (900s) on Render to ensure stability
-    safe_default = max(300, int(default_interval_seconds or 900))
+    # Keep a safe lower bound but allow short polling intervals when user configures them.
+    safe_default = max(30, int(default_interval_seconds or 60))
     if not isinstance(config, dict):
         return {
             "auto_fetch_enabled": True,
@@ -6936,8 +7067,17 @@ def _normalize_auto_fetch_loop_config(config: Any, default_interval_seconds: int
         interval = safe_default
 
     normalized["auto_fetch_enabled"] = bool(normalized.get("auto_fetch_enabled", True))
-    normalized["auto_fetch_interval_seconds"] = max(300, interval)
+    normalized["auto_fetch_interval_seconds"] = max(30, interval)
     return normalized
+
+
+def _auto_mod_loop_min_sleep_seconds(default_seconds: int = 60) -> int:
+    try:
+        raw = (os.getenv("AUTO_MOD_MIN_LOOP_SLEEP_SECONDS", str(default_seconds)) or str(default_seconds)).strip()
+        value = int(float(raw))
+    except Exception:
+        value = default_seconds
+    return max(10, value)
 
 
 def _compute_loop_sleep_seconds(loop_started_monotonic: float, interval_seconds: int) -> int:
@@ -7088,12 +7228,14 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
         # استخراج الفاصل الزمني من الإعدادات (مع قابلية للتحديث الديناميكي)
         interval_seconds = _normalize_auto_fetch_loop_config(config, interval_seconds).get("auto_fetch_interval_seconds", 600)
         
-        # Enforce a minimum wait of 5 minutes between cycles regardless of the interval setting
-        # This is a safety buffer for Render's limited resources.
         sleep_duration = _compute_loop_sleep_seconds(loop_started_monotonic, interval_seconds)
-        rendered_sleep = max(300, sleep_duration) 
+        min_loop_sleep = _auto_mod_loop_min_sleep_seconds()
+        rendered_sleep = max(min_loop_sleep, sleep_duration)
         
-        logger.info(f"💤 [AutoMod] Next cycle in {rendered_sleep}s (Schedule: {interval_seconds}s, Minimum Cooldown: 300s)")
+        logger.info(
+            f"💤 [AutoMod] Next cycle in {rendered_sleep}s "
+            f"(Schedule: {interval_seconds}s, Minimum Cooldown: {min_loop_sleep}s)"
+        )
         await asyncio.sleep(rendered_sleep)
 
 

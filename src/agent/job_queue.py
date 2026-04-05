@@ -46,6 +46,35 @@ class JobQueue:
     def _now_ts(self) -> float:
         return time.time()
 
+    @staticmethod
+    def _local_jobs_column_types(conn) -> Dict[str, str]:
+        try:
+            rows = conn.execute("PRAGMA table_info(jobs)").fetchall()
+            result: Dict[str, str] = {}
+            for row in rows or []:
+                # row format: (cid, name, type, notnull, dflt_value, pk)
+                if len(row) >= 3:
+                    result[str(row[1]).strip().lower()] = str(row[2] or "").strip().lower()
+            return result
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _coerce_time_for_column(iso_value: str, column_type: str):
+        ctype = str(column_type or "").lower()
+        if any(token in ctype for token in ("int", "real", "float", "double", "numeric", "decimal")):
+            try:
+                dt = datetime.fromisoformat(str(iso_value).replace("Z", "+00:00"))
+                return dt.timestamp()
+            except Exception:
+                return time.time()
+        return iso_value
+
+    @staticmethod
+    def _supabase_mirror_enabled() -> bool:
+        raw = (os.environ.get("JOB_QUEUE_SUPABASE_MIRROR") or "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
     def add_job(self, agent_id: str, task_type: str, payload: Dict[str, Any]) -> str:
         job_id = str(uuid.uuid4())
         now = self._now_iso()
@@ -59,18 +88,23 @@ class JobQueue:
             "updated_at": now,
             "error_msg": None,
         }
-        if _use_supabase():
-            try:
-                _supabase_upsert("job_queue", record, key_field="id")
-                logger.info(f"📥 Job added to Supabase: {job_id} (Agent: {agent_id})")
-                return job_id
-            except Exception as e:
-                logger.error(f"Failed to add job to Supabase: {e}")
-        
-        self._add_job_local(record)
-        return job_id
 
-    def _add_job_local(self, record: dict):
+        # Local queue is the primary execution source for reliability.
+        local_job_id = self._add_job_local(record)
+
+        # Optional Supabase mirror (disabled by default).
+        if self._supabase_mirror_enabled() and _use_supabase():
+            try:
+                mirror_record = dict(record)
+                mirror_record["id"] = str(local_job_id or job_id)
+                _supabase_upsert("job_queue", mirror_record, key_field="id")
+                logger.info(f"📥 Job mirrored to Supabase: {mirror_record['id']} (Agent: {agent_id})")
+            except Exception as e:
+                logger.error(f"Failed to mirror job to Supabase: {e}")
+
+        return str(local_job_id or job_id)
+
+    def _add_job_local(self, record: dict) -> Optional[str]:
         try:
             import sqlite3
             from pathlib import Path
@@ -91,20 +125,62 @@ class JobQueue:
                         error_msg TEXT
                     )
                 """)
-                conn.execute(
-                    "INSERT INTO jobs (id, agent_id, task_type, payload, status, created_at, updated_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (record["id"], record["agent_id"], record["task_type"], record["payload"],
-                     record["status"], record["created_at"], record["updated_at"], record["error_msg"])
-                )
+                column_types = self._local_jobs_column_types(conn)
+                created_val = self._coerce_time_for_column(record["created_at"], column_types.get("created_at", "text"))
+                updated_val = self._coerce_time_for_column(record["updated_at"], column_types.get("updated_at", "text"))
+
+                id_type = column_types.get("id", "text")
+                if "int" in id_type:
+                    cursor = conn.execute(
+                        "INSERT INTO jobs (agent_id, task_type, payload, status, created_at, updated_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record["agent_id"],
+                            record["task_type"],
+                            record["payload"],
+                            record["status"],
+                            created_val,
+                            updated_val,
+                            record["error_msg"],
+                        )
+                    )
+                    local_job_id = str(cursor.lastrowid)
+                else:
+                    conn.execute(
+                        "INSERT INTO jobs (id, agent_id, task_type, payload, status, created_at, updated_at, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record["id"],
+                            record["agent_id"],
+                            record["task_type"],
+                            record["payload"],
+                            record["status"],
+                            created_val,
+                            updated_val,
+                            record["error_msg"],
+                        )
+                    )
+                    local_job_id = str(record["id"])
                 conn.commit()
-                logger.info(f"📥 Job added locally: {record['id']}")
+                logger.info(f"📥 Job added locally: {local_job_id}")
+                return local_job_id
         except Exception as e:
             logger.error(f"Failed to add job locally: {e}")
+            return None
 
     def get_next_job(self) -> Optional[Dict[str, Any]]:
+        """
+        جلب المهمة التالية مع local-first strategy.
+
+        المحلي هو المصدر الأساسي للتنفيذ؛ وSupabase مجرد mirror اختياري.
+        """
+        local_job = self._get_next_job_local()
+        if local_job:
+            return local_job
+
         if _use_supabase():
-            return self._get_next_job_supabase()
-        return self._get_next_job_local()
+            job = self._get_next_job_supabase()
+            if job:
+                return job
+        return None
 
     def _get_next_job_supabase(self) -> Optional[Dict[str, Any]]:
         try:
@@ -167,6 +243,42 @@ class JobQueue:
             logger.error(f"Failed to get local job: {e}")
             return None
 
+    def _get_pending_count_local(self) -> int:
+        try:
+            import sqlite3
+            from pathlib import Path
+            from .config import get_project_root
+
+            db_path = Path(get_project_root()) / ".data" / "job_queue.db"
+            if not db_path.exists():
+                return 0
+
+            with sqlite3.connect(str(db_path), timeout=30.0) as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'pending'")
+                row = cursor.fetchone()
+                return int(row[0] if row else 0)
+        except Exception:
+            return 0
+
+    def _is_agent_busy_or_queued_local(self, agent_id: str) -> bool:
+        try:
+            import sqlite3
+            from pathlib import Path
+            from .config import get_project_root
+
+            db_path = Path(get_project_root()) / ".data" / "job_queue.db"
+            if not db_path.exists():
+                return False
+
+            with sqlite3.connect(str(db_path), timeout=30.0) as conn:
+                cursor = conn.execute(
+                    "SELECT id FROM jobs WHERE agent_id = ? AND status IN ('pending', 'processing') LIMIT 1",
+                    (agent_id,),
+                )
+                return cursor.fetchone() is not None
+        except Exception:
+            return False
+
     def complete_job(self, job_id: str):
         now = self._now_iso()
         if _use_supabase():
@@ -179,7 +291,6 @@ class JobQueue:
                         "updated_at": now,
                     }).eq("id", job_id).execute()
                     logger.info(f"✅ Job completed (Supabase): {job_id}")
-                    return
             except Exception as e:
                 logger.error(f"Failed to complete job on Supabase: {e}")
         self._update_job_local(job_id, "completed", now)
@@ -197,7 +308,6 @@ class JobQueue:
                         "updated_at": now,
                     }).eq("id", job_id).execute()
                     logger.error(f"❌ Job failed (Supabase): {job_id} - {error_msg}")
-                    return
             except Exception as e:
                 logger.error(f"Failed to fail job on Supabase: {e}")
         self._update_job_local(job_id, "failed", now, error_msg)
@@ -242,7 +352,6 @@ class JobQueue:
                     count = len(result.data) if result.data else 0
                     if count > 0:
                         logger.warning(f"⚠️ Reset {count} stuck jobs (Supabase)")
-                    return
             except Exception as e:
                 logger.error(f"Failed to reset stuck jobs on Supabase: {e}")
         
@@ -274,7 +383,6 @@ class JobQueue:
                 if client:
                     threshold = (datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)).isoformat()
                     client.table("job_queue").delete().in_("status", ["completed", "failed"]).lt("updated_at", threshold).execute()
-                    return
             except Exception as e:
                 logger.error(f"Failed to cleanup Supabase jobs: {e}")
         
@@ -294,25 +402,35 @@ class JobQueue:
             logger.error(f"Failed to cleanup local jobs: {e}")
 
     def get_pending_count(self) -> int:
+        supabase_count = 0
         if _use_supabase():
             try:
                 from .supabase_client import _get_supabase
                 client = _get_supabase()
                 if client:
                     result = client.table("job_queue").select("id", count="exact").eq("status", "pending").execute()
-                    return result.count or 0
+                    supabase_count = result.count or 0
             except Exception:
-                pass
-        return 0
+                supabase_count = 0
+
+        local_count = self._get_pending_count_local()
+        return int(supabase_count) + int(local_count)
 
     def is_agent_busy_or_queued(self, agent_id: str) -> bool:
+        if self._is_agent_busy_or_queued_local(agent_id):
+            return True
+
+        supabase_busy = False
         if _use_supabase():
             try:
                 from .supabase_client import _get_supabase
                 client = _get_supabase()
                 if client:
                     result = client.table("job_queue").select("id").eq("agent_id", agent_id).in_("status", ["pending", "processing"]).limit(1).execute()
-                    return bool(result.data)
+                    supabase_busy = bool(result.data)
             except Exception:
-                pass
+                supabase_busy = False
+
+        if supabase_busy:
+            return True
         return False
