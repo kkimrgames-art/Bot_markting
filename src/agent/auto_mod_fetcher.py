@@ -380,13 +380,22 @@ def _auto_mod_instance_fallback_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def _processing_lock_stale_minutes(default_minutes: int = 90) -> int:
+def _processing_lock_stale_minutes(default_minutes: int = 30) -> int:
     try:
         raw = (os.getenv("AUTO_MOD_PROCESSING_STALE_MINUTES", str(default_minutes)) or str(default_minutes)).strip()
         minutes = int(float(raw))
     except Exception:
         minutes = default_minutes
     return max(5, minutes)
+
+
+def _inter_agent_cooldown_seconds(default_seconds: int = 300) -> int:
+    try:
+        raw = (os.getenv("AUTO_MOD_INTER_AGENT_COOLDOWN_SECONDS", str(default_seconds)) or str(default_seconds)).strip()
+        seconds = int(float(raw))
+    except Exception:
+        seconds = default_seconds
+    return max(0, seconds)
 
 
 def _should_force_reset_processing_on_boot() -> bool:
@@ -3373,6 +3382,22 @@ class AutoModDB:
             logger.error(f"Failed to count published today: {e}")
             return 0
 
+    def get_last_global_publish_at(self) -> Optional[datetime]:
+        """آخر وقت نشر ناجح عبر جميع جداول النشر لهذه النسخة."""
+        try:
+            schedules = self.get_all_schedules()
+            latest_dt: Optional[datetime] = None
+            for sch in schedules:
+                dt = _parse_datetime_utc((sch or {}).get("last_publish_at"))
+                if not dt:
+                    continue
+                if latest_dt is None or dt > latest_dt:
+                    latest_dt = dt
+            return latest_dt
+        except Exception as e:
+            logger.debug(f"Failed to read last global publish timestamp: {e}")
+            return None
+
     def update_next_publish_after_attempt(self, channel_id: str, content_type: str = "minecraft_mods", *, published: bool) -> bool:
         try:
             from src.agent.supabase_client import supabase_upsert
@@ -3463,7 +3488,58 @@ class AutoModDB:
         """توافقاً مع السلوك الجديد: يعتبر الفيديو منتهياً فقط إذا كان منشوراً"""
         return self.is_video_published(source_video_id, channel_id)
 
-    def get_video_process_record(self, source_video_id: str, channel_id: str) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _process_record_sort_key(rec: Dict[str, Any]) -> Tuple[float, int]:
+        dt = _parse_datetime_utc((rec or {}).get("updated_at"))
+        ts = float(dt.timestamp()) if dt else 0.0
+        status = str((rec or {}).get("status") or "").strip().lower()
+        rank = {"processing": 3, "published": 2, "failed": 1}.get(status, 0)
+        return ts, rank
+
+    @staticmethod
+    def _resolve_effective_state(records: List[Dict[str, Any]]) -> Tuple[Optional[str], Optional[datetime]]:
+        if not records:
+            return None, None
+
+        processing_records: List[Dict[str, Any]] = []
+        terminal_records: List[Dict[str, Any]] = []
+        for rec in records:
+            status = (rec.get("status") or "").strip().lower()
+            if status == "processing":
+                processing_records.append(rec)
+            elif status in {"published", "failed"}:
+                terminal_records.append(rec)
+
+        def _latest(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if not items:
+                return None
+            items.sort(key=AutoModDB._process_record_sort_key, reverse=True)
+            return items[0]
+
+        latest_processing = _latest(processing_records)
+        latest_terminal = _latest(terminal_records)
+
+        if latest_processing and latest_terminal:
+            p_dt = _parse_datetime_utc(latest_processing.get("updated_at"))
+            t_dt = _parse_datetime_utc(latest_terminal.get("updated_at"))
+            if p_dt and t_dt and t_dt >= p_dt:
+                chosen = latest_terminal
+            elif t_dt and not p_dt:
+                chosen = latest_terminal
+            else:
+                chosen = latest_processing
+        else:
+            chosen = latest_processing or latest_terminal
+
+        if not chosen:
+            records.sort(key=AutoModDB._process_record_sort_key, reverse=True)
+            chosen = records[0]
+
+        status = (chosen.get("status") or "").strip().lower() or None
+        updated_at = _parse_datetime_utc(chosen.get("updated_at"))
+        return status, updated_at
+
+    def _fetch_video_process_records(self, source_video_id: str, channel_id: str) -> List[Dict[str, Any]]:
         try:
             from .supabase_client import supabase_select
             records = supabase_select("auto_mod_processed", {
@@ -3473,18 +3549,23 @@ class AutoModDB:
                 "source_video_id": source_video_id,
                 "channel_id": channel_id,
             }))
-            if not records:
-                return None
-            return records[0]
+            return [dict(rec) for rec in (records or []) if isinstance(rec, dict)]
         except Exception as e:
-            logger.error(f"Failed to check processed: {e}")
+            logger.error(f"Failed to fetch process records: {e}")
+            return []
+
+    def get_video_process_record(self, source_video_id: str, channel_id: str) -> Optional[Dict[str, Any]]:
+        records = self._fetch_video_process_records(source_video_id, channel_id)
+        if not records:
             return None
+        records.sort(key=self._process_record_sort_key, reverse=True)
+        return records[0]
 
     def get_video_process_state(self, source_video_id: str, channel_id: str) -> Tuple[Optional[str], Optional[datetime]]:
-        rec = self.get_video_process_record(source_video_id, channel_id) or {}
-        status = (rec.get("status") or "").strip().lower() or None
-        updated_at = _parse_datetime_utc(rec.get("updated_at"))
-        return status, updated_at
+        records = self._fetch_video_process_records(source_video_id, channel_id)
+        if not records:
+            return None, None
+        return self._resolve_effective_state(records)
 
     def is_video_published(self, source_video_id: str, channel_id: str) -> bool:
         status, _ = self.get_video_process_state(source_video_id, channel_id)
@@ -3506,15 +3587,18 @@ class AutoModDB:
                                content_type: str = "minecraft_mods", title: str = "") -> bool:
         """تسجيل فيديو كقيد المعالجة (لمنع التعارض)"""
         try:
-            from src.agent.supabase_client import supabase_upsert
+            from src.agent.supabase_client import supabase_upsert, supabase_delete
+            existing_records = self._fetch_video_process_records(source_video_id, channel_id)
+            existing_records.sort(key=self._process_record_sort_key, reverse=True)
+            existing = existing_records[0] if existing_records else {}
             payload = {
-                "id": str(uuid.uuid4()),
-                "instance_id": self.instance_id,
+                "id": existing.get("id", str(uuid.uuid4())),
+                "instance_id": existing.get("instance_id", self.instance_id),
                 "source_video_id": source_video_id,
                 "channel_id": channel_id,
-                "content_type": content_type,
+                "content_type": content_type or existing.get("content_type") or "minecraft_mods",
                 "status": "processing",
-                "title": title,
+                "title": title or existing.get("title", ""),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             _local_upsert_row(
@@ -3540,6 +3624,20 @@ class AutoModDB:
                     f"Failed to persist processing claim for video={source_video_id[:20]}... channel={channel_id[:10]}..."
                 )
                 return False
+
+            # تنظيف أي صفوف مكررة قديمة لنفس الفيديو/القناة
+            for rec in existing_records[1:]:
+                dup_id = rec.get("id")
+                if not dup_id or dup_id == payload["id"]:
+                    continue
+                _local_delete_row("auto_mod_processed", "id", dup_id)
+                supabase_delete(
+                    "auto_mod_processed",
+                    "id",
+                    dup_id,
+                    fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
+                )
+
             self._clear_cache()
             return True
         except Exception as e:
@@ -3550,15 +3648,10 @@ class AutoModDB:
                                     *, status: str, youtube_url: str = "",
                                     error_message: str = "") -> bool:
         try:
-            from src.agent.supabase_client import supabase_select, supabase_upsert
+            from src.agent.supabase_client import supabase_upsert, supabase_delete
 
-            records = supabase_select("auto_mod_processed", {
-                "source_video_id": source_video_id,
-                "channel_id": channel_id,
-            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
-                "source_video_id": source_video_id,
-                "channel_id": channel_id,
-            }))
+            records = self._fetch_video_process_records(source_video_id, channel_id)
+            records.sort(key=self._process_record_sort_key, reverse=True)
             rec = records[0] if records else {}
 
             if not rec:
@@ -3602,6 +3695,19 @@ class AutoModDB:
                 )
                 return False
 
+            # إزالة الصفوف المكررة القديمة لنفس الفيديو/القناة
+            for dup in records[1:]:
+                dup_id = dup.get("id")
+                if not dup_id or dup_id == payload["id"]:
+                    continue
+                _local_delete_row("auto_mod_processed", "id", dup_id)
+                supabase_delete(
+                    "auto_mod_processed",
+                    "id",
+                    dup_id,
+                    fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
+                )
+
             self._clear_cache()
             return True
         except Exception as e:
@@ -3631,27 +3737,29 @@ class AutoModDB:
     def release_video_processing(self, source_video_id: str, channel_id: str) -> bool:
         """تحرير قفل المعالجة عند الإيقاف الآمن قبل الوصول إلى حالة نهائية."""
         try:
-            from src.agent.supabase_client import supabase_select, supabase_delete
+            from src.agent.supabase_client import supabase_delete
 
-            records = supabase_select("auto_mod_processed", {
-                "source_video_id": source_video_id,
-                "channel_id": channel_id,
-            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
-                "source_video_id": source_video_id,
-                "channel_id": channel_id,
-            }))
-            rec = records[0] if records else None
-            if not rec:
+            records = self._fetch_video_process_records(source_video_id, channel_id)
+            if not records:
                 return True
-            if (rec.get("status") or "").strip().lower() != "processing":
+
+            removed = 0
+            for rec in records:
+                if (rec.get("status") or "").strip().lower() != "processing":
+                    continue
+                rec_id = rec.get("id")
+                if not rec_id:
+                    continue
+                _local_delete_row("auto_mod_processed", "id", rec_id)
+                supabase_delete(
+                    "auto_mod_processed",
+                    "id",
+                    rec_id,
+                    fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
+                )
+                removed += 1
+            if removed == 0:
                 return True
-            _local_delete_row("auto_mod_processed", "id", rec["id"])
-            supabase_delete(
-                "auto_mod_processed",
-                "id",
-                rec["id"],
-                fallback_local=lambda key: _local_delete_row("auto_mod_processed", "id", key),
-            )
             self._clear_cache()
             return True
         except Exception as e:
@@ -3661,18 +3769,12 @@ class AutoModDB:
     def touch_video_processing(self, source_video_id: str, channel_id: str) -> bool:
         """تحديث نبضة فيديو قيد المعالجة لمنع اعتباره متوقفاً أثناء مهام FFmpeg الطويلة."""
         try:
-            from src.agent.supabase_client import supabase_select, supabase_upsert
-            records = supabase_select("auto_mod_processed", {
-                "source_video_id": source_video_id,
-                "channel_id": channel_id,
-            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
-                "source_video_id": source_video_id,
-                "channel_id": channel_id,
-            }))
+            from src.agent.supabase_client import supabase_upsert
+            records = self._fetch_video_process_records(source_video_id, channel_id)
+            records = [rec for rec in records if (rec.get("status") or "").strip().lower() == "processing"]
+            records.sort(key=self._process_record_sort_key, reverse=True)
             rec = records[0] if records else None
             if not rec:
-                return False
-            if (rec.get("status") or "").strip().lower() != "processing":
                 return False
             rec["updated_at"] = datetime.now(timezone.utc).isoformat()
             _local_upsert_row(
@@ -3743,6 +3845,89 @@ class AutoModDB:
         except Exception as e:
             logger.error(f"Failed to reset stale processing: {e}")
             return 0
+
+    def has_active_processing_lock(self, channel_id: str, content_type: Optional[str] = None, *, stale_minutes: Optional[int] = None) -> bool:
+        """هل توجد مهمة معالجة نشطة حالياً لهذه القناة/النوع؟"""
+        try:
+            from .supabase_client import supabase_select
+
+            cid = str(channel_id or "").strip()
+            if not cid:
+                return False
+            ctype = str(content_type or "").strip().lower()
+            active_minutes = _processing_lock_stale_minutes() if stale_minutes is None else max(5, int(stale_minutes))
+            now_utc = datetime.now(timezone.utc)
+
+            records = supabase_select("auto_mod_processed", {
+                "channel_id": cid,
+            }, fallback_local=lambda: _local_select_rows("auto_mod_processed", {
+                "channel_id": cid,
+            })) or []
+
+            valid_instance_ids = {self.instance_id}
+            for fb_iid in self._instance_fallback_ids():
+                valid_instance_ids.add(str(fb_iid or "").strip())
+
+            by_video: Dict[str, List[Dict[str, Any]]] = {}
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                rec_iid = str((rec or {}).get("instance_id") or "").strip()
+                if rec_iid and rec_iid not in valid_instance_ids:
+                    continue
+                rec_ctype = str((rec or {}).get("content_type") or "").strip().lower()
+                if ctype and rec_ctype and rec_ctype != ctype:
+                    continue
+                vid = str((rec or {}).get("source_video_id") or "").strip()
+                if not vid:
+                    continue
+                by_video.setdefault(vid, []).append(rec)
+
+            for vid, group in by_video.items():
+                status, updated_at = self._resolve_effective_state(group)
+                if status != "processing":
+                    continue
+
+                lock_content_type = ctype
+                if not lock_content_type:
+                    for rec in group:
+                        rec_ctype = str((rec or {}).get("content_type") or "").strip().lower()
+                        if rec_ctype:
+                            lock_content_type = rec_ctype
+                            break
+
+                agent_key = f"{cid}::{lock_content_type or 'minecraft_mods'}"
+                queue_busy = True
+                try:
+                    from src.agent.job_queue import JobQueue
+
+                    jq = JobQueue()
+                    queue_busy = bool(jq.is_agent_busy_or_queued(agent_key) or jq.is_agent_busy_or_queued(cid))
+                except Exception:
+                    queue_busy = True
+
+                if not queue_busy:
+                    logger.warning(
+                        "🧹 Detected orphan processing lock (no active queue job). Releasing lock for video=%s channel=%s",
+                        vid[:20],
+                        cid[:10],
+                    )
+                    with suppress(Exception):
+                        self.release_video_processing(vid, cid)
+                    continue
+
+                if not updated_at:
+                    logger.info("⏸️ Active lock detected without timestamp for video=%s", vid[:20])
+                    return True
+                try:
+                    if (now_utc - updated_at) <= timedelta(minutes=active_minutes):
+                        return True
+                except Exception:
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"Failed active-processing-lock check: {e}")
+            return False
 
     def get_stats(self, use_cache: bool = True) -> Dict[str, Any]:
         """إحصائيات النظام"""
@@ -5783,6 +5968,26 @@ class AutoModFetcher:
 
         schedules = self.db.get_all_schedules()
         active = [s for s in schedules if s.get("enabled")]
+        inter_agent_cooldown = _inter_agent_cooldown_seconds()
+        if inter_agent_cooldown > 0:
+            last_global_publish = self.db.get_last_global_publish_at()
+            if last_global_publish:
+                now_utc = datetime.now(timezone.utc)
+                elapsed = (now_utc - last_global_publish).total_seconds()
+                if elapsed < inter_agent_cooldown:
+                    remaining = max(1, int(inter_agent_cooldown - elapsed))
+                    logger.info(
+                        "⏳ Global inter-agent cooldown active (%ss remaining). Scheduling deferred.",
+                        remaining,
+                    )
+                    if notify_func:
+                        try:
+                            await notify_func(
+                                f"⏳ تبريد بين الوكلاء نشط، سيتم تأجيل الجدولة لمدة `{remaining}` ثانية بعد آخر نشر ناجح."
+                            )
+                        except Exception:
+                            pass
+                    return {"status": "cooldown", "enqueued": 0, "cooldown_remaining_seconds": remaining}
         
         queue = JobQueue()
         enqueued_count = 0
@@ -5793,6 +5998,14 @@ class AutoModFetcher:
                 continue
             content_type = str(schedule.get("content_type") or "minecraft_mods")
             agent_key = f"{channel_id}::{content_type}"
+
+            if self.db.has_active_processing_lock(channel_id, content_type):
+                logger.info(
+                    "⏸️ Schedule deferred: active processing lock exists (channel=%s, content_type=%s)",
+                    channel_id[:10],
+                    content_type,
+                )
+                continue
             
             # 1. Check if agent is already in queue or processing
             # Compatibility: also check legacy key (channel_id only) to avoid duplicate
