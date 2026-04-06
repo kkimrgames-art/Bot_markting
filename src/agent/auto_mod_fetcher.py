@@ -65,6 +65,54 @@ class _VideoDurationExceeded(Exception):
 
 # ==================== Processing State (استئناف بعد إعادة التشغيل) ====================
 _PROCESSING_STATE_FILE = _project_local_path(".temp", "processing_state.json")
+_RECOVERY_HINTS: Dict[str, Dict[str, Any]] = {}
+_RECOVERY_HINT_TTL_SECONDS = 3 * 3600
+
+
+def _recovery_hint_key(channel_id: str, content_type: str = "") -> str:
+    return f"{str(channel_id or '').strip()}::{str(content_type or '').strip().lower() or '*'}"
+
+
+def _set_recovery_hint(channel_id: str, video_id: str, content_type: str = "") -> None:
+    cid = str(channel_id or "").strip()
+    vid = str(video_id or "").strip()
+    if not cid or not vid:
+        return
+    key = _recovery_hint_key(cid, content_type)
+    _RECOVERY_HINTS[key] = {
+        "video_id": vid,
+        "channel_id": cid,
+        "content_type": str(content_type or "").strip().lower(),
+        "ts": time.time(),
+    }
+
+
+def _get_recovery_hint_video_id(channel_id: str, content_type: str = "") -> str:
+    cid = str(channel_id or "").strip()
+    if not cid:
+        return ""
+    now = time.time()
+    keys_to_try = [
+        _recovery_hint_key(cid, content_type),
+        _recovery_hint_key(cid, "*"),
+    ]
+    for key in keys_to_try:
+        item = _RECOVERY_HINTS.get(key) or {}
+        if not item:
+            continue
+        if (now - float(item.get("ts") or 0)) > _RECOVERY_HINT_TTL_SECONDS:
+            _RECOVERY_HINTS.pop(key, None)
+            continue
+        return str(item.get("video_id") or "").strip()
+    return ""
+
+
+def _clear_recovery_hint(channel_id: str, content_type: str = "") -> None:
+    cid = str(channel_id or "").strip()
+    if not cid:
+        return
+    _RECOVERY_HINTS.pop(_recovery_hint_key(cid, content_type), None)
+    _RECOVERY_HINTS.pop(_recovery_hint_key(cid, "*"), None)
 
 
 def _save_processing_state(video_id: str, channel_id: str, stage: str, **extra) -> None:
@@ -97,6 +145,29 @@ def _clear_processing_state() -> None:
 
 def _load_interrupted_processing_state() -> Optional[Dict[str, Any]]:
     """تحميل حالة معالجة متوقفة (إن وجدت) بعد إعادة تشغيل البوت."""
+    def _pid_still_alive(pid: int) -> bool:
+        try:
+            p = int(pid or 0)
+        except Exception:
+            return False
+        if p <= 0:
+            return False
+        try:
+            if os.name == "nt":
+                import subprocess
+
+                res = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {p}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                return str(p) in (res.stdout or "")
+            os.kill(p, 0)
+            return True
+        except Exception:
+            return False
+
     try:
         if not os.path.exists(_PROCESSING_STATE_FILE):
             return None
@@ -106,16 +177,17 @@ def _load_interrupted_processing_state() -> Optional[Dict[str, Any]]:
         saved_pid = state.get("pid", 0)
         if saved_pid == os.getpid():
             return None  # نفس العملية = ما زالت قيد التشغيل
+        if _pid_still_alive(saved_pid):
+            return None  # العملية الأصلية ما زالت حيّة
         return state
     except Exception:
         return None
 
 
 def _recover_interrupted_processing() -> None:
-    """فحص واستعادة فيديوهات كانت قيد المعالجة عند إعادة تشغيل البوت.
-    
-    يعيد تعيين الفيديو كـ 'new' في قاعدة البيانات حتى تتم إعادة محاولته
-    في الدورة القادمة بدلاً من فقدانه.
+    """فحص فيديو متوقف بعد إعادة التشغيل ووضع تلميح استرجاع له.
+
+    لا نعيد تعيين حالة DB مباشرة هنا لتجنب تجاوز فيديو كان فعلاً قيد المعالجة.
     """
     state = _load_interrupted_processing_state()
     if not state:
@@ -133,22 +205,31 @@ def _recover_interrupted_processing() -> None:
         video_id, channel_id[:20], stage, age_seconds,
     )
     
-    # إعادة تعيين حالة الفيديو في قاعدة البيانات
+    # لا نعيد تعيين حالة DB هنا تلقائياً.
+    # وجود status=processing هو صمام أمان لمنع اختيار فيديو جديد بينما الفيديو السابق لم يُحسم.
+    # فقط نضع تلميح استرجاع لترتيب نفس الفيديو أولاً إذا ظهر في نتائج الجلب.
     try:
-        from src.agent.supabase_client import get_supabase_client
-        sb = get_supabase_client()
-        if sb:
-            # إعادة تعيين الحالة إلى None (جديد) حتى يتم إعادة محاولته
-            sb.table("auto_mod_processed").upsert({
-                "video_id": str(video_id),
-                "status": None,  # إعادة تعيين كفيديو جديد
-            }, on_conflict="video_id").execute()
+        content_type = str(state.get("content_type") or "").strip().lower()
+        if str(video_id or "").strip() and str(channel_id or "").strip() and str(channel_id) != "?":
+            _set_recovery_hint(str(channel_id), str(video_id), content_type)
             logger.info(
-                "✅ [Recovery] Reset video %s status to 'new' — will be retried next cycle.",
-                video_id,
+                "🧠 [Recovery] Added interrupted video hint (video=%s, channel=%s, content_type=%s)",
+                str(video_id)[:20],
+                str(channel_id)[:20],
+                content_type or "*",
             )
+            try:
+                db = AutoModDB(get_instance_id())
+                if db.release_video_processing(str(video_id), str(channel_id)):
+                    logger.info(
+                        "🔓 [Recovery] Released interrupted processing lock for video=%s channel=%s",
+                        str(video_id)[:20],
+                        str(channel_id)[:20],
+                    )
+            except Exception as rel_err:
+                logger.warning(f"⚠️ [Recovery] Failed to release interrupted lock: {rel_err}")
     except Exception as e:
-        logger.warning(f"⚠️ [Recovery] Failed to reset video status: {e}")
+        logger.warning(f"⚠️ [Recovery] Failed to set interrupted hint: {e}")
     
     # تنظيف الملفات المؤقتة المتبقية
     try:
@@ -309,7 +390,7 @@ def _processing_lock_stale_minutes(default_minutes: int = 90) -> int:
 
 
 def _should_force_reset_processing_on_boot() -> bool:
-    raw = (os.getenv("AUTO_MOD_FORCE_RESET_PROCESSING_ON_BOOT", "true") or "true").strip().lower()
+    raw = (os.getenv("AUTO_MOD_FORCE_RESET_PROCESSING_ON_BOOT", "false") or "false").strip().lower()
     force_reset = raw in {"1", "true", "yes", "on"}
     multi_instance_raw = (os.getenv("AUTOMODBOT_ALLOW_MULTI_INSTANCE", "") or "").strip().lower()
     multi_instance = multi_instance_raw in {"1", "true", "yes", "on"}
@@ -5562,6 +5643,7 @@ class AutoModFetcher:
                 channel_id=getattr(self, '_current_channel_id', '') or '',
                 stage="process_video_start",
                 video_type=video_type,
+                content_type=getattr(self, '_current_content_type', '') or '',
                 input_path=input_path,
             )
 
@@ -5601,6 +5683,7 @@ class AutoModFetcher:
                     channel_id=getattr(self, '_current_channel_id', '') or '',
                     stage="shorts_encoding",
                     video_type=video_type,
+                    content_type=getattr(self, '_current_content_type', '') or '',
                 )
                 loop = asyncio.get_running_loop()
                 try:
@@ -5908,6 +5991,8 @@ class AutoModFetcher:
             for sch_idx, schedule in enumerate(active, 1):
                 channel_id = schedule["channel_id"]
                 content_type = schedule.get("content_type", "minecraft_mods")
+                recovery_hint_video_id = _get_recovery_hint_video_id(channel_id, content_type)
+                recovery_hint_enforced = bool(recovery_hint_video_id) and not preview_mode and not approved_target_resume
                 schedule_force = bool(force)
                 if schedule_force and (target_channel_id or target_content_type):
                     if target_channel_id and channel_id != target_channel_id:
@@ -6086,6 +6171,8 @@ class AutoModFetcher:
                                 for idx, s_range in enumerate(search_ranges):
                                     if found_new_video:
                                         break
+                                    if schedule_done:
+                                        break
 
                                     await _notify(
                                         f"🔎 *جلب فيديوهات من:* `{fetch_name}` (النطاق: {s_range}, الترتيب: {fetch_order})\n"
@@ -6171,6 +6258,23 @@ class AutoModFetcher:
                                         potential_videos.append(v)
 
                                     logger.info(f"🔎 [AutoMod-Debug] potential_videos count BEFORE filters: {len(potential_videos)}")
+
+                                    if recovery_hint_enforced and potential_videos:
+                                        preferred = [item for item in potential_videos if str(item.get("id", "")) == recovery_hint_video_id]
+                                        if preferred:
+                                            potential_videos = preferred + [item for item in potential_videos if str(item.get("id", "")) != recovery_hint_video_id]
+                                            logger.info(
+                                                "🔁 [Recovery] Prioritized interrupted video %s for channel %s",
+                                                recovery_hint_video_id[:20],
+                                                channel_id[:10],
+                                            )
+                                        else:
+                                            logger.info(
+                                                "⏳ [Recovery] Waiting for interrupted video %s to reappear (channel=%s).",
+                                                recovery_hint_video_id[:20],
+                                                channel_id[:10],
+                                            )
+                                            potential_videos = []
                                     if target_video_id and schedule_force and source_id == str(target_source_id):
                                         potential_videos = [
                                             item for item in potential_videos
@@ -6202,6 +6306,19 @@ class AutoModFetcher:
                                         )
                                     except Exception:
                                         pass
+
+                                    if locked_count > 0 and not approved_target_resume and not preview_mode:
+                                        schedule_done = True
+                                        await _notify(
+                                            "⏸ يوجد فيديو سابق قيد المعالجة لهذا المصدر/القناة، لذلك سيتم تأجيل اختيار فيديو جديد حتى لا يتم تجاوز الفيديو الجاري."
+                                        )
+                                        logger.info(
+                                            "⏸ [AutoMod] Pausing schedule due to active processing lock(s): channel=%s content_type=%s locked=%s",
+                                            channel_id[:10],
+                                            content_type,
+                                            locked_count,
+                                        )
+                                        break
 
                                     _prev_batch_ids = current_batch_ids
                                 
@@ -6238,8 +6355,15 @@ class AutoModFetcher:
                                     source["_am_fetch_name"] = fetch_name
                                     source["_am_fetch_platform"] = fetch_platform
                                     break
+                                if schedule_done:
+                                    break
 
                         if not found_new_video:
+                            if recovery_hint_enforced:
+                                schedule_done = True
+                                await _notify(
+                                    f"⏸ ما زلنا ننتظر استئناف الفيديو المتوقف `{recovery_hint_video_id[:20]}` قبل السماح بأي فيديو جديد لهذه القناة."
+                                )
                             continue
 
                         processed_in_this_source = 0
@@ -6420,6 +6544,8 @@ class AutoModFetcher:
                                         )
                                         if not preview_mode:
                                             self.db.mark_video_failed(vid_id, channel_id, f"Download failed: {download_reason[:250]}")
+                                            _clear_recovery_hint(channel_id, content_type)
+                                            _clear_processing_state()
                                         results["failed"] += 1
                                         try:
                                             from src.agent.error_tracker import get_error_tracker
@@ -6461,6 +6587,7 @@ class AutoModFetcher:
                                         current_dl_path = None
                                     schedule_done = True
                                     pending_raw_review_paused = bool(requested or existing_pending)
+                                    _clear_processing_state()
                                     if pending_raw_review_paused:
                                         results["waiting_raw_review"] += 1
                                     else:
@@ -6499,6 +6626,8 @@ class AutoModFetcher:
                                      )
                                      if not preview_mode:
                                          self.db.mark_video_failed(vid_id, channel_id, "FFmpeg missing")
+                                         _clear_recovery_hint(channel_id, content_type)
+                                         _clear_processing_state()
                                      results["failed"] += 1
                                      self._cleanup_file(dl_path)
                                      if not preview_mode:
@@ -6521,6 +6650,8 @@ class AutoModFetcher:
                                         )
                                         if not preview_mode:
                                             self.db.mark_video_failed(vid_id, channel_id, "Tail trim failed")
+                                            _clear_recovery_hint(channel_id, content_type)
+                                            _clear_processing_state()
                                         results["failed"] += 1
                                         self._cleanup_file(dl_path)
                                         current_dl_path = None
@@ -6555,16 +6686,33 @@ class AutoModFetcher:
                                 source_hflip = source_settings.get("hflip")
                                 resolved_hflip = config.get("hflip_enabled", False) if source_hflip is None else bool(source_hflip)
 
-                                out_path = await self.process_video(
-                                    dl_path, vid_id,
-                                    shorts_format=config.get("shorts_format", "crop"),
-                                    enhance=config.get("enhance_enabled", False),
-                                    add_cta=config.get("add_cta", True),
-                                    hflip=resolved_hflip,
-                                    video_type=vid_type,
-                                    video_effects=pick_source_video_effects(source_settings),
-                                    trim_end=0.0 if (vid_type == "shorts" and tail_trim_seconds > 0) else 1.0,
+                                _save_processing_state(
+                                    video_id=vid_id,
+                                    channel_id=channel_id,
+                                    stage="ready_for_process_video",
+                                    content_type=content_type,
+                                    source_id=source_id,
+                                    source_name=src_name,
+                                    source_url=str(video.get("url") or ""),
+                                    title=str(video.get("title") or ""),
                                 )
+
+                                self._current_content_type = content_type
+                                self._current_channel_id = channel_id
+                                try:
+                                    out_path = await self.process_video(
+                                        dl_path, vid_id,
+                                        shorts_format=config.get("shorts_format", "crop"),
+                                        enhance=config.get("enhance_enabled", False),
+                                        add_cta=config.get("add_cta", True),
+                                        hflip=resolved_hflip,
+                                        video_type=vid_type,
+                                        video_effects=pick_source_video_effects(source_settings),
+                                        trim_end=0.0 if (vid_type == "shorts" and tail_trim_seconds > 0) else 1.0,
+                                    )
+                                finally:
+                                    self._current_channel_id = ""
+                                    self._current_content_type = ""
                                 current_out_path = out_path
                                 if processing_touch_stop:
                                     processing_touch_stop.set()
@@ -6581,12 +6729,25 @@ class AutoModFetcher:
                                     )
                                     if not preview_mode:
                                         self.db.mark_video_failed(vid_id, channel_id, "Processing failed")
+                                        _clear_recovery_hint(channel_id, content_type)
+                                        _clear_processing_state()
                                     results["failed"] += 1
                                     self._cleanup_file(dl_path)
                                     if not preview_mode:
                                         self.db.update_next_publish_after_attempt(channel_id, content_type, published=False)
                                     schedule_done = True
                                     break
+
+                                _save_processing_state(
+                                    video_id=vid_id,
+                                    channel_id=channel_id,
+                                    stage="post_processing_overlays",
+                                    content_type=content_type,
+                                    source_id=source_id,
+                                    source_name=src_name,
+                                    source_url=str(video.get("url") or ""),
+                                    title=str(video.get("title") or ""),
+                                )
 
                                 await _notify("✅ تمت المعالجة بنجاح.")
 
@@ -6702,6 +6863,7 @@ class AutoModFetcher:
                                     f"📺 `{vid_title}`\n"
                                     "لن يتم رفع هذا الفيديو إلى YouTube ولن يتم تعديل حالة النشر الرسمية."
                                 )
+                                _clear_processing_state()
                                 results["previewed"] += 1
                                 results["status"] = "preview_ready"
                                 results["preview_video_path"] = out_path
@@ -6711,6 +6873,16 @@ class AutoModFetcher:
                                 results["preview_channel_id"] = channel_id
                             else:
                                 # ========== رفع إلى YouTube ==========
+                                _save_processing_state(
+                                    video_id=vid_id,
+                                    channel_id=channel_id,
+                                    stage="uploading_youtube",
+                                    content_type=content_type,
+                                    source_id=source_id,
+                                    source_name=src_name,
+                                    source_url=str(video.get("url") or ""),
+                                    title=str(video.get("title") or ""),
+                                )
                                 await _notify(
                                     f"⬆️ *جاري الرفع إلى YouTube:* `{vid_title}`\n"
                                     f"   📺 القناة: `{channel_id[:20]}...`"
@@ -6736,6 +6908,8 @@ class AutoModFetcher:
 
                                 if yt_url:
                                     self.db.mark_video_published(vid_id, channel_id, yt_url)
+                                    _clear_recovery_hint(channel_id, content_type)
+                                    _clear_processing_state()
                                     results["published"] += 1
                                     logger.info(
                                         f"✅ [AutoMod] Published (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
@@ -6754,6 +6928,8 @@ class AutoModFetcher:
                                         f"❌ [AutoMod] Upload failed (video={vid_id[:20]}..., channel={channel_id[:10]}...)"
                                     )
                                     self.db.mark_video_failed(vid_id, channel_id, "Upload failed")
+                                    _clear_recovery_hint(channel_id, content_type)
+                                    _clear_processing_state()
                                     results["failed"] += 1
 
                                 self.db.update_next_publish_after_attempt(channel_id, content_type, published=bool(yt_url))
@@ -6787,6 +6963,8 @@ class AutoModFetcher:
                                     channel_id,
                                     f"Unexpected automation error: {str(e)[:400]}",
                                 )
+                                _clear_recovery_hint(channel_id, content_type)
+                                _clear_processing_state()
                                 if not recovered_ok:
                                     logger.error(
                                         f"❌ [AutoMod] Failed to recover processing state after exception (video={current_vid_id[:20]}..., channel={channel_id[:10]}...)"
