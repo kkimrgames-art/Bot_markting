@@ -1676,10 +1676,16 @@ class ModVideoProcessor:
             fps = self._get_video_fps(input_path)
             if not fps or fps <= 0:
                 fps = 30.0
-            
+
+            low_resource = _is_low_resource_env()
+            video_extra_args = []
+            if low_resource:
+                video_extra_args.extend(["-bf", "0", "-tune", "zerolatency"])
+
             base_cmd = [
                 ffmpeg_bin(),
                 "-y",
+                *_ffmpeg_memory_guard_args(),
                 "-i", input_path,
                 "-vf", "",
                 "-c:v", "libx264",
@@ -1691,6 +1697,7 @@ class ModVideoProcessor:
                 "-vsync", "cfr",
                 "-r", f"{fps:.6f}",
                 "-threads", str(ff_threads),
+                *video_extra_args,
                 "-c:a", "copy",
                 str(output_path)
             ]
@@ -2099,17 +2106,26 @@ class ModVideoProcessor:
 
         filter_complex = ",".join(overlay_chain) + f"[ovl];[0:v][ovl]overlay=x=(W-w)/2:y={y_expr}:shortest=1:enable='between(t,{visible_start:.2f},{visible_end:.2f})'[vout]"
 
-        ff_threads, _, _ = self._shorts_x264_settings()
-        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
-        level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+        ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+        if _is_low_resource_env():
+            preset = base_preset
+            crf = base_crf
+        else:
+            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+        level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
         fps = self._get_video_fps(input_path)
         if not fps or fps <= 0:
             fps = 30.0
 
+        video_extra_args = []
+        if _is_low_resource_env():
+            video_extra_args.extend(["-bf", "0", "-tune", "zerolatency"])
+
         cmd = [
             ffmpeg_bin(),
             "-y",
+            *_ffmpeg_memory_guard_args(),
             "-i", input_path,
             "-loop", "1",
             "-i", str(overlay_path),
@@ -2125,6 +2141,7 @@ class ModVideoProcessor:
             "-vsync", "cfr",
             "-r", f"{fps:.6f}",
             "-threads", str(ff_threads),
+            *video_extra_args,
             "-c:a", "copy",
             str(output_path),
         ]

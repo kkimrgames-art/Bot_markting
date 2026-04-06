@@ -436,15 +436,32 @@ class JobQueue:
             db_path = Path(get_project_root()) / ".data" / "job_queue.db"
             if not db_path.exists():
                 return
+            now_ts = time.time()
+            stale_ids: List[str] = []
             with sqlite3.connect(str(db_path), timeout=30.0) as conn:
-                threshold = self._now_iso()
                 cursor = conn.execute(
-                    "UPDATE jobs SET status = 'pending', updated_at = ? WHERE status = 'processing'",
-                    (threshold,)
+                    "SELECT id, created_at, updated_at FROM jobs WHERE status = 'processing'"
                 )
-                conn.commit()
-                if cursor.rowcount > 0:
-                    logger.warning(f"⚠️ Reset {cursor.rowcount} stuck jobs (local)")
+                rows = cursor.fetchall() or []
+                for row in rows:
+                    job_id, created_at, updated_at = row
+                    ref_ts = self._parse_job_timestamp(updated_at)
+                    if ref_ts is None:
+                        ref_ts = self._parse_job_timestamp(created_at)
+                    if ref_ts is None:
+                        continue
+                    if (now_ts - ref_ts) >= max(30, int(timeout_seconds)):
+                        stale_ids.append(str(job_id))
+
+                if stale_ids:
+                    now_iso = self._now_iso()
+                    for stale_id in stale_ids:
+                        conn.execute(
+                            "UPDATE jobs SET status = 'pending', updated_at = ?, error_msg = ? WHERE id = ?",
+                            (now_iso, f"auto-reset stale processing job after >{int(timeout_seconds)}s", stale_id),
+                        )
+                    conn.commit()
+                    logger.warning(f"⚠️ Reset {len(stale_ids)} stuck jobs (local)")
         except Exception as e:
             logger.error(f"Failed to reset local stuck jobs: {e}")
 
@@ -467,11 +484,27 @@ class JobQueue:
             db_path = Path(get_project_root()) / ".data" / "job_queue.db"
             if not db_path.exists():
                 return
+            now_ts = time.time()
+            delete_ids: List[str] = []
             with sqlite3.connect(str(db_path), timeout=30.0) as conn:
-                conn.execute(
-                    "DELETE FROM jobs WHERE status IN ('completed', 'failed')",
+                cursor = conn.execute(
+                    "SELECT id, created_at, updated_at FROM jobs WHERE status IN ('completed', 'failed')"
                 )
-                conn.commit()
+                rows = cursor.fetchall() or []
+                for row in rows:
+                    job_id, created_at, updated_at = row
+                    ref_ts = self._parse_job_timestamp(updated_at)
+                    if ref_ts is None:
+                        ref_ts = self._parse_job_timestamp(created_at)
+                    if ref_ts is None:
+                        continue
+                    if (now_ts - ref_ts) >= max(60, int(max_age_seconds)):
+                        delete_ids.append(str(job_id))
+
+                if delete_ids:
+                    for job_id in delete_ids:
+                        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+                    conn.commit()
         except Exception as e:
             logger.error(f"Failed to cleanup local jobs: {e}")
 

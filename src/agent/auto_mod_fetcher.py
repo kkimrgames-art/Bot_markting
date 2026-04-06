@@ -6982,37 +6982,75 @@ class AutoModFetcher:
                                 try:
                                     _ov_text = (overlay_cfg.get("text") or "").strip()
                                     if _ov_text:
-                                        await _notify(f"✏️ *جاري إضافة نص مخصص:* `{_ov_text[:40]}`...")
-                                        from src.agent.mod_video_processor import ModVideoProcessor as _MVP
-                                        _mvp_ov = _MVP(temp_dir=_project_local_path(".temp", "auto_mod"))
-                                        _ov_out_dir = _project_local_path(".output", "auto_mod_overlay")
-                                        ResilientFS.makedirs(_ov_out_dir, exist_ok=True)
-                                        _ov_out = os.path.join(_ov_out_dir, f"{vid_id}_overlay.mp4")
+                                        skip_overlay = False
 
-                                        loop = asyncio.get_running_loop()
-                                        import functools
-                                        _ov_func = functools.partial(
-                                            _mvp_ov.add_custom_overlay_text,
-                                            input_path=out_path,
-                                            output_path=_ov_out,
-                                            text=_ov_text,
-                                            timing=overlay_cfg.get("timing", "full"),
-                                            duration=float(overlay_cfg.get("duration", 2.0)),
-                                            screen_position=overlay_cfg.get("screen_position", "top"),
-                                            intro_animation=overlay_cfg.get("intro_animation"),
-                                            outro_animation=overlay_cfg.get("outro_animation"),
-                                        )
                                         try:
-                                            await asyncio.wait_for(loop.run_in_executor(None, _ov_func), timeout=300.0)
-                                            if ResilientFS.exists(_ov_out):
-                                                self._cleanup_file(out_path)
-                                                out_path = _ov_out
-                                                await _notify("✅ تم إضافة النص المخصص.")
-                                            else:
-                                                await _notify("⚠️ فشل إضافة النص المخصص، سيتم الرفع بدونه.")
-                                        except asyncio.TimeoutError:
-                                            logger.warning(f"⚠️ Custom overlay text timed out for {vid_id}")
-                                            await _notify("⚠️ نفذ الوقت المخصص لإضافة النص.")
+                                            from src.agent.mod_video_processor import _is_low_resource_env as _overlay_low_resource
+
+                                            skip_on_low_resource = (os.getenv("AUTO_MOD_SKIP_CUSTOM_OVERLAY_ON_LOW_RESOURCE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+                                            if skip_on_low_resource and _overlay_low_resource():
+                                                skip_overlay = True
+                                                await _notify("⚠️ تم تجاوز النص المخصص تلقائياً بسبب وضع الموارد المنخفضة لتفادي أي انقطاع.")
+                                        except Exception:
+                                            pass
+
+                                        if not skip_overlay:
+                                            try:
+                                                from src.agent.memory_guard import should_defer_heavy_work
+
+                                                mem_defer, mem_reason, _ = should_defer_heavy_work()
+                                                if mem_defer:
+                                                    skip_overlay = True
+                                                    await _notify(f"⚠️ تم تجاوز النص المخصص مؤقتاً بسبب ضغط الموارد: `{str(mem_reason)[:80]}`")
+                                            except Exception:
+                                                pass
+
+                                        if skip_overlay:
+                                            logger.warning(
+                                                "⚠️ Skipped custom overlay for video=%s channel=%s due to resource safeguards",
+                                                vid_id[:20],
+                                                channel_id[:10],
+                                            )
+                                        else:
+                                            await _notify(f"✏️ *جاري إضافة نص مخصص:* `{_ov_text[:40]}`...")
+                                            from src.agent.mod_video_processor import ModVideoProcessor as _MVP
+
+                                            _mvp_ov = _MVP(temp_dir=_project_local_path(".temp", "auto_mod"))
+                                            _ov_out_dir = _project_local_path(".output", "auto_mod_overlay")
+                                            ResilientFS.makedirs(_ov_out_dir, exist_ok=True)
+                                            _ov_out = os.path.join(_ov_out_dir, f"{vid_id}_overlay.mp4")
+
+                                            loop = asyncio.get_running_loop()
+                                            import functools
+                                            _ov_func = functools.partial(
+                                                _mvp_ov.add_custom_overlay_text,
+                                                input_path=out_path,
+                                                output_path=_ov_out,
+                                                text=_ov_text,
+                                                timing=overlay_cfg.get("timing", "full"),
+                                                duration=float(overlay_cfg.get("duration", 2.0)),
+                                                screen_position=overlay_cfg.get("screen_position", "top"),
+                                                intro_animation=overlay_cfg.get("intro_animation"),
+                                                outro_animation=overlay_cfg.get("outro_animation"),
+                                            )
+
+                                            try:
+                                                try:
+                                                    overlay_timeout_s = int(float((os.getenv("AUTO_MOD_CUSTOM_OVERLAY_TIMEOUT_SECONDS", "90") or "90").strip()))
+                                                except Exception:
+                                                    overlay_timeout_s = 90
+                                                overlay_timeout_s = max(20, min(240, overlay_timeout_s))
+
+                                                await asyncio.wait_for(loop.run_in_executor(None, _ov_func), timeout=float(overlay_timeout_s))
+                                                if ResilientFS.exists(_ov_out):
+                                                    self._cleanup_file(out_path)
+                                                    out_path = _ov_out
+                                                    await _notify("✅ تم إضافة النص المخصص.")
+                                                else:
+                                                    await _notify("⚠️ فشل إضافة النص المخصص، سيتم الرفع بدونه.")
+                                            except asyncio.TimeoutError:
+                                                logger.warning(f"⚠️ Custom overlay text timed out for {vid_id}")
+                                                await _notify("⚠️ نفذ الوقت المخصص لإضافة النص.")
                                 except Exception as ov_err:
                                     logger.warning(f"Custom overlay text failed: {ov_err}")
                                     await _notify(f"⚠️ فشل النص المخصص: `{str(ov_err)[:80]}`")
