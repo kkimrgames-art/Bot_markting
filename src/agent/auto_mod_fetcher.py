@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from contextlib import suppress
+from collections import deque
 from typing import Any, Dict, Optional
 
 from src.utils.resilient_fs import ResilientFS
@@ -368,6 +369,11 @@ _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
 _RUN_CYCLE_LOCK = threading.Lock()
 _RUN_CYCLE_META_LOCK = threading.Lock()
 _RUN_CYCLE_STARTED_MONOTONIC = 0.0
+_METADATA_VARIATION_LOCK = threading.Lock()
+_METADATA_RECENT_TITLE_KEYS: Dict[str, deque[str]] = {}
+_METADATA_RECENT_DESC_KEYS: Dict[str, deque[str]] = {}
+_METADATA_SIGNATURES_FILE = _project_local_path(".data", "metadata_hashtag_signatures.json")
+_METADATA_SIGNATURES_LOADED = False
 
 
 def _auto_mod_multi_instance_enabled() -> bool:
@@ -398,6 +404,117 @@ def _inter_agent_cooldown_seconds(default_seconds: int = 300) -> int:
     return max(0, seconds)
 
 
+def _resolve_channel_language_code(channel: Any) -> str:
+    raw = str(getattr(channel, "language", "") or "").strip()
+    if not raw:
+        return "ar"
+
+    norm = raw.lower().replace("_", "-").strip()
+    m = re.match(r"^([a-z]{2})(?:-[a-z]{2})?$", norm)
+    if m:
+        return m.group(1)
+
+    # محاولة المطابقة عبر أسماء اللغات المعرفة في البوت
+    try:
+        from src.bot.language_manager import LanguageManager
+
+        candidates = [norm, norm.replace("-", " ")]
+        for code, lang in (LanguageManager.LANGUAGES or {}).items():
+            aliases = {
+                str(code or "").strip().lower(),
+                str(getattr(lang, "name", "") or "").strip().lower(),
+                str(getattr(lang, "name_en", "") or "").strip().lower(),
+                str(getattr(lang, "name_native", "") or "").strip().lower(),
+            }
+            aliases = {a for a in aliases if a}
+            for cand in candidates:
+                if cand in aliases:
+                    return str(code).strip().lower()
+    except Exception:
+        pass
+
+    # fallback آمن
+    if any(tok in norm for tok in ["arab", "عرب", "arabic"]):
+        return "ar"
+    if any(tok in norm for tok in ["english", "ingl", "en"]):
+        return "en"
+    if any(tok in norm for tok in ["fr", "french", "fran", "فرنسي"]):
+        return "fr"
+    if any(tok in norm for tok in ["es", "span", "اسباني"]):
+        return "es"
+
+    return "ar"
+
+
+def _should_skip_custom_overlay_now() -> Tuple[bool, str, Dict[str, Any]]:
+    """قرر تخطي النص المخصص فقط عند خطر موارد فعلي."""
+    metrics: Dict[str, Any] = {}
+    try:
+        from src.agent.mod_video_processor import _is_low_resource_env as _overlay_low_resource
+        from src.agent.memory_guard import get_memory_usage, force_gc
+        from src.agent.resource_guard import get_resource_snapshot
+
+        mode = (os.getenv("AUTO_MOD_SKIP_CUSTOM_OVERLAY_ON_LOW_RESOURCE", "auto") or "auto").strip().lower()
+        low_resource = bool(_overlay_low_resource())
+
+        mem = get_memory_usage() or {}
+        snap = get_resource_snapshot()
+
+        rss_mb = mem.get("rss_mb")
+        avail_mb = getattr(snap, "ram_available_mb", None)
+        used_pct = getattr(snap, "ram_used_percent", None)
+
+        metrics = {
+            "mode": mode,
+            "low_resource": low_resource,
+            "rss_mb": rss_mb,
+            "ram_available_mb": avail_mb,
+            "ram_used_percent": used_pct,
+        }
+
+        # وضع صريح: تجاوز دائم في البيئات منخفضة الموارد
+        if mode in {"1", "true", "yes", "on", "always"} and low_resource:
+            return True, "low_resource_always", metrics
+
+        # وضع صريح: لا تتجاوز إلا عند فشل التنفيذ نفسه (بدون فحص مسبق)
+        if mode in {"0", "false", "off", "never"}:
+            return False, "disabled", metrics
+
+        # وضع auto/risk-based
+        try:
+            hard_rss_mb = int(float((os.getenv("AUTO_MOD_OVERLAY_HARD_RSS_MB", "470") or "470").strip()))
+        except Exception:
+            hard_rss_mb = 470
+        try:
+            min_avail_mb = int(float((os.getenv("AUTO_MOD_OVERLAY_MIN_AVAILABLE_MB", "90") or "90").strip()))
+        except Exception:
+            min_avail_mb = 90
+        try:
+            max_used_pct = float((os.getenv("AUTO_MOD_OVERLAY_MAX_RAM_USED_PERCENT", "90") or "90").strip())
+        except Exception:
+            max_used_pct = 90.0
+
+        # محاولة تحرير سريعة قبل القرار النهائي
+        if rss_mb is not None and float(rss_mb) >= float(hard_rss_mb):
+            with suppress(Exception):
+                force_gc()
+            mem_after = get_memory_usage() or {}
+            rss_mb = mem_after.get("rss_mb", rss_mb)
+            metrics["rss_mb_after_gc"] = rss_mb
+
+        if rss_mb is not None and float(rss_mb) >= float(hard_rss_mb):
+            return True, f"rss_high:{rss_mb}", metrics
+        if avail_mb is not None and int(avail_mb) <= int(min_avail_mb):
+            return True, f"avail_low:{avail_mb}", metrics
+        if low_resource and used_pct is not None and float(used_pct) >= float(max_used_pct):
+            return True, f"ram_used_high:{used_pct:.1f}%", metrics
+
+        return False, "ok", metrics
+    except Exception as e:
+        metrics["error"] = str(e)
+        return False, "check_failed", metrics
+
+
 def _should_force_reset_processing_on_boot() -> bool:
     raw = (os.getenv("AUTO_MOD_FORCE_RESET_PROCESSING_ON_BOOT", "false") or "false").strip().lower()
     force_reset = raw in {"1", "true", "yes", "on"}
@@ -416,6 +533,89 @@ def _mark_run_cycle_finished() -> None:
     global _RUN_CYCLE_STARTED_MONOTONIC
     with _RUN_CYCLE_META_LOCK:
         _RUN_CYCLE_STARTED_MONOTONIC = 0.0
+
+
+def _hashtag_norm_key(tag: Any) -> str:
+    raw = str(tag or "").strip().lower()
+    if raw.startswith("#"):
+        raw = raw[1:]
+    raw = raw.replace("_", "").strip()
+    return raw
+
+
+def _metadata_cache_key(channel_key: str, lang: str) -> str:
+    return f"{str(channel_key or '').strip()}::{str(lang or '').strip().lower()}"
+
+
+def _metadata_load_signatures_once() -> None:
+    global _METADATA_SIGNATURES_LOADED
+    if _METADATA_SIGNATURES_LOADED:
+        return
+    with _METADATA_VARIATION_LOCK:
+        if _METADATA_SIGNATURES_LOADED:
+            return
+        try:
+            if not ResilientFS.exists(_METADATA_SIGNATURES_FILE):
+                _METADATA_SIGNATURES_LOADED = True
+                return
+            with open(_METADATA_SIGNATURES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            title_map = data.get("title") if isinstance(data, dict) else {}
+            desc_map = data.get("desc") if isinstance(data, dict) else {}
+            if isinstance(title_map, dict):
+                for k, vals in title_map.items():
+                    if not isinstance(vals, list):
+                        continue
+                    dq = deque((str(v) for v in vals if str(v).strip()), maxlen=300)
+                    _METADATA_RECENT_TITLE_KEYS[str(k)] = dq
+            if isinstance(desc_map, dict):
+                for k, vals in desc_map.items():
+                    if not isinstance(vals, list):
+                        continue
+                    dq = deque((str(v) for v in vals if str(v).strip()), maxlen=300)
+                    _METADATA_RECENT_DESC_KEYS[str(k)] = dq
+        except Exception:
+            pass
+        finally:
+            _METADATA_SIGNATURES_LOADED = True
+
+
+def _metadata_persist_signatures() -> None:
+    try:
+        with _METADATA_VARIATION_LOCK:
+            payload = {
+                "title": {k: list(v) for k, v in _METADATA_RECENT_TITLE_KEYS.items()},
+                "desc": {k: list(v) for k, v in _METADATA_RECENT_DESC_KEYS.items()},
+            }
+        parent = os.path.dirname(_METADATA_SIGNATURES_FILE)
+        if parent:
+            ResilientFS.makedirs(parent, exist_ok=True)
+        with open(_METADATA_SIGNATURES_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _metadata_recent_contains(cache: Dict[str, deque[str]], cache_key: str, key_value: str) -> bool:
+    _metadata_load_signatures_once()
+    with _METADATA_VARIATION_LOCK:
+        dq = cache.get(cache_key)
+        if not dq:
+            return False
+        return key_value in dq
+
+
+def _metadata_recent_push(cache: Dict[str, deque[str]], cache_key: str, key_value: str, max_items: int = 120) -> None:
+    if not cache_key or not key_value:
+        return
+    _metadata_load_signatures_once()
+    with _METADATA_VARIATION_LOCK:
+        dq = cache.get(cache_key)
+        if dq is None:
+            dq = deque(maxlen=max(20, min(500, int(max_items))))
+            cache[cache_key] = dq
+        dq.append(key_value)
+    _metadata_persist_signatures()
 
 
 def _running_cycle_elapsed_seconds() -> int:
@@ -763,16 +963,15 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
             return None
 
         raw_path = str(raw_clip.get("path") or "").strip()
-        if not raw_path:
-            return None
-
         clip_name = str(raw_clip.get("name") or os.path.basename(raw_path) or f"facecam_{index + 1}").strip()
         clip_id = str(raw_clip.get("id") or os.path.splitext(clip_name)[0] or uuid.uuid4()).strip()
+        if not raw_path and not clip_id:
+            return None
         created_at = str(raw_clip.get("created_at") or "").strip()
         enabled = _to_bool(raw_clip.get("enabled"), True)
         return {
             "id": clip_id or str(uuid.uuid4()),
-            "path": raw_path.replace("\\", "/"),
+            "path": raw_path.replace("\\", "/") if raw_path else "",
             "name": clip_name,
             "enabled": enabled,
             "created_at": created_at,
@@ -971,6 +1170,55 @@ def pick_source_facecam_clip(raw_settings: Any, channel_id: str = "") -> Tuple[D
         return facecam, ""
 
     valid_source_clips: List[str] = []
+
+    def _append_if_valid(path_value: str) -> bool:
+        p = _resolve_project_runtime_path(str(path_value or ""))
+        if not p:
+            return False
+        ext_local = os.path.splitext(p)[1].lower()
+        if ext_local in _FACECAM_ALLOWED_EXTENSIONS and ResilientFS.isfile(p):
+            valid_source_clips.append(p)
+            return True
+        return False
+
+    def _search_local_by_clip_id(clip_id_value: str) -> bool:
+        cid = str(clip_id_value or "").strip()
+        if not cid:
+            return False
+
+        # 1) Cache
+        cache_dir = _project_local_path(".temp", "facecam_cache")
+        if ResilientFS.isdir(cache_dir):
+            for nm in ResilientFS.listdir(cache_dir):
+                if not str(nm).startswith(cid):
+                    continue
+                if _append_if_valid(os.path.join(cache_dir, nm)):
+                    return True
+
+        # 2) Restored facecam files
+        restored_dir = _project_local_path(".data", "facecam")
+        if ResilientFS.isdir(restored_dir):
+            for nm in ResilientFS.listdir(restored_dir):
+                if not str(nm).startswith(cid):
+                    continue
+                if _append_if_valid(os.path.join(restored_dir, nm)):
+                    return True
+
+        # 3) Source-specific folders
+        sources_root = _project_local_path(".data", "facecam_sources")
+        if ResilientFS.isdir(sources_root):
+            for source_dir in ResilientFS.listdir(sources_root):
+                full_dir = os.path.join(sources_root, source_dir)
+                if not ResilientFS.isdir(full_dir):
+                    continue
+                for nm in ResilientFS.listdir(full_dir):
+                    if not str(nm).startswith(cid):
+                        continue
+                    if _append_if_valid(os.path.join(full_dir, nm)):
+                        return True
+
+        return False
+
     for clip in facecam.get("clips") or []:
         if not isinstance(clip, dict) or not clip.get("enabled"):
             continue
@@ -981,17 +1229,34 @@ def pick_source_facecam_clip(raw_settings: Any, channel_id: str = "") -> Tuple[D
             valid_source_clips.append(clip_path)
             continue
 
+        # بحث محلي مرن باستخدام clip_id (حتى لو path قديم/مفقود)
+        if clip_id and _search_local_by_clip_id(clip_id):
+            logger.info("🎬 Reused local facecam clip by id lookup: %s", clip_id)
+            continue
+
         # Fallback: استرجاع المقطع من Storage عند فقد النسخة المحلية
         if clip_id:
             cache_ext = ext if ext in _FACECAM_ALLOWED_EXTENSIONS else ".mp4"
             cache_dir = _project_local_path(".temp", "facecam_cache")
             with suppress(Exception):
                 ResilientFS.makedirs(cache_dir, exist_ok=True)
-            cache_path = os.path.join(cache_dir, f"{clip_id}{cache_ext}")
-            try:
-                if not ResilientFS.isfile(cache_path):
-                    from src.agent.supabase_storage import download_facecam_from_storage
 
+            try:
+                from src.agent.supabase_storage import download_facecam_from_storage, get_facecam_storage_info
+
+                storage_info = get_facecam_storage_info(clip_id) or {}
+                storage_path = str(storage_info.get("storage_path") or "")
+                storage_ext = os.path.splitext(storage_path)[1].lower()
+                if storage_ext in _FACECAM_ALLOWED_EXTENSIONS:
+                    cache_ext = storage_ext
+
+                storage_local = _resolve_project_runtime_path(str(storage_info.get("local_path") or ""))
+                if storage_local and _append_if_valid(storage_local):
+                    logger.info("🎬 Reused facecam local_path from storage index: %s", clip_id)
+                    continue
+
+                cache_path = os.path.join(cache_dir, f"{clip_id}{cache_ext}")
+                if not ResilientFS.isfile(cache_path):
                     restored = bool(download_facecam_from_storage(clip_id, cache_path))
                     if restored and ResilientFS.isfile(cache_path):
                         logger.info(f"🎬 Restored facecam clip from storage: {clip_id}")
@@ -999,8 +1264,15 @@ def pick_source_facecam_clip(raw_settings: Any, channel_id: str = "") -> Tuple[D
                     cache_path_ext = os.path.splitext(cache_path)[1].lower()
                     if cache_path_ext in _FACECAM_ALLOWED_EXTENSIONS:
                         valid_source_clips.append(cache_path)
+                        continue
             except Exception as storage_err:
                 logger.debug(f"Facecam storage fallback failed for clip {clip_id}: {storage_err}")
+
+        logger.info(
+            "⚠️ Facecam clip unresolved (id=%s, path=%s)",
+            clip_id[:12] if clip_id else "",
+            str(clip.get("path") or "")[:80],
+        )
 
     if valid_source_clips:
         return facecam, random.choice(valid_source_clips)
@@ -1167,6 +1439,7 @@ def _join_hashtags(tags: List[str], max_chars: int) -> str:
 def _build_upload_metadata(
     ai_meta: Dict[str, Any],
     *,
+    channel_key: str,
     source_title: str,
     source_name: str,
     content_type: str,
@@ -1175,7 +1448,7 @@ def _build_upload_metadata(
     source_description: str = "",
     source_settings: Any = None,
 ) -> Tuple[str, str, List[str]]:
-    from src.agent.ai import _extract_hashtags_from_text, _keywords_from_hashtags, _sanitize_hashtag_list, _lang_requires_script_lock, optimize_hashtags
+    from src.agent.ai import _extract_hashtags_from_text, _keywords_from_hashtags, _sanitize_hashtag_list, _filter_hashtags_by_target_language, _lang_requires_script_lock, optimize_hashtags
     from src.agent.local_metadata import extract_source_metadata_context
 
     def _collapse(value: Any) -> str:
@@ -1251,38 +1524,134 @@ def _build_upload_metadata(
             target_lang,
             6,
         )
+        title_tags = _filter_hashtags_by_target_language(title_tags, target_lang)
     if not description_tags:
         description_tags = list(title_tags)
 
-    # عنوان قابل للقراءة (ليس هاشتاغات فقط)
-    final_title = _strip_hashtags(ai_meta.get("title", ""))
-    if not final_title:
-        final_title = _strip_hashtags(source_title)
-    if not final_title:
-        final_title = _collapse(source_signals.get("topic") or content_type).replace("_", " ")
-    if not final_title:
-        final_title = "فيديو قصير جديد" if str(target_lang or "").lower().startswith("ar") else "New short video"
-    final_title = final_title[:95].rstrip(" -|:,.،؛")
+    def _inject_topic_variation(base_tags: List[str], *, min_count: int) -> List[str]:
+        out = list(base_tags or [])
+        seen = {_hashtag_norm_key(t) for t in out if _hashtag_norm_key(t)}
 
-    # وصف نصي + هاشتاغات محسنة
-    description_plain = _strip_hashtags(merged_description)
-    if len(description_plain) < 20:
-        description_plain = _strip_hashtags(ai_meta.get("description", ""))
-    if len(description_plain) < 20:
-        description_plain = _strip_hashtags(source_description)
-    if len(description_plain) < 20:
-        topic_text = _collapse(source_signals.get("topic") or source_title or content_type).replace("_", " ")
+        raw_candidates: List[str] = []
+        raw_candidates.extend([str(x) for x in (source_signals.get("hashtags") or [])])
+
+        topic_seed = str(source_title or source_signals.get("topic") or content_type or "").strip()
+        tokens = re.findall(r"[0-9A-Za-z\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]{3,}", topic_seed)
+        for tok in tokens[:8]:
+            raw_candidates.append(f"#{tok}")
+
+        enriched = _sanitize_hashtag_list(raw_candidates, target_lang, 24)
+        enriched = _filter_hashtags_by_target_language(enriched, target_lang)
+
+        for tag in enriched:
+            key = _hashtag_norm_key(tag)
+            if not key or key in seen:
+                continue
+            out.append(tag)
+            seen.add(key)
+            if len(out) >= max(min_count, len(base_tags or [])):
+                break
+
+        return out
+
+    title_tags = _inject_topic_variation(title_tags, min_count=3 if is_shorts else 2)
+    description_tags = _inject_topic_variation(description_tags, min_count=max(6, len(title_tags)))
+
+    title_tags = _filter_hashtags_by_target_language(list(title_tags or []), target_lang)
+    description_tags = _filter_hashtags_by_target_language(list(description_tags or []), target_lang)
+
+    if not title_tags:
         if str(target_lang or "").lower().startswith("ar"):
-            description_plain = f"شاهد هذا الفيديو عن {topic_text} مع أبرز اللقطات والتفاصيل المهمة."
+            title_tags = ["#شورتس", "#فيديو"] if is_shorts else ["#فيديو"]
         else:
-            description_plain = f"Watch this video about {topic_text} with the best moments and important details."
+            title_tags = ["#shorts", "#video"] if is_shorts else ["#video"]
+    if not description_tags:
+        description_tags = list(title_tags)
 
-    hashtags_block = _join_hashtags(description_tags, 700)
-    if hashtags_block:
-        final_description = f"{description_plain}\n\n{hashtags_block}".strip()
+    target_lang_norm = str(target_lang or "").lower().strip()
+    if target_lang_norm.startswith("en"):
+        def _has_arabic_script(value: str) -> bool:
+            return bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", str(value or "")))
+
+        title_tags = [t for t in title_tags if not _has_arabic_script(t)]
+        description_tags = [t for t in description_tags if not _has_arabic_script(t)]
+        if is_shorts and "#shorts" not in [str(t).lower() for t in title_tags]:
+            title_tags.insert(0, "#shorts")
+        if not title_tags:
+            title_tags = ["#shorts", "#gaming", "#video"] if is_shorts else ["#gaming", "#video"]
+        if not description_tags:
+            description_tags = list(title_tags)
+
+    metadata_style = (os.getenv("AUTO_MOD_UPLOAD_METADATA_STYLE", "hashtags") or "hashtags").strip().lower()
+    hashtags_only_mode = metadata_style in {"hashtags", "hashtag", "tags", "tags_only", "hashtag_only"}
+
+    # منع التكرار العالي بين الفيديوهات على نفس القناة
+    try:
+        variation_window = int(float((os.getenv("AUTO_MOD_METADATA_VARIATION_WINDOW", "120") or "120").strip()))
+    except Exception:
+        variation_window = 120
+    variation_window = max(20, min(500, variation_window))
+    cache_key = _metadata_cache_key(channel_key, target_lang)
+
+    def _signature_key(tags_in: List[str]) -> str:
+        return "|".join(sorted({_hashtag_norm_key(t) for t in (tags_in or []) if _hashtag_norm_key(t)}))
+
+    def _rotate_tags(base_tags: List[str], max_rotations: int = 12) -> List[str]:
+        tags_local = list(base_tags or [])
+        if len(tags_local) <= 1:
+            return tags_local
+        for _ in range(max_rotations):
+            sig = _signature_key(tags_local)
+            if not sig or not _metadata_recent_contains(_METADATA_RECENT_TITLE_KEYS, cache_key, sig):
+                return tags_local
+            tags_local = tags_local[1:] + tags_local[:1]
+        return tags_local
+
+    title_tags = _rotate_tags(title_tags)
+
+    if hashtags_only_mode:
+        final_title = _join_hashtags(title_tags, 95)
+        if not final_title:
+            final_title = "#shorts" if (is_shorts and not strict_local_script) else "#video"
+
+        final_description = _join_hashtags(description_tags, 4900)
+        if not final_description:
+            final_description = final_title
     else:
-        final_description = description_plain
-    final_description = final_description[:4900].rstrip()
+        # عنوان قابل للقراءة + هاشتاغات
+        final_title = _strip_hashtags(ai_meta.get("title", ""))
+        if not final_title:
+            final_title = _strip_hashtags(source_title)
+        if not final_title:
+            final_title = _collapse(source_signals.get("topic") or content_type).replace("_", " ")
+        if not final_title:
+            final_title = "فيديو قصير جديد" if str(target_lang or "").lower().startswith("ar") else "New short video"
+        final_title = final_title[:95].rstrip(" -|:,.،؛")
+
+        description_plain = _strip_hashtags(merged_description)
+        if len(description_plain) < 20:
+            description_plain = _strip_hashtags(ai_meta.get("description", ""))
+        if len(description_plain) < 20:
+            description_plain = _strip_hashtags(source_description)
+        if len(description_plain) < 20:
+            topic_text = _collapse(source_signals.get("topic") or source_title or content_type).replace("_", " ")
+            if str(target_lang or "").lower().startswith("ar"):
+                description_plain = f"شاهد هذا الفيديو عن {topic_text} مع أبرز اللقطات والتفاصيل المهمة."
+            else:
+                description_plain = f"Watch this video about {topic_text} with the best moments and important details."
+
+        hashtags_block = _join_hashtags(description_tags, 700)
+        if hashtags_block:
+            final_description = f"{description_plain}\n\n{hashtags_block}".strip()
+        else:
+            final_description = description_plain
+        final_description = final_description[:4900].rstrip()
+
+    # دفع التواقيع إلى ذاكرة التنويع بعد بناء المخرجات
+    title_signature = _signature_key(_extract_hashtags_from_text(final_title))
+    desc_signature = _signature_key(_extract_hashtags_from_text(final_description))
+    _metadata_recent_push(_METADATA_RECENT_TITLE_KEYS, cache_key, title_signature, max_items=variation_window)
+    _metadata_recent_push(_METADATA_RECENT_DESC_KEYS, cache_key, desc_signature, max_items=variation_window)
 
     # كلمات الرفع بدون #
     upload_tags: List[str] = []
@@ -6982,35 +7351,17 @@ class AutoModFetcher:
                                 try:
                                     _ov_text = (overlay_cfg.get("text") or "").strip()
                                     if _ov_text:
-                                        skip_overlay = False
-
-                                        try:
-                                            from src.agent.mod_video_processor import _is_low_resource_env as _overlay_low_resource
-
-                                            skip_on_low_resource = (os.getenv("AUTO_MOD_SKIP_CUSTOM_OVERLAY_ON_LOW_RESOURCE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
-                                            if skip_on_low_resource and _overlay_low_resource():
-                                                skip_overlay = True
-                                                await _notify("⚠️ تم تجاوز النص المخصص تلقائياً بسبب وضع الموارد المنخفضة لتفادي أي انقطاع.")
-                                        except Exception:
-                                            pass
-
-                                        if not skip_overlay:
-                                            try:
-                                                from src.agent.memory_guard import should_defer_heavy_work
-
-                                                mem_defer, mem_reason, _ = should_defer_heavy_work()
-                                                if mem_defer:
-                                                    skip_overlay = True
-                                                    await _notify(f"⚠️ تم تجاوز النص المخصص مؤقتاً بسبب ضغط الموارد: `{str(mem_reason)[:80]}`")
-                                            except Exception:
-                                                pass
+                                        skip_overlay, skip_reason, skip_metrics = _should_skip_custom_overlay_now()
 
                                         if skip_overlay:
                                             logger.warning(
-                                                "⚠️ Skipped custom overlay for video=%s channel=%s due to resource safeguards",
+                                                "⚠️ Skipped custom overlay for video=%s channel=%s reason=%s metrics=%s",
                                                 vid_id[:20],
                                                 channel_id[:10],
+                                                skip_reason,
+                                                skip_metrics,
                                             )
+                                            await _notify("⚠️ تم تجاوز النص المخصص مؤقتاً لتجنب انقطاع البوت بسبب ضغط الموارد.")
                                         else:
                                             await _notify(f"✏️ *جاري إضافة نص مخصص:* `{_ov_text[:40]}`...")
                                             from src.agent.mod_video_processor import ModVideoProcessor as _MVP
@@ -7432,8 +7783,14 @@ class AutoModFetcher:
 
             self._preflight_youtube_upload_auth(channel_id)
 
-            # استخدام لغة القناة بدل اللغة المُثبتة
-            target_lang = getattr(channel, "language", "ar") or "ar"
+            # استخدام لغة القناة الفعلية (مع تطبيع صارم لكود اللغة)
+            target_lang = _resolve_channel_language_code(channel)
+            logger.info(
+                "🌐 Upload metadata language resolved: raw='%s' -> target='%s' (channel=%s)",
+                str(getattr(channel, "language", "") or "").strip(),
+                target_lang,
+                channel_id[:10],
+            )
 
             # توليد بيانات الفيديو محلياً قبل النشر
             ai_meta = generate_ai_metadata(
@@ -7450,6 +7807,7 @@ class AutoModFetcher:
             
             final_title, description, tags = _build_upload_metadata(
                 ai_meta,
+                channel_key=channel_id,
                 source_title=title,
                 source_name=source_name,
                 content_type=content_type,

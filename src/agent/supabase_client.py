@@ -632,7 +632,8 @@ def supabase_storage_upload(bucket: str, object_path: str, file_path: str, *, co
             return None
         with open(file_path, "rb") as f:
             data = f.read()
-        file_options: Dict[str, Any] = {"upsert": bool(upsert)}
+        # بعض إصدارات عميل التخزين تتطلب قيم Headers كنصوص
+        file_options: Dict[str, Any] = {"upsert": "true" if bool(upsert) else "false"}
         if content_type:
             file_options["content-type"] = content_type
         client.storage.from_(bucket).upload(object_path, data, file_options)

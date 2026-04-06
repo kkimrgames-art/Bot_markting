@@ -1312,18 +1312,22 @@ def upload_facecam_to_storage(source_id: str, clip_id: str, file_path: str) -> O
         content_type = f"image/{ext.lower().lstrip('.')}"
     
     uploaded_key = supabase_storage_upload(FACECAM_STORAGE_BUCKET, object_path, file_path, content_type=content_type, upsert=True)
-    if uploaded_key:
-        record = {
-            "id": clip_id,
-            "source_id": source_id,
-            "storage_bucket": FACECAM_STORAGE_BUCKET,
-            "storage_path": uploaded_key,
-            "local_path": os.path.abspath(file_path),
-            "created_at": datetime.now().isoformat(),
-        }
-        supabase_upsert("facecam_storage", record, "id", lambda data: _local_upsert_by_id(FACECAM_STORAGE_LOCAL_PATH, data))
-        return {"storage_bucket": FACECAM_STORAGE_BUCKET, "storage_path": uploaded_key}
-    return None
+    now_iso = datetime.now().isoformat()
+    record = {
+        "id": clip_id,
+        "source_id": source_id,
+        "storage_bucket": FACECAM_STORAGE_BUCKET,
+        "storage_path": uploaded_key,
+        "local_path": os.path.abspath(file_path),
+        "created_at": now_iso,
+    }
+    supabase_upsert("facecam_storage", record, "id", lambda data: _local_upsert_by_id(FACECAM_STORAGE_LOCAL_PATH, data))
+
+    # نعيد معلومات حتى في حالة local-only لضمان استمرار عمل fallback.
+    return {
+        "storage_bucket": FACECAM_STORAGE_BUCKET,
+        "storage_path": uploaded_key or "",
+    }
 
 
 def download_facecam_from_storage(clip_id: str, dest_path: str) -> bool:
@@ -1354,6 +1358,30 @@ def download_facecam_from_storage(clip_id: str, dest_path: str) -> bool:
             return True
         except Exception:
             return False
+
+    # Fallbackات محلية إضافية عند فقد local_path في الفهرس
+    try:
+        import shutil
+
+        candidates = []
+        facecam_dir = _project_data_path("facecam")
+        if facecam_dir.exists():
+            candidates.extend([str(p) for p in facecam_dir.glob(f"{clip_id}.*")])
+
+        sources_root = _project_data_path("facecam_sources")
+        if sources_root.exists():
+            for src_dir in sources_root.iterdir():
+                if src_dir.is_dir():
+                    candidates.extend([str(p) for p in src_dir.glob(f"{clip_id}.*")])
+
+        for cand in candidates:
+            if os.path.isfile(cand):
+                Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cand, dest_path)
+                return True
+    except Exception:
+        pass
+
     return False
 
 
