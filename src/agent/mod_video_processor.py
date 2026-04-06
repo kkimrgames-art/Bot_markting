@@ -86,18 +86,28 @@ def _run_ffmpeg_with_idle_timeout(
 
     proc = subprocess.Popen(cmd, **popen_kwargs)
     stderr_parts: deque[bytes] = deque(maxlen=200)
+    stderr_lock = threading.Lock()
+    stderr_total_bytes = 0
+
+    def _stderr_tail_text() -> str:
+        with stderr_lock:
+            snapshot = list(stderr_parts)
+        return b"".join(snapshot).decode(errors="ignore")[-2500:]
 
     # Background thread to drain stderr so the pipe buffer never fills up
     # (which would block FFmpeg and cause a deadlock).
     drain_done = threading.Event()
 
     def _drain_stderr() -> None:
+        nonlocal stderr_total_bytes
         try:
             while True:
                 chunk = proc.stderr.read(4096)
                 if not chunk:
                     break
-                stderr_parts.append(chunk)
+                with stderr_lock:
+                    stderr_parts.append(chunk)
+                    stderr_total_bytes += len(chunk)
         except Exception:
             pass
         finally:
@@ -128,11 +138,12 @@ def _run_ffmpeg_with_idle_timeout(
             logger.warning(f"⏰ [{label}] Hard timeout after {int(now - start_ts)}s — killing FFmpeg")
             _terminate_subprocess_tree(proc)
             drain_done.wait(timeout=5)
-            stderr_text = b"".join(stderr_parts).decode(errors="ignore")[-2500:]
+            stderr_text = _stderr_tail_text()
             return -1, stderr_text
 
         # Idle timeout: check if stderr has produced new output
-        current_len = sum(len(p) for p in stderr_parts)
+        with stderr_lock:
+            current_len = stderr_total_bytes
         if current_len != last_output_len:
             last_output_len = current_len
             last_activity_ts = now
@@ -142,11 +153,11 @@ def _run_ffmpeg_with_idle_timeout(
             )
             _terminate_subprocess_tree(proc)
             drain_done.wait(timeout=5)
-            stderr_text = b"".join(stderr_parts).decode(errors="ignore")[-2500:]
+            stderr_text = _stderr_tail_text()
             return -1, stderr_text
 
     drain_done.wait(timeout=5)
-    stderr_text = b"".join(stderr_parts).decode(errors="ignore")[-2500:]
+    stderr_text = _stderr_tail_text()
     return int(proc.returncode or 0), stderr_text
 
 
@@ -184,6 +195,12 @@ def _run_ffmpeg_command_with_progress(
     proc = subprocess.Popen(progress_cmd, **popen_kwargs)
     events: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
     stderr_tail_parts: deque[str] = deque(maxlen=160)
+    stderr_tail_lock = threading.Lock()
+
+    def _stderr_tail_text() -> str:
+        with stderr_tail_lock:
+            snapshot = list(stderr_tail_parts)
+        return "\n".join(snapshot)[-2500:]
 
     def _pump(stream: Any, stream_name: str) -> None:
         try:
@@ -217,13 +234,13 @@ def _run_ffmpeg_command_with_progress(
         now = time.monotonic()
         if timeout_s > 0 and (now - start_ts) >= timeout_s:
             _terminate_subprocess_tree(proc)
-            stderr_tail = "\n".join(stderr_tail_parts)[-2500:]
+            stderr_tail = _stderr_tail_text()
             return -1, stderr_tail, f"ffmpeg timed out after {int(timeout_s)}s"
 
         effective_idle_timeout = int(idle_timeout_s or 0)
         if effective_idle_timeout > 0 and (now - last_progress_ts) >= effective_idle_timeout:
             _terminate_subprocess_tree(proc)
-            stderr_tail = "\n".join(stderr_tail_parts)[-2500:]
+            stderr_tail = _stderr_tail_text()
             return -1, stderr_tail, f"ffmpeg stalled with no progress for {effective_idle_timeout}s"
 
         try:
@@ -242,7 +259,8 @@ def _run_ffmpeg_command_with_progress(
         last_activity_ts = time.monotonic()
         if stream_name == "stderr":
             if payload:
-                stderr_tail_parts.append(payload)
+                with stderr_tail_lock:
+                    stderr_tail_parts.append(payload)
             continue
 
         if payload.startswith("out_time="):
@@ -259,10 +277,11 @@ def _run_ffmpeg_command_with_progress(
                 logger.info(f"⏱️ {progress_label}: state={state}{suffix}")
                 last_log_ts = last_activity_ts
         elif payload:
-            stderr_tail_parts.append(payload)
+            with stderr_tail_lock:
+                stderr_tail_parts.append(payload)
 
     proc.wait(timeout=5)
-    stderr_tail = "\n".join(stderr_tail_parts)[-2500:]
+    stderr_tail = _stderr_tail_text()
     return int(proc.returncode or 0), stderr_tail, ""
 
 

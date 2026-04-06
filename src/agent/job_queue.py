@@ -47,6 +47,39 @@ class JobQueue:
         return time.time()
 
     @staticmethod
+    def _busy_ttl_seconds(default_seconds: int = 21600) -> int:
+        try:
+            raw = (os.environ.get("JOB_QUEUE_BUSY_TTL_SECONDS", str(default_seconds)) or str(default_seconds)).strip()
+            value = int(float(raw))
+        except Exception:
+            value = default_seconds
+        return max(300, min(7 * 24 * 3600, value))
+
+    @staticmethod
+    def _parse_job_timestamp(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return None
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except Exception:
+            pass
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return float(dt.timestamp())
+        except Exception:
+            return None
+
+    @staticmethod
     def _local_jobs_column_types(conn) -> Dict[str, str]:
         try:
             rows = conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -270,12 +303,53 @@ class JobQueue:
             if not db_path.exists():
                 return False
 
+            ttl_seconds = self._busy_ttl_seconds()
+            now_ts = time.time()
+
             with sqlite3.connect(str(db_path), timeout=30.0) as conn:
                 cursor = conn.execute(
-                    "SELECT id FROM jobs WHERE agent_id = ? AND status IN ('pending', 'processing') LIMIT 1",
+                    "SELECT id, status, created_at, updated_at FROM jobs WHERE agent_id = ? AND status IN ('pending', 'processing')",
                     (agent_id,),
                 )
-                return cursor.fetchone() is not None
+                rows = cursor.fetchall() or []
+                if not rows:
+                    return False
+
+                stale_ids: List[str] = []
+                for row in rows:
+                    job_id = row[0]
+                    created_at = row[2]
+                    updated_at = row[3]
+                    ref_ts = self._parse_job_timestamp(updated_at)
+                    if ref_ts is None:
+                        ref_ts = self._parse_job_timestamp(created_at)
+                    if ref_ts is None:
+                        # إذا تعذر تحليل الوقت، نعتبره مشغولاً لتجنب التداخل
+                        return True
+
+                    age_seconds = max(0.0, now_ts - ref_ts)
+                    if age_seconds <= ttl_seconds:
+                        return True
+                    stale_ids.append(str(job_id))
+
+                # سجلات قديمة جداً: لا تمنع جدولة جديدة
+                if stale_ids:
+                    now_iso = self._now_iso()
+                    for stale_id in stale_ids:
+                        try:
+                            conn.execute(
+                                "UPDATE jobs SET status = 'failed', error_msg = ?, updated_at = ? WHERE id = ?",
+                                (f"stale busy marker auto-cleared after >{ttl_seconds}s", now_iso, stale_id),
+                            )
+                        except Exception:
+                            pass
+                    conn.commit()
+                    logger.warning(
+                        "⚠️ Auto-cleared %s stale busy queue rows for agent '%s'.",
+                        len(stale_ids),
+                        agent_id,
+                    )
+                return False
         except Exception:
             return False
 
@@ -426,8 +500,28 @@ class JobQueue:
                 from .supabase_client import _get_supabase
                 client = _get_supabase()
                 if client:
-                    result = client.table("job_queue").select("id").eq("agent_id", agent_id).in_("status", ["pending", "processing"]).limit(1).execute()
-                    supabase_busy = bool(result.data)
+                    ttl_seconds = self._busy_ttl_seconds()
+                    now_ts = time.time()
+                    result = (
+                        client.table("job_queue")
+                        .select("id,created_at,updated_at")
+                        .eq("agent_id", agent_id)
+                        .in_("status", ["pending", "processing"])
+                        .order("updated_at", desc=True)
+                        .limit(20)
+                        .execute()
+                    )
+                    rows = result.data or []
+                    for row in rows:
+                        ref_ts = self._parse_job_timestamp((row or {}).get("updated_at"))
+                        if ref_ts is None:
+                            ref_ts = self._parse_job_timestamp((row or {}).get("created_at"))
+                        if ref_ts is None:
+                            supabase_busy = True
+                            break
+                        if (now_ts - ref_ts) <= ttl_seconds:
+                            supabase_busy = True
+                            break
             except Exception:
                 supabase_busy = False
 

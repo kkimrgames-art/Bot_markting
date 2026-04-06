@@ -884,10 +884,33 @@ def pick_source_facecam_clip(raw_settings: Any, channel_id: str = "") -> Tuple[D
     for clip in facecam.get("clips") or []:
         if not isinstance(clip, dict) or not clip.get("enabled"):
             continue
+        clip_id = str(clip.get("id") or "").strip()
         clip_path = _resolve_project_runtime_path(str(clip.get("path") or ""))
         ext = os.path.splitext(clip_path)[1].lower()
         if clip_path and ext in _FACECAM_ALLOWED_EXTENSIONS and ResilientFS.isfile(clip_path):
             valid_source_clips.append(clip_path)
+            continue
+
+        # Fallback: استرجاع المقطع من Storage عند فقد النسخة المحلية
+        if clip_id:
+            cache_ext = ext if ext in _FACECAM_ALLOWED_EXTENSIONS else ".mp4"
+            cache_dir = _project_local_path(".temp", "facecam_cache")
+            with suppress(Exception):
+                ResilientFS.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, f"{clip_id}{cache_ext}")
+            try:
+                if not ResilientFS.isfile(cache_path):
+                    from src.agent.supabase_storage import download_facecam_from_storage
+
+                    restored = bool(download_facecam_from_storage(clip_id, cache_path))
+                    if restored and ResilientFS.isfile(cache_path):
+                        logger.info(f"🎬 Restored facecam clip from storage: {clip_id}")
+                if ResilientFS.isfile(cache_path):
+                    cache_path_ext = os.path.splitext(cache_path)[1].lower()
+                    if cache_path_ext in _FACECAM_ALLOWED_EXTENSIONS:
+                        valid_source_clips.append(cache_path)
+            except Exception as storage_err:
+                logger.debug(f"Facecam storage fallback failed for clip {clip_id}: {storage_err}")
 
     if valid_source_clips:
         return facecam, random.choice(valid_source_clips)
@@ -1051,7 +1074,7 @@ def _join_hashtags(tags: List[str], max_chars: int) -> str:
     return " ".join(chosen).strip()
 
 
-def _build_hashtag_only_upload_metadata(
+def _build_upload_metadata(
     ai_meta: Dict[str, Any],
     *,
     source_title: str,
@@ -1064,6 +1087,23 @@ def _build_hashtag_only_upload_metadata(
 ) -> Tuple[str, str, List[str]]:
     from src.agent.ai import _extract_hashtags_from_text, _keywords_from_hashtags, _sanitize_hashtag_list, _lang_requires_script_lock, optimize_hashtags
     from src.agent.local_metadata import extract_source_metadata_context
+
+    def _collapse(value: Any) -> str:
+        return " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split()).strip()
+
+    def _strip_hashtags(value: Any) -> str:
+        return _collapse(re.sub(r"#[^\s#]+", " ", str(value or "")))
+
+    def _clean_upload_tag(keyword: Any) -> str:
+        raw = str(keyword or "").strip()
+        if not raw:
+            return ""
+        raw = raw.lstrip("#").replace("_", " ")
+        raw = re.sub(r"[^0-9A-Za-z\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\s\-]", " ", raw)
+        raw = _collapse(raw).strip("-")
+        if len(raw) < 2:
+            return ""
+        return raw[:35]
 
     merged_description = merge_source_extra_description(
         ai_meta.get("description", source_description or ""),
@@ -1124,15 +1164,56 @@ def _build_hashtag_only_upload_metadata(
     if not description_tags:
         description_tags = list(title_tags)
 
-    final_title = _join_hashtags(title_tags, 95)
+    # عنوان قابل للقراءة (ليس هاشتاغات فقط)
+    final_title = _strip_hashtags(ai_meta.get("title", ""))
     if not final_title:
-        final_title = "#shorts" if (is_shorts and not strict_local_script) else "#video"
+        final_title = _strip_hashtags(source_title)
+    if not final_title:
+        final_title = _collapse(source_signals.get("topic") or content_type).replace("_", " ")
+    if not final_title:
+        final_title = "فيديو قصير جديد" if str(target_lang or "").lower().startswith("ar") else "New short video"
+    final_title = final_title[:95].rstrip(" -|:,.،؛")
 
-    final_description = _join_hashtags(description_tags, 4900)
-    if not final_description:
-        final_description = final_title
+    # وصف نصي + هاشتاغات محسنة
+    description_plain = _strip_hashtags(merged_description)
+    if len(description_plain) < 20:
+        description_plain = _strip_hashtags(ai_meta.get("description", ""))
+    if len(description_plain) < 20:
+        description_plain = _strip_hashtags(source_description)
+    if len(description_plain) < 20:
+        topic_text = _collapse(source_signals.get("topic") or source_title or content_type).replace("_", " ")
+        if str(target_lang or "").lower().startswith("ar"):
+            description_plain = f"شاهد هذا الفيديو عن {topic_text} مع أبرز اللقطات والتفاصيل المهمة."
+        else:
+            description_plain = f"Watch this video about {topic_text} with the best moments and important details."
 
-    upload_tags = _keywords_from_hashtags(description_tags, source_title or content_type, target_lang, limit=15)
+    hashtags_block = _join_hashtags(description_tags, 700)
+    if hashtags_block:
+        final_description = f"{description_plain}\n\n{hashtags_block}".strip()
+    else:
+        final_description = description_plain
+    final_description = final_description[:4900].rstrip()
+
+    # كلمات الرفع بدون #
+    upload_tags: List[str] = []
+    seen_upload_tags = set()
+    raw_upload_candidates: List[str] = []
+    raw_upload_candidates.extend([str(x) for x in (ai_meta.get("tags") or [])])
+    raw_upload_candidates.extend(_keywords_from_hashtags(description_tags, source_title or content_type, target_lang, limit=24))
+    raw_upload_candidates.extend([str(x) for x in (source_signals.get("keywords") or [])])
+
+    for raw_tag in raw_upload_candidates:
+        clean_tag = _clean_upload_tag(raw_tag)
+        key = clean_tag.lower()
+        if not clean_tag or key in seen_upload_tags:
+            continue
+        seen_upload_tags.add(key)
+        upload_tags.append(clean_tag)
+        if len(upload_tags) >= 15:
+            break
+
+    if not upload_tags:
+        upload_tags = _keywords_from_hashtags(title_tags or description_tags, source_title or content_type, target_lang, limit=15)
     return final_title, final_description, upload_tags
 
 
@@ -6938,7 +7019,7 @@ class AutoModFetcher:
                 source_context=source_video_metadata or {},
             )
             
-            final_title, description, tags = _build_hashtag_only_upload_metadata(
+            final_title, description, tags = _build_upload_metadata(
                 ai_meta,
                 source_title=title,
                 source_name=source_name,
