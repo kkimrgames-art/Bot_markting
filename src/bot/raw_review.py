@@ -26,6 +26,58 @@ from .security import get_security_manager
 logger = logging.getLogger(__name__)
 
 
+async def _send_link_review_fallback(
+    *,
+    admin_chat_id: int,
+    entry: Dict[str, Any],
+    keyboard: InlineKeyboardMarkup,
+    bot_app=None,
+) -> bool:
+    """Fallback: send a text review request (video URL + buttons) when file upload fails/unavailable."""
+    caption = _review_caption(entry)
+    video_url = str((entry or {}).get("video_url") or "").strip()
+    if video_url:
+        caption += f"\n\n🔗 <a href=\"{html.escape(video_url)}\">رابط الفيديو</a>"
+
+    if bot_app is not None:
+        try:
+            await bot_app.bot.send_message(
+                chat_id=admin_chat_id,
+                text=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+                disable_web_page_preview=False,
+            )
+            return True
+        except Exception as send_error:
+            logger.warning("Raw review link fallback via bot_app failed: %s", send_error)
+
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if not token:
+        return False
+
+    try:
+        import aiohttp
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": int(admin_chat_id),
+            "text": caption,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+            "reply_markup": keyboard.to_dict(),
+        }
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    return True
+                body = await resp.text()
+                logger.warning("Raw review link fallback failed (%s): %s", resp.status, body[:200])
+    except Exception as http_error:
+        logger.warning("Raw review link fallback HTTP error: %s", http_error)
+    return False
+
+
 async def _run_approved_review_now(
     entry: Dict[str, Any],
     context: ContextTypes.DEFAULT_TYPE,
@@ -66,7 +118,7 @@ async def _run_approved_review_now(
                 target_video_url=(entry or {}).get("video_url"),
                 target_video_title=(entry or {}).get("video_title"),
                 target_video_type=(entry or {}).get("video_type"),
-                target_raw_video_path=(entry or {}).get("raw_video_path"),
+                target_raw_video_path=((entry or {}).get("raw_video_path") or None),
             )
         except Exception as exc:
             logger.warning(
@@ -148,8 +200,8 @@ async def request_raw_video_review(
     bot_app = alert_system.get_bot_app()
     admin_chat_id = alert_system.get_admin_chat_id()
 
-    if not bot_app or not admin_chat_id or not raw_video_path or not ResilientFS.exists(raw_video_path):
-        logger.warning("Raw review request skipped because Telegram bot/admin/file is unavailable")
+    if not admin_chat_id:
+        logger.warning("Raw review request skipped because Telegram admin chat is unavailable")
         return False
 
     existing_pending = get_pending_raw_review(source_id, cfg=cfg)
@@ -162,6 +214,9 @@ async def request_raw_video_review(
         return False
 
     token = uuid.uuid4().hex
+    raw_video_path_value = str(raw_video_path or "").strip()
+    if raw_video_path_value:
+        raw_video_path_value = os.path.abspath(raw_video_path_value)
     entry = {
         "token": token,
         "source_id": str(source_id),
@@ -173,7 +228,7 @@ async def request_raw_video_review(
         "video_title": str((video or {}).get("title") or "بدون عنوان"),
         "video_url": str((video or {}).get("url") or ""),
         "video_type": str(video_type or "long"),
-        "raw_video_path": os.path.abspath(str(raw_video_path)),
+        "raw_video_path": raw_video_path_value,
         "requested_at": str((video or {}).get("upload_date") or ""),
     }
     keyboard = InlineKeyboardMarkup([
@@ -183,6 +238,24 @@ async def request_raw_video_review(
     ])
 
     set_pending_raw_review(source_id, entry, cfg=cfg)
+
+    raw_video_exists = bool(raw_video_path and ResilientFS.exists(raw_video_path))
+    if not bot_app or not raw_video_exists:
+        if not raw_video_exists:
+            logger.warning("Raw review raw file is unavailable; falling back to link review")
+        else:
+            logger.warning("Raw review bot_app is unavailable; falling back to link review")
+
+        sent = await _send_link_review_fallback(
+            admin_chat_id=int(admin_chat_id),
+            entry=entry,
+            keyboard=keyboard,
+            bot_app=bot_app,
+        )
+        if not sent:
+            clear_pending_raw_review(source_id, cfg=cfg)
+        return bool(sent)
+
     try:
         with ResilientFS.open(raw_video_path, "rb") as video_fp:
             await bot_app.bot.send_video(
@@ -208,9 +281,16 @@ async def request_raw_video_review(
                 )
             return True
         except Exception as doc_error:
-            clear_pending_raw_review(source_id, cfg=cfg)
             logger.warning(f"Raw review send failed: {doc_error}")
-            return False
+            sent = await _send_link_review_fallback(
+                admin_chat_id=int(admin_chat_id),
+                entry=entry,
+                keyboard=keyboard,
+                bot_app=bot_app,
+            )
+            if not sent:
+                clear_pending_raw_review(source_id, cfg=cfg)
+            return bool(sent)
 
 
 async def handle_raw_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

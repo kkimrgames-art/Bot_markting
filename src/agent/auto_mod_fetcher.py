@@ -6701,14 +6701,8 @@ class AutoModFetcher:
 
             if has_pending_raw_reviews() and not approved_target_resume and not preview_mode:
                 await _notify(
-                    "⏸ توجد مراجعة فيديو خام معلّقة بالفعل، لذلك تم إيقاف دورة الأتمتة بالكامل حتى يصدر قرارك."
+                    "⏸ توجد مراجعة فيديو خام معلّقة بالفعل، لذلك سيتم تجاوز المصادر التي تتطلب مراجعة خام حتى يصدر قرارك."
                 )
-                return {
-                    **results,
-                    "status": "waiting_raw_review",
-                    "message": "Pending raw review exists",
-                    "waiting_raw_review": 1,
-                }
 
             for sch_idx, schedule in enumerate(active, 1):
                 channel_id = schedule["channel_id"]
@@ -6825,11 +6819,10 @@ class AutoModFetcher:
                         )
                         pending_raw_review_paused = True
                         results["waiting_raw_review"] = max(results["waiting_raw_review"], 1)
-                        schedule_done = True
                         await _notify(
-                            f"⏸ المصدر `{src_name[:30]}` لديه فيديو خام بانتظار قرارك بالفعل، لذلك سيتم إيقاف دورة الأتمتة بالكامل الآن."
+                            f"⏸ المصدر `{src_name[:30]}` لديه فيديو خام بانتظار قرارك، سيتم تخطي هذا المصدر مؤقتاً."
                         )
-                        break
+                        continue
 
                     current_vid_id = ""
                     current_vid_title = ""
@@ -7310,30 +7303,52 @@ class AutoModFetcher:
                                     else:
                                         self._cleanup_file(dl_path)
                                         current_dl_path = None
-                                    schedule_done = True
-                                    pending_raw_review_paused = bool(requested or existing_pending)
-                                    _clear_processing_state()
-                                    if pending_raw_review_paused:
+                                    # إذا تم إرسال المراجعة (ملف أو fallback رابط) نوقف هذا المصدر فقط لهذه الدورة.
+                                    if requested or existing_pending:
+                                        schedule_done = True
+                                        pending_raw_review_paused = True
+                                        _clear_processing_state()
                                         results["waiting_raw_review"] += 1
-                                    else:
-                                        results["failed"] += 1
+                                        if requested:
+                                            await _notify(
+                                                f"🧪 تم طلب مراجعة الفيديو قبل المعالجة:\n"
+                                                f"   📺 `{vid_title}`\n"
+                                                f"   🧭 المصدر: `{src_name[:30]}`"
+                                            )
+                                        else:
+                                            await _notify(
+                                                f"⏸ يوجد فيديو بانتظار المراجعة لهذا المصدر بالفعل، تم تجاهل الفيديو الجديد:\n"
+                                                f"   📺 `{vid_title}`"
+                                            )
+                                        break
 
-                                    if requested:
-                                        await _notify(
-                                            f"🛑 تم إرسال الفيديو الخام للمراجعة اليدوية قبل المعالجة:\n"
-                                            f"   📺 `{vid_title}`\n"
-                                            f"   🧪 المصدر: `{src_name[:30]}`"
+                                    # فشل إرسال المراجعة ولم يوجد pending: لا توقف الأتمتة.
+                                    # نرسل بديل رابط + أزرار، ثم نتجاوز هذا الفيديو/المصدر لهذه الدورة.
+                                    try:
+                                        from src.bot.raw_review import request_raw_video_review
+
+                                        await request_raw_video_review(
+                                            source_id=source_id,
+                                            channel_id=channel_id,
+                                            source_name=src_name,
+                                            source_url=effective_source_url,
+                                            content_type=content_type,
+                                            video=video,
+                                            raw_video_path="",
+                                            video_type=vid_type,
                                         )
-                                    elif existing_pending:
-                                        await _notify(
-                                            f"⏸ يوجد أصلًا فيديو خام بانتظار المراجعة لهذا المصدر، لذلك تم تجاهل الفيديو الجديد:\n"
-                                            f"   📺 `{vid_title}`"
-                                        )
-                                    else:
-                                        await _notify(
-                                            f"⚠️ تعذر إرسال الفيديو الخام للمراجعة اليدوية، لذلك لن تتم المعالجة الآن:\n"
-                                            f"   📺 `{vid_title}`"
-                                        )
+                                    except Exception:
+                                        pass
+
+                                    await _notify(
+                                        f"⚠️ تعذر إرسال ملف الفيديو للمراجعة، تم إرسال رابط للمراجعة وسيتم تخطي هذا الفيديو الآن:\n"
+                                        f"   📺 `{vid_title}`"
+                                    )
+
+                                    pending_raw_review_paused = True
+                                    results["waiting_raw_review"] += 1
+                                    schedule_done = True
+                                    _clear_processing_state()
                                     break
 
                                 await _notify(
