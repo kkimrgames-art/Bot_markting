@@ -640,7 +640,7 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_status = "⌛ جاري الفحص..."
     auth_icon = "❓"
     try:
-        from ..channel_manager import ChannelManager, resolve_channel_token_path
+        from ..channel_manager import resolve_channel_token_path
 
         def _check_auth():
             token_path = resolve_channel_token_path(channel)

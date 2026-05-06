@@ -2641,6 +2641,115 @@ def _is_facebook_section_url(raw_url: Any) -> bool:
     )
 
 
+def resolve_facebook_page_from_video_url(raw_url: Any, *, timeout_seconds: int = 15) -> str:
+    """Resolve a Facebook profile/page URL from a video/watch/reel/share URL.
+
+    Used for bot UX: user may paste a Facebook video link while the bot expects a page/profile source.
+
+    Returns an empty string when resolution fails.
+    """
+    normalized = _normalize_facebook_candidate_url(raw_url)
+    if not normalized:
+        return ""
+
+    def _canonical_root_url(candidate_url: str) -> str:
+        """Return a stable root URL.
+
+        Important: for profile.php we must keep the `id` query parameter.
+        """
+        cand = _normalize_facebook_candidate_url(candidate_url)
+        if not cand:
+            return ""
+        try:
+            pr = urlparse(cand)
+        except Exception:
+            return cand
+        path_lc = (pr.path or "").lower()
+        if path_lc.endswith("/profile.php") or path_lc == "profile.php":
+            pid = _clean_url_candidate((parse_qs(pr.query).get("id") or [""])[0])
+            if pid:
+                return f"https://www.facebook.com/profile.php?id={pid}"
+            return cand
+        return cand.split("?", 1)[0].rstrip("/") or cand
+
+    # Already a page/profile.
+    if _is_facebook_profile_root_url(normalized):
+        return _canonical_root_url(normalized)
+
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        return ""
+
+    host = (parsed.netloc or "").lower()
+    if "facebook.com" not in host and host != "fb.watch":
+        return ""
+
+    headers = {
+        "User-Agent": (os.getenv("FB_USER_AGENT") or _MODERN_USER_AGENT).strip() or _MODERN_USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.facebook.com/",
+    }
+
+    try:
+        response = requests.get(normalized, headers=headers, allow_redirects=True, timeout=timeout_seconds)
+    except Exception:
+        response = None
+
+    candidates: List[str] = []
+    if response is not None:
+        try:
+            candidates = _extract_facebook_html_candidates(response.url, response.text)
+        except Exception:
+            candidates = []
+
+    root_candidates: List[str] = []
+    for candidate in candidates:
+        if _is_facebook_profile_root_url(candidate):
+            root_candidates.append(candidate)
+
+    if not root_candidates and response is not None:
+        final_url = _normalize_facebook_candidate_url(response.url)
+        if _is_facebook_profile_root_url(final_url):
+            root_candidates.append(final_url)
+
+    if not root_candidates:
+        # Fallback: Use yt-dlp metadata extraction to infer uploader/channel.
+        try:
+            import yt_dlp
+
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "extract_flat": True,
+                "http_headers": headers,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(normalized, download=False) or {}
+
+            for key in ("uploader_url", "channel_url", "uploader", "uploader_id", "channel_id"):
+                value = info.get(key)
+                if not value:
+                    continue
+                if isinstance(value, str) and value.startswith("http"):
+                    candidate = _normalize_facebook_candidate_url(value)
+                    if _is_facebook_profile_root_url(candidate):
+                        return _canonical_root_url(candidate)
+                if isinstance(value, str) and value.isdigit():
+                    candidate = f"https://www.facebook.com/profile.php?id={value}"
+                    candidate = _normalize_facebook_candidate_url(candidate)
+                    if _is_facebook_profile_root_url(candidate):
+                        return _canonical_root_url(candidate)
+        except Exception:
+            return ""
+        return ""
+
+    root_candidates.sort()
+    best = root_candidates[0]
+    return _canonical_root_url(best)
+
+
 def _facebook_candidate_priority(raw_url: Any, platform: str = "facebook") -> Tuple[int, str]:
     normalized = _normalize_facebook_candidate_url(raw_url)
     if not normalized:
@@ -6836,7 +6945,10 @@ class AutoModFetcher:
                                             other_count += 1
                                             continue
                                             
-                                        logger.info(f"🔎 [AutoMod-Debug] Video {v_id} added to potential_videos! (status={status})")
+                                        if status is None:
+                                            logger.debug(f"🔎 [AutoMod-Debug] Video {v_id} added to potential_videos (new/unseen in DB)")
+                                        else:
+                                            logger.debug(f"🔎 [AutoMod-Debug] Video {v_id} added to potential_videos (status={status})")
                                         potential_videos.append(v)
 
                                     logger.info(f"🔎 [AutoMod-Debug] potential_videos count BEFORE filters: {len(potential_videos)}")

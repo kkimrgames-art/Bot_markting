@@ -25,6 +25,7 @@ from ...agent.auto_mod_fetcher import (
     normalize_source_settings,
     merge_source_settings,
     resolve_facecam_layout_config,
+    resolve_facebook_page_from_video_url,
 )
 from ...agent.ffmpeg_utils import convert_still_image_to_loop_video
 from ...agent.supabase_storage import upload_facecam_to_storage, delete_facecam_from_storage, delete_all_facecam_for_source
@@ -3088,6 +3089,13 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not url.startswith("http"):
             await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
             return AM_ADD_SOURCE_URL
+
+        # Facebook UX: user may paste a video link instead of page/profile.
+        if platform.startswith("facebook"):
+            page_url = await asyncio.to_thread(resolve_facebook_page_from_video_url, url)
+            if page_url:
+                url = page_url
+
         context.user_data["am_new_source"]["source_url"] = url
 
     context.user_data["am_new_source"]["tail_trim_configured"] = False
