@@ -367,6 +367,8 @@ _INVIDIOUS_PIPED_COOLDOWN_SECONDS = 600
 _COBALT_MISSING_AUTH_HINT_SHOWN = False
 _MODERN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 _RUN_CYCLE_LOCK = threading.Lock()
+_LAST_INTER_AGENT_COOLDOWN_NOTIFY_AT = 0.0
+_LAST_INTER_AGENT_COOLDOWN_NOTIFY_UNTIL = 0.0
 _RUN_CYCLE_META_LOCK = threading.Lock()
 _RUN_CYCLE_STARTED_MONOTONIC = 0.0
 _METADATA_VARIATION_LOCK = threading.Lock()
@@ -6446,8 +6448,30 @@ class AutoModFetcher:
 
         schedules = self.db.get_all_schedules()
         active = [s for s in schedules if s.get("enabled")]
+        queue = JobQueue()
+
+        def _has_due_schedule() -> bool:
+            for schedule in active:
+                channel_id = str(schedule.get("channel_id") or "").strip()
+                if not channel_id:
+                    continue
+                content_type = str(schedule.get("content_type") or "minecraft_mods")
+                agent_key = f"{channel_id}::{content_type}"
+                if self.db.has_active_processing_lock(channel_id, content_type):
+                    continue
+                if queue.is_agent_busy_or_queued(agent_key) or queue.is_agent_busy_or_queued(channel_id):
+                    continue
+                if not self._is_publish_time(schedule):
+                    continue
+                if self._reached_daily_limit(schedule):
+                    continue
+                return True
+            return False
+
+        due_exists = _has_due_schedule()
+
         inter_agent_cooldown = _inter_agent_cooldown_seconds()
-        if inter_agent_cooldown > 0:
+        if due_exists and inter_agent_cooldown > 0:
             last_global_publish = self.db.get_last_global_publish_at()
             if last_global_publish:
                 now_utc = datetime.now(timezone.utc)
@@ -6460,14 +6484,21 @@ class AutoModFetcher:
                     )
                     if notify_func:
                         try:
-                            await notify_func(
-                                f"⏳ تبريد بين الوكلاء نشط، سيتم تأجيل الجدولة لمدة `{remaining}` ثانية بعد آخر نشر ناجح."
+                            global _LAST_INTER_AGENT_COOLDOWN_NOTIFY_AT, _LAST_INTER_AGENT_COOLDOWN_NOTIFY_UNTIL
+                            cooldown_until = time.time() + remaining
+                            should_notify = (
+                                cooldown_until > _LAST_INTER_AGENT_COOLDOWN_NOTIFY_UNTIL
+                                or (time.time() - _LAST_INTER_AGENT_COOLDOWN_NOTIFY_AT) > 180
                             )
+                            if should_notify:
+                                _LAST_INTER_AGENT_COOLDOWN_NOTIFY_AT = time.time()
+                                _LAST_INTER_AGENT_COOLDOWN_NOTIFY_UNTIL = cooldown_until
+                                await notify_func(
+                                    f"⏳ تبريد بين الوكلاء نشط، سيتم تأجيل الجدولة لمدة `{remaining}` ثانية بعد آخر نشر ناجح."
+                                )
                         except Exception:
                             pass
                     return {"status": "cooldown", "enqueued": 0, "cooldown_remaining_seconds": remaining}
-        
-        queue = JobQueue()
         enqueued_count = 0
         
         for schedule in active:
