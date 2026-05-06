@@ -172,7 +172,7 @@ def _stable_hash(data: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def load_state(cfg: Config | None = None) -> Dict[str, Any]:
+def load_state(cfg: Config | None = None, *, force_refresh: bool = False) -> Dict[str, Any]:
     global _CACHED_STATE, _CACHED_STATE_TS, _CACHED_STATE_KEY
     cfg = cfg or load_config()
     path = _state_path(cfg)
@@ -186,7 +186,8 @@ def load_state(cfg: Config | None = None) -> Dict[str, Any]:
         ttl = _state_cache_ttl_sec()
         now = time.time()
         if (
-            ttl > 0
+            (not force_refresh)
+            and ttl > 0
             and _CACHED_STATE is not None
             and _CACHED_STATE_KEY == cache_key
             and (now - _CACHED_STATE_TS) < ttl
@@ -415,7 +416,14 @@ def save_state(state: Dict[str, Any], cfg: Config | None = None) -> None:
             interval_ok = (now - _LAST_SUPABASE_SAVE_TS) >= _min_supabase_save_interval_sec()
             force_all = (os.environ.get("SUPABASE_FORCE_SAVE_ALL") or "").strip().lower() in {"1", "true", "yes", "on"}
 
-            should_save_supabase = force_all or local_failed or (critical_changed and interval_ok)
+            # Raw review decisions must be durable immediately to keep Telegram buttons working across processes.
+            try:
+                rr = state.get("raw_review") or {}
+                force_raw_review = bool((rr.get("pending") or {}) or (rr.get("token_index") or {}) or (rr.get("token_decisions") or {}))
+            except Exception:
+                force_raw_review = False
+
+            should_save_supabase = force_all or local_failed or (critical_changed and (interval_ok or force_raw_review))
 
             if should_save_supabase:
                 try:

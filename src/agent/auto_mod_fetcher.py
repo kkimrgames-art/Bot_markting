@@ -6688,9 +6688,13 @@ class AutoModFetcher:
                     return {"status": "no_schedules", "message": "No active schedules"}
 
             if meta_notifications_enabled:
-                await _notify(
-                    f"📋 تم العثور على *{len(active)}* جدول نشر نشط من أصل {max(schedule_total, len(active))}."
-                )
+                disabled_count = max(0, int(schedule_total) - int(len(active)))
+                if disabled_count:
+                    await _notify(
+                        f"📋 تم العثور على *{len(active)}* جدول نشر نشط. (معطل: {disabled_count}, الإجمالي: {schedule_total})"
+                    )
+                else:
+                    await _notify(f"📋 تم العثور على *{len(active)}* جدول نشر نشط.")
 
             results = {"processed": 0, "published": 0, "failed": 0, "skipped": 0, "waiting_raw_review": 0, "previewed": 0}
             errors_log = []

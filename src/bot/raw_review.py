@@ -315,7 +315,7 @@ async def handle_raw_review_callback(update: Update, context: ContextTypes.DEFAU
     source_id, pending = find_pending_raw_review_by_token(token, cfg=cfg)
     if not pending or not source_id:
         try:
-            state = load_state(cfg)
+            state = load_state(cfg, force_refresh=True)
             rr = (state.get("raw_review") or {}) if isinstance(state, dict) else {}
             token_decisions = rr.get("token_decisions") or {}
             token_index = rr.get("token_index") or {}
