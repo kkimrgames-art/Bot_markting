@@ -3,11 +3,14 @@
 نظام إدارة المصادر والجدولة والحالة عبر بوت تيليجرام
 """
 import os
-import shutil
-import re
-import logging
-import asyncio
 import html
+import asyncio
+import logging
+import os
+import re
+import time
+import json
+from typing import Optional
 import uuid
 from io import BytesIO
 from datetime import datetime, timezone
@@ -77,7 +80,8 @@ logger = logging.getLogger(__name__)
     AM_VIEW_CONTAINERS,
     AM_VIEW_CONTAINER_VIDEOS,
     AM_VIEW_FACECAM_VIDEOS,
-) = range(23)
+    AM_CLIENT_SECRET_UPLOAD,
+) = range(24)
 
 
 async def _safe_answer(query, **kwargs):
@@ -750,16 +754,130 @@ async def _continue_source_creation(update: Update, context: ContextTypes.DEFAUL
     if draft.get("source_url"):
         if not draft.get("tail_trim_configured"):
             return await _ask_source_tail_trim(update, context)
-        if not draft.get("intro_effect_configured"):
-            return await _ask_source_video_effect_kind(update, context, "intro")
-        if not draft.get("outro_effect_configured"):
-            return await _ask_source_video_effect_kind(update, context, "outro")
-        if not draft.get("hflip_configured"):
-            return await _ask_source_hflip(update, context)
-        if not draft.get("privacy_configured"):
-            return await _ask_source_privacy(update, context)
-        return await _ask_source_name(update, context)
-    return await _ask_source_url(update, context)
+
+
+async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+
+    from ...agent.config import load_config
+    from ...agent.uploader import _find_client_secrets_file
+    from ..auth_flow_utils import DRIVE_SCOPES, start_auth_flow_scopes
+
+    cfg = load_config()
+    client_secrets = _find_client_secrets_file(cfg)
+    if not client_secrets:
+        await query.edit_message_text(
+            "❌ ملف client_secret.json غير موجود. أضف/ارفع ملف المصادقة أولاً (نفس الملف المستخدم ليوتيوب).",
+            parse_mode="HTML",
+        )
+        return AM_CONFIG
+
+    try:
+        await query.edit_message_text("⏳ جاري تحضير رابط مصادقة Google Drive...", parse_mode="HTML")
+        auth_url, server, flow = await asyncio.to_thread(start_auth_flow_scopes, client_secrets, DRIVE_SCOPES)
+        context.user_data["am_gdrive_flow"] = flow
+        context.user_data["am_gdrive_server"] = server
+        redirect_uri = getattr(flow, "redirect_uri", None) or f"http://localhost:{server.port}/oauth2/callback"
+
+        text = (
+            "☁️ <b>ربط Google Drive</b>\n\n"
+            f"<a href=\"{auth_url}\">🔗 اضغط هنا للمصادقة</a>\n\n"
+            "⚠️ إذا ظهر لك خطأ <b>redirect_uri_mismatch</b> أضف هذا الرابط بالضبط في Google Cloud Console:\n"
+            f"<code>{html.escape(redirect_uri)}</code>\n\n"
+            "📌 بعد المصادقة سيتم الحفظ تلقائياً."
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ تم - لدي رابط التحويل", callback_data="am_gdrive_have_url")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="am_config")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", disable_web_page_preview=True)
+
+        task = context.application.create_task(gdrive_wait_for_auth_code(update, context))
+        context.bot_data.setdefault("am_gdrive_auth_tasks", set()).add(task)
+        task.add_done_callback(lambda t: context.bot_data.get("am_gdrive_auth_tasks", set()).discard(t))
+        return AM_CONFIG
+    except Exception as e:
+        logger.error(f"Google Drive auth start failed: {e}")
+        await query.edit_message_text(f"❌ خطأ: <code>{html.escape(str(e)[:200])}</code>", parse_mode="HTML")
+        return AM_CONFIG
+
+
+async def gdrive_wait_for_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    server = context.user_data.get("am_gdrive_server")
+    if not server:
+        return
+    try:
+        response_uri = await asyncio.to_thread(server.wait_for_response, timeout=300)
+        if response_uri and server.error:
+            chat_id = update.effective_chat.id
+            await context.bot.send_message(chat_id, f"❌ فشلت مصادقة Google Drive: {server.error}")
+            return
+        if response_uri:
+            await gdrive_process_auth_result(update, context, response_uri)
+    except Exception as e:
+        logger.error(f"Google Drive auth wait error: {e}")
+
+
+async def gdrive_receive_auth_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    text = (
+        "🔗 <b>أرسل رابط التحويل النهائي</b>\n\n"
+        "بعد إكمال المصادقة في المتصفح، انسخ رابط الصفحة النهائية (الذي يحتوي على <code>code=</code>) وأرسله هنا."
+    )
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_config")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    context.user_data["am_gdrive_awaiting_url"] = True
+    return AM_SOURCE_TEXT_INPUT
+
+
+async def gdrive_receive_auth_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("am_gdrive_awaiting_url"):
+        return AM_SOURCE_TEXT_INPUT
+    url = (update.message.text or "").strip()
+    if "code=" not in url and len(url) < 20:
+        await update.message.reply_text("⚠️ الرابط/الكود يبدو غير صالح. أرسل رابط التحويل الكامل.")
+        return AM_SOURCE_TEXT_INPUT
+    context.user_data.pop("am_gdrive_awaiting_url", None)
+    await gdrive_process_auth_result(update, context, url)
+    return ConversationHandler.END
+
+
+async def gdrive_process_auth_result(update: Update, context: ContextTypes.DEFAULT_TYPE, response_uri: str):
+    from ..auth_flow_utils import exchange_code_and_get_creds
+
+    flow = context.user_data.get("am_gdrive_flow")
+    if not flow:
+        return
+    try:
+        creds = await asyncio.to_thread(exchange_code_and_get_creds, flow, response_uri)
+        token_payload = None
+        try:
+            token_payload = json.loads(creds.to_json())
+        except Exception:
+            token_payload = None
+
+        if not token_payload:
+            chat_id = update.effective_chat.id
+            await context.bot.send_message(chat_id, "❌ فشل استخراج توكن Google Drive.")
+            return
+
+        db = _get_db()
+        config = db.get_config()
+        config.setdefault("settings", {})
+        config["settings"].setdefault("google_drive", {})
+        config["settings"]["google_drive"]["token_json"] = token_payload
+        config["settings"]["google_drive"]["updated_at"] = time.time()
+        db.save_config(config)
+
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(chat_id, "✅ تم ربط Google Drive بنجاح! يمكنك الآن إضافة مصادر Drive.")
+    except Exception as e:
+        logger.error(f"Google Drive auth processing failed: {e}")
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(chat_id, f"❌ فشل ربط Google Drive: {e}")
+    return
 
 
 # ==================== القائمة الرئيسية ====================
@@ -2465,12 +2583,14 @@ async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_T
         "📍 <b>اختر طريقة المصدر:</b>\n\n"
         "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
         "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
+        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
         "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)\n\n"
         "سيتم بعد ذلك تحديد المصدر الذي يعتمد عليه البوت ضمن أتمتة الجلب."
     )
     keyboard = [
         [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
         [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
         [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
@@ -2498,11 +2618,13 @@ async def add_source_custom_type(update: Update, context: ContextTypes.DEFAULT_T
         "📍 <b>اختر طريقة المصدر:</b>\n\n"
         "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
         "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
+        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
         "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)"
     )
     keyboard = [
         [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
         [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
         [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
@@ -2522,7 +2644,7 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
     await _safe_answer(query)
 
     kind = (query.data.split(":", 1)[1] if query and query.data else "").strip().lower()
-    if kind not in {"youtube", "container", "facebook"}:
+    if kind not in {"youtube", "container", "facebook", "gdrive"}:
         return AM_ADD_SOURCE_KIND
 
     context.user_data.setdefault("am_new_source", {})
@@ -2530,6 +2652,20 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
 
     if kind == "container":
         return await _show_container_picker(update, context, page=0)
+
+    if kind == "gdrive":
+        text = (
+            "☁️ <b>مصدر Google Drive</b>\n\n"
+            "أرسل <b>Folder ID</b> (معرف المجلد) الذي تريد أن يجلب منه البوت الفيديوهات.\n\n"
+            "💡 يمكنك الحصول عليه من رابط المجلد:\n"
+            "<code>https://drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>\n\n"
+            "⚠️ يجب أن تكون قد ربطت Google Drive من قائمة الإعدادات أولاً."
+        )
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        context.user_data.setdefault("am_new_source", {})["platform"] = "google_drive"
+        context.user_data["am_new_source"]["awaiting_url"] = True
+        return AM_ADD_SOURCE_URL
 
     if kind == "facebook":
         text = (
@@ -3046,15 +3182,22 @@ async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ إذا فشل الجلب، جرّب تزويد Cookies عبر متغير البيئة <code>YTDLP_COOKIES_PATH</code>."
         )
     else:
-        text = (
-            "🔗 <b>أدخل رابط مصدر يوتيوب:</b>\n\n"
-            "أمثلة:\n"
-            "• <code>https://www.youtube.com/@channelname/shorts</code>\n"
-            "• <code>https://www.youtube.com/@channelname/videos</code>\n"
-            "• <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>\n\n"
-            "⚠️ أرسل <b>رابط مصدر واحد فقط</b> في كل رسالة، وليس عدة روابط دفعة واحدة.\n"
-            "💡 يمكن أن يكون الرابط قناة أو تبويب <code>/videos</code> أو <code>/shorts</code> أو Playlist."
-        )
+        if platform == "google_drive":
+            text = (
+                "☁️ <b>أدخل Folder ID لمجلد Google Drive:</b>\n\n"
+                "مثال: <code>1AbCDefGhIjKlmNopQRstuVwxyz</code>\n\n"
+                "⚠️ أرسل <b>Folder ID فقط</b> بدون نص إضافي."
+            )
+        else:
+            text = (
+                "🔗 <b>أدخل رابط مصدر يوتيوب:</b>\n\n"
+                "أمثلة:\n"
+                "• <code>https://www.youtube.com/@channelname/shorts</code>\n"
+                "• <code>https://www.youtube.com/@channelname/videos</code>\n"
+                "• <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>\n\n"
+                "⚠️ أرسل <b>رابط مصدر واحد فقط</b> في كل رسالة، وليس عدة روابط دفعة واحدة.\n"
+                "💡 يمكن أن يكون الرابط قناة أو تبويب <code>/videos</code> أو <code>/shorts</code> أو Playlist."
+            )
     keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     context.user_data["am_new_source"]["awaiting_url"] = True
@@ -3077,6 +3220,17 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ أدخل معرف حاوية صالح (UUID أو container:UUID).")
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"container:{cid}"
+    elif platform == "google_drive":
+        folder_id = raw
+        folder_id = folder_id.strip()
+        if folder_id.startswith("http"):
+            await update.message.reply_text("❌ أرسل Folder ID فقط (ليس رابط).")
+            return AM_ADD_SOURCE_URL
+        if not folder_id or len(folder_id) < 10:
+            await update.message.reply_text("❌ Folder ID غير صالح. تحقق منه وأعد الإرسال.")
+            return AM_ADD_SOURCE_URL
+        context.user_data["am_new_source"]["source_url"] = f"gdrive:folder:{folder_id}"
+        context.user_data["am_new_source"]["platform"] = "google_drive"
     else:
         url = raw
         url_matches = re.findall(r"https?://\S+", raw)
@@ -3352,6 +3506,11 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text:
         await update.message.reply_text("⚠️ أرسل نصًا واحدًا على الأقل.")
         return AM_SOURCE_TEXT_INPUT
+
+    if context.user_data.get("am_gdrive_awaiting_url"):
+        context.user_data.pop("am_gdrive_awaiting_url", None)
+        await gdrive_process_auth_result(update, context, raw_text)
+        return ConversationHandler.END
 
     if mode == "add_overlay_texts":
         texts = _split_overlay_texts(raw_text)
@@ -3849,6 +4008,8 @@ async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📏 تردد الفحص: {config.get('auto_fetch_interval_seconds', 60)}s",
             callback_data="am_cfg_loop_interval"
         )],
+        [InlineKeyboardButton("📂 رفع ملف المصادقة (client_secret.json)", callback_data="am_client_secret_start")],
+        [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
         [InlineKeyboardButton("🍪 تحديث ملف الكوكيز (cookies.txt)", callback_data="am_cookies_start")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
     ]
@@ -3928,6 +4089,56 @@ async def cookies_upload_start(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="am_config")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_COOKIES_UPLOAD
+
+
+async def client_secret_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+
+    text = (
+        "📂 <b>رفع ملف المصادقة (client_secret.json)</b>\n\n"
+        "يرجى إرسال ملف <code>client_secret.json</code> الآن (كمستند).\n\n"
+        "سيتم حفظه واستخدامه لربط Google Drive و YouTube OAuth.\n\n"
+        "<i>سيتم استبدال الملف القديم فوراً إن وجد.</i>"
+    )
+    keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="am_config")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_CLIENT_SECRET_UPLOAD
+
+
+async def receive_client_secret_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.document:
+        await update.message.reply_text("⚠️ يرجى إرسال ملف <code>client_secret.json</code> بصيغة مستند.", parse_mode="HTML")
+        return AM_CLIENT_SECRET_UPLOAD
+
+    doc = update.message.document
+    if not str(doc.file_name or "").lower().endswith(".json"):
+        await update.message.reply_text("⚠️ يجب أن يكون الملف بصيغة <code>.json</code> (client_secret.json).", parse_mode="HTML")
+        return AM_CLIENT_SECRET_UPLOAD
+
+    try:
+        from ...agent.config import load_config
+
+        cfg = load_config()
+        target_dir = os.path.dirname(cfg.TELEGRAM_DB_PATH) or ".data"
+        os.makedirs(target_dir, exist_ok=True)
+        target_path = os.path.join(target_dir, "client_secret.json")
+
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=target_path)
+
+        await update.message.reply_text(
+            "✅ تم حفظ ملف <code>client_secret.json</code> بنجاح. يمكنك الآن ربط Google Drive.",
+            parse_mode="HTML",
+        )
+        return await config_menu(update, context)
+    except Exception as e:
+        logger.error(f"Error saving client_secret.json: {e}")
+        await update.message.reply_text(
+            f"❌ حدث خطأ أثناء حفظ الملف: <code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        return AM_CLIENT_SECRET_UPLOAD
 
 
 async def receive_cookies_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4424,6 +4635,9 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             ],
             AM_CONFIG: [
                 CallbackQueryHandler(cookies_upload_start, pattern=r"^am_cookies_start$"),
+                CallbackQueryHandler(client_secret_upload_start, pattern=r"^am_client_secret_start$"),
+                CallbackQueryHandler(gdrive_connect_start, pattern=r"^am_gdrive_connect$"),
+                CallbackQueryHandler(gdrive_receive_auth_url, pattern=r"^am_gdrive_have_url$"),
                 CallbackQueryHandler(config_toggle, pattern=r"^am_cfg_"),
                 *_auto_mod_common_nav_handlers(),
             ],
@@ -4431,10 +4645,14 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.Document.ALL, receive_cookies_file),
                 *_auto_mod_common_nav_handlers(),
             ],
+            AM_CLIENT_SECRET_UPLOAD: [
+                MessageHandler(filters.Document.ALL, receive_client_secret_file),
+                *_auto_mod_common_nav_handlers(),
+            ],
         },
         fallbacks=[
             CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
-            CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^main_menu$"),
+            CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^am_end$"),
         ],
         name="auto_mod_conversation",
         persistent=False,

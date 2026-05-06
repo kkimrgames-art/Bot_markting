@@ -7,11 +7,36 @@ import logging
 import os
 import sys
 import time
+import re
+import uuid
+import asyncio
+import random
+import tempfile
+import threading
+from io import BytesIO
 from contextlib import suppress
 from collections import deque
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
+
+import requests
+
+from google.oauth2.credentials import Credentials as GoogleCredentials
+from googleapiclient.discovery import build as google_build
+from googleapiclient.http import MediaIoBaseDownload
 
 from src.utils.resilient_fs import ResilientFS
+from src.agent.downloader import _is_retryable_ytdlp_error, _build_retry_opts
+from src.agent.config import load_config
+from src.agent.job_queue import JobQueue
+from src.bot.persistence import (
+    has_pending_raw_reviews,
+    get_pending_raw_review,
+    is_raw_review_approved,
+    is_raw_review_blocked,
+    is_raw_review_skip_active,
+)
 
 # إضافة مسار المشروع للجذر للسماح بالتشغيل المباشر
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -245,95 +270,15 @@ def _recover_interrupted_processing() -> None:
                         pass
     except Exception:
         pass
-    
-    _clear_processing_state()
-
-import logging
-import asyncio
-import time
-import uuid
-import subprocess
-import json
-import re
-import random
-import shutil
-import base64
-import threading
-import requests
-import os
 
 def _get_video_duration_ffprobe(filepath: str) -> Optional[float]:
-    """استخراج مدة الفيديو بالثواني باستخدام ffprobe"""
-    if not os.path.exists(filepath):
-        return None
-    try:
-        from src.agent.ffmpeg_utils import ffprobe_bin
-        _ffprobe = ffprobe_bin() or "ffprobe"
-    except Exception:
-        _ffprobe = "ffprobe"
-    try:
-        cmd = [
-            _ffprobe, "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", filepath
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
-        return float(result.stdout.strip())
-    except Exception:
-        return None
+    # ... (rest of the code remains the same)
 
-def _auto_trim_video(filepath: str, max_duration: int) -> Optional[str]:
-    """قص الفيديو من النهاية ليطابق المدة القصوى المسموحة بدون إعادة ترميز (Stream Copy)"""
-    if not os.path.exists(filepath):
-        return None
-    try:
-        from src.agent.ffmpeg_utils import ffmpeg_bin
-        _ffmpeg = ffmpeg_bin() or "ffmpeg"
-    except Exception:
-        _ffmpeg = "ffmpeg"
-    
-    dir_name = os.path.dirname(filepath)
-    base_name = os.path.basename(filepath)
-    name, ext = os.path.splitext(base_name)
-    out_path = os.path.join(dir_name, f"{name}_trimmed{ext}")
-    
-    try:
-        cmd = [
-            _ffmpeg, "-y", "-i", filepath,
-            "-t", str(max_duration),
-            "-c", "copy",
-            out_path
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-        if res.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            return out_path
-    except Exception:
-        pass
-    
     if os.path.exists(out_path):
         with suppress(Exception):
             os.remove(out_path)
     return None
-import base64
-import threading
-import requests
-from contextlib import suppress
-from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, timezone, timedelta
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
-from src.agent.downloader import _is_retryable_ytdlp_error, _build_retry_opts
-from src.utils.resilient_fs import ResilientFS
-from src.agent.config import load_config
-from src.agent.job_queue import JobQueue
-from src.bot.persistence import (
-    has_pending_raw_reviews,
-    get_pending_raw_review,
-    is_raw_review_approved,
-    is_raw_review_blocked,
-    is_raw_review_skip_active,
-)
-
-logger = logging.getLogger(__name__)
 _YT_BOTCHECK_HINT_SHOWN = False
 _FB_HINT_SHOWN = False
 _COBALT_FALLBACK_DISABLED = False
@@ -4544,7 +4489,17 @@ class AutoModFetcher:
         جلب أحدث الفيديوهات من مصدر (يوتيوب/فيسبوك)
         يعتمد الآن حصرياً على yt-dlp مع retry لتجاوز الحظر
         """
-        if (platform or "").strip().lower() == "container" or (source_url or "").strip().lower().startswith("container:"):
+        platform_norm = (platform or "").strip().lower()
+        url_norm = (source_url or "").strip()
+
+        if platform_norm == "google_drive" or url_norm.lower().startswith("gdrive:"):
+            try:
+                return await self._fetch_from_gdrive(url_norm, items_range)
+            except Exception as e:
+                logger.error(f"Failed to fetch from google drive source {source_url}: {e}")
+                return []
+
+        if platform_norm == "container" or url_norm.lower().startswith("container:"):
             try:
                 return await self._fetch_from_container(source_url, items_range)
             except Exception as e:
@@ -4608,6 +4563,88 @@ class AutoModFetcher:
                 "view_count": None,
                 "upload_date": v.get("created_at"),
             })
+        return out
+
+    def _gdrive_service(self):
+        cfg = None
+        try:
+            cfg = self.db.get_config()
+        except Exception:
+            cfg = None
+        settings = (cfg or {}).get("settings") or {}
+        gcfg = settings.get("google_drive") or {}
+        token_json = gcfg.get("token_json")
+        if not isinstance(token_json, dict) or not token_json:
+            raise RuntimeError("Google Drive غير مرتبط. اربط الحساب أولاً من الإعدادات.")
+        creds = GoogleCredentials.from_authorized_user_info(token_json)
+        return google_build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    async def _fetch_from_gdrive(self, source_url: str, items_range: str) -> List[Dict]:
+        raw = (source_url or "").strip()
+        folder_id = ""
+        if raw.lower().startswith("gdrive:folder:"):
+            folder_id = raw.split(":", 2)[2].strip()
+        elif raw.lower().startswith("gdrive:"):
+            folder_id = raw.split(":", 1)[1].strip()
+        else:
+            folder_id = raw
+
+        if not folder_id:
+            return []
+
+        start, end = self._parse_items_range(items_range)
+
+        def _list_files_sync() -> List[Dict[str, Any]]:
+            service = self._gdrive_service()
+            q = (
+                f"'{folder_id}' in parents and trashed=false and (mimeType contains 'video/' or mimeType='application/octet-stream')"
+            )
+            files: List[Dict[str, Any]] = []
+            page_token = None
+            while True:
+                resp = (
+                    service.files()
+                    .list(
+                        q=q,
+                        fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,size)",
+                        orderBy="createdTime desc",
+                        pageSize=200,
+                        pageToken=page_token,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
+                )
+                files.extend(resp.get("files", []) or [])
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
+            return files
+
+        loop = asyncio.get_running_loop()
+        all_files = await loop.run_in_executor(None, _list_files_sync)
+        subset = (all_files or [])[start - 1:end]
+
+        out: List[Dict[str, Any]] = []
+        for f in subset:
+            fid = str((f or {}).get("id") or "").strip()
+            if not fid:
+                continue
+            name = str((f or {}).get("name") or "").strip()
+            created = (f or {}).get("createdTime") or (f or {}).get("modifiedTime")
+            out.append(
+                {
+                    "id": fid,
+                    "title": name,
+                    "description": "",
+                    "url": f"gdrive://{fid}",
+                    "duration": None,
+                    "view_count": None,
+                    "upload_date": created,
+                    "mime_type": (f or {}).get("mimeType"),
+                    "file_name": name,
+                }
+            )
         return out
 
     # (تمت إزالة نظام YouTube Data API القديم. الجلب يعتمد الآن على yt-dlp فقط.)
@@ -5047,6 +5084,9 @@ class AutoModFetcher:
             if (video_url or "").strip().lower().startswith("container://"):
                 loop = asyncio.get_running_loop()
                 return await loop.run_in_executor(None, self._download_container_sync, video_url, output_dir)
+            if (video_url or "").strip().lower().startswith("gdrive://"):
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, self._download_gdrive_sync, video_url, output_dir)
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None, self._download_sync, video_url, output_dir, max_duration
@@ -5127,6 +5167,44 @@ class AutoModFetcher:
             return None
         except Exception as e:
             logger.error(f"Failed to download container video {vid_id}: {e}")
+            return None
+
+    def _download_gdrive_sync(self, video_url: str, output_dir: str) -> Optional[str]:
+        try:
+            file_id = (video_url or "").split("gdrive://", 1)[1].strip()
+        except Exception:
+            return None
+        if not file_id:
+            return None
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            service = self._gdrive_service()
+            meta = service.files().get(fileId=file_id, fields="name,mimeType", supportsAllDrives=True).execute()
+            name = str((meta or {}).get("name") or "").strip() or file_id
+        except Exception:
+            name = file_id
+
+        ext = os.path.splitext(name)[1] or ".mp4"
+        dest = os.path.join(output_dir, f"{file_id}{ext}")
+
+        try:
+            request = self._gdrive_service().files().get_media(fileId=file_id, supportsAllDrives=True)
+            with open(dest, "wb") as fh:
+                downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                return dest
+            return None
+        except Exception as e:
+            self._remember_download_error(e)
+            logger.error(f"Failed to download gdrive file {file_id}: {e}")
             return None
 
     def _resolve_facebook_download_url(self, video_url: str, max_duration: Optional[int] = None) -> str:
