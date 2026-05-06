@@ -18,6 +18,7 @@ from .persistence import (
     clear_pending_raw_review,
     find_pending_raw_review_by_token,
     get_pending_raw_review,
+    load_state,
     set_pending_raw_review,
     skip_pending_raw_review,
 )
@@ -314,10 +315,51 @@ async def handle_raw_review_callback(update: Update, context: ContextTypes.DEFAU
     source_id, pending = find_pending_raw_review_by_token(token, cfg=cfg)
     if not pending or not source_id:
         try:
+            state = load_state(cfg)
+            rr = (state.get("raw_review") or {}) if isinstance(state, dict) else {}
+            token_decisions = rr.get("token_decisions") or {}
+            token_index = rr.get("token_index") or {}
+            token_entry = token_index.get(token)
+            decision_info = token_decisions.get(token)
+        except Exception:
+            token_entry = None
+            decision_info = None
+
+        try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await query.answer("تم التعامل مع هذا الفيديو مسبقًا.", show_alert=True)
+
+        if isinstance(decision_info, dict) and decision_info.get("decision"):
+            decision = str(decision_info.get("decision"))
+            if decision == "approved":
+                await query.answer("✅ تمت الموافقة مسبقًا. إذا لم تبدأ المعالجة سيتم استئنافها قريبًا.", show_alert=True)
+            elif decision == "blocked":
+                await query.answer("🚫 تم الحظر مسبقًا.", show_alert=True)
+            elif decision == "skipped":
+                await query.answer("⏭️ تم التخطي مسبقًا.", show_alert=True)
+            else:
+                await query.answer("تم التعامل مع هذا الفيديو مسبقًا.", show_alert=True)
+            return
+
+        if isinstance(token_entry, dict) and token_entry:
+            # Token still known (e.g., pending got overwritten). Allow late decision anyway.
+            if action == "approve":
+                decided, _ = approve_pending_raw_review(token, decided_by=user.id, cfg=cfg)
+                if decided:
+                    _schedule_approved_review_processing(decided, context)
+                await query.answer("✅ تمت الموافقة. بدأت محاولة المعالجة الآن في الخلفية.", show_alert=True)
+                return
+            if action == "skip":
+                skip_pending_raw_review(token, decided_by=user.id, cfg=cfg, skip_cooldown_seconds=RAW_REVIEW_SKIP_COOLDOWN_SECONDS)
+                await query.answer("⏭️ تم التخطي مؤقتًا.", show_alert=True)
+                return
+            if action == "block":
+                block_pending_raw_review(token, decided_by=user.id, cfg=cfg)
+                await query.answer("🚫 تم الحظر الدائم.", show_alert=True)
+                return
+
+        await query.answer("تم التعامل مع هذا الفيديو مسبقًا أو انتهت صلاحيته.", show_alert=True)
         return
 
     should_resume_immediately = False
