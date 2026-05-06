@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 Auto-Mod Bot — Standalone Entry Point (وكيل مستقل ذاتي التعافي)
 Specialized for Render deployment (Web Service).
