@@ -3292,13 +3292,20 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"container:{cid}"
     elif platform == "google_drive":
-        folder_id = raw
-        folder_id = folder_id.strip()
+        folder_id = raw.strip()
         if folder_id.startswith("http"):
-            await update.message.reply_text("❌ أرسل Folder ID فقط (ليس رابط).")
-            return AM_ADD_SOURCE_URL
+            m = re.search(r"/folders/([a-zA-Z0-9_-]+)", folder_id)
+            if m:
+                folder_id = m.group(1).strip()
+            else:
+                await update.message.reply_text("❌ لم أستطع استخراج Folder ID من الرابط. أرسل Folder ID أو رابط مجلد صحيح.")
+                return AM_ADD_SOURCE_URL
+        folder_id = re.sub(r"[^a-zA-Z0-9_-]", "", folder_id)
         if not folder_id or len(folder_id) < 10:
             await update.message.reply_text("❌ Folder ID غير صالح. تحقق منه وأعد الإرسال.")
+            return AM_ADD_SOURCE_URL
+        if len(folder_id) < 20:
+            await update.message.reply_text("⚠️ Folder ID يبدو قصيراً/ناقصاً. تأكد أنك نسخته كاملاً من رابط المجلد (بعد /folders/).")
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"gdrive:folder:{folder_id}"
         context.user_data["am_new_source"]["platform"] = "google_drive"

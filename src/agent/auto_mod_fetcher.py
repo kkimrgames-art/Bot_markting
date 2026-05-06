@@ -4550,6 +4550,10 @@ class AutoModFetcher:
                     start = 1
                 if start == 1:
                     if not videos:
+                        # Validate folder id/access when empty to avoid silent failures.
+                        if folder_id:
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(None, self._gdrive_validate_folder_sync, folder_id)
                         if folder_id:
                             loop = asyncio.get_running_loop()
                             latest_id = await loop.run_in_executor(None, self._gdrive_light_latest_id_sync, folder_id)
@@ -4673,6 +4677,33 @@ class AutoModFetcher:
             raise RuntimeError("Google Drive غير مرتبط. اربط الحساب أولاً من الإعدادات.")
         creds = GoogleCredentials.from_authorized_user_info(token_json)
         return google_build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    def _gdrive_validate_folder_sync(self, folder_id: str) -> None:
+        service = self._gdrive_service()
+        try:
+            meta = (
+                service.files()
+                .get(
+                    fileId=folder_id,
+                    fields="id,name,mimeType,driveId,trashed",
+                    supportsAllDrives=True,
+                )
+                .execute()
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "📁 Folder ID غير صحيح أو لا يمكن الوصول إليه. "
+                "تأكد من أن المجلد موجود وأنه مشارك مع الحساب المرتبط بالبوت. "
+                f"({str(e)[:120]})"
+            )
+
+        mime = str((meta or {}).get("mimeType") or "").strip().lower()
+        trashed = bool((meta or {}).get("trashed"))
+        if trashed:
+            raise RuntimeError("🗑️ هذا المجلد موجود لكنه في سلة المهملات (trashed).")
+        if mime != "application/vnd.google-apps.folder":
+            name = str((meta or {}).get("name") or "").strip()
+            raise RuntimeError(f"📄 المعرف الذي أرسلته ليس مجلد (Folder). الاسم: {name!r}, النوع: {mime!r}")
 
     def _parse_gdrive_folder_id(self, source_url: str) -> str:
         raw = (source_url or "").strip()
