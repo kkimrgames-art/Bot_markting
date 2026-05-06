@@ -174,8 +174,6 @@ class AlertSystem:
             mem = mem_status()
 
             report = (
-                "📊 *التقرير اليومي*\n"
-                "━━━━━━━━━━━━━━━━\n\n"
                 f"💾 القرص: `{disk.get('free_mb', '?')}MB` حر ({disk.get('level', '?')})\n"
                 f"🧠 الذاكرة: `{mem.get('rss_mb', '?')}MB` RSS ({mem.get('level', '?')})\n"
                 f"❌ أخطاء 24 ساعة: `{err_status.get('total_errors_24h', 0)}`\n"

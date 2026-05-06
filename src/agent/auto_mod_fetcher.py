@@ -7784,9 +7784,9 @@ class AutoModFetcher:
                             # إشعار المسؤول
                             auto_pause_msg = (
                                 "🛑 *تم إيقاف هذا الوكيل فقط تلقائياً!*\n"
-                                "━━━━━━━━━━━━━━━━━━━\n\n"
+                                "\n"
                                 f"{pause_reason}\n\n"
-                                "━━━━━━━━━━━━━━━━━━━\n"
+                                "\n"
                                 "⏸ تم تعطيل جدول هذه القناة فقط مؤقتاً.\n"
                                 "✅ بقية الوكلاء سيواصلون العمل بشكل طبيعي.\n"
                                 "🔧 بعد إصلاح المصادقة/الحصة، أعد تفعيل جدول هذه القناة من إعدادات الأتمتة."
@@ -7825,7 +7825,6 @@ class AutoModFetcher:
                 results["message"] = "Waiting for raw review approval"
 
             summary = (
-                "━━━━━━━━━━━━━━━━━━━\n"
                 "📊 *ملخص دورة الجلب التلقائي*\n\n"
                 f"⏱ المدة: `{elapsed_str}`\n"
                 f"📦 معالج: *{results['processed']}*\n"
@@ -8144,7 +8143,8 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
                 return
             await bot_app.bot.send_message(
                 chat_id=admin_chat_id,
-                text=f"🤖 تحديث الأتمتة:\n\n{msg}",
+                text=str(msg or "").strip(),
+                parse_mode="Markdown",
             )
         except Exception as notify_exc:
             logger.warning(f"⚠️ Failed to send automation notification: {notify_exc}")
