@@ -2659,6 +2659,30 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
         return await _show_container_picker(update, context, page=0)
 
     if kind == "gdrive":
+        db = _get_db()
+        cfg = None
+        try:
+            cfg = db.get_config()
+        except Exception:
+            cfg = None
+        settings = (cfg or {}).get("settings") or {}
+        gcfg = settings.get("google_drive") or {}
+        token_json = gcfg.get("token_json")
+        linked = isinstance(token_json, dict) and bool(token_json) and (
+            bool(token_json.get("refresh_token")) or bool(token_json.get("token")) or bool(token_json.get("access_token"))
+        )
+        if not linked:
+            text = (
+                "❌ <b>Google Drive غير مربوط</b>\n\n"
+                "قبل إضافة مصدر Google Drive يجب ربط الحساب من قائمة الإعدادات."
+            )
+            keyboard = [
+                [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
+                [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            return AM_ADD_SOURCE_KIND
+
         text = (
             "☁️ <b>مصدر Google Drive</b>\n\n"
             "أرسل <b>Folder ID</b> (معرف المجلد) الذي تريد أن يجلب منه البوت الفيديوهات.\n\n"

@@ -4484,7 +4484,30 @@ class AutoModFetcher:
         self._last_download_error = ""
         return value
 
-    async def fetch_videos_from_source(self, source_url: str, items_range: str = "1-10", platform: str = "youtube") -> List[Dict]:
+    def _classify_gdrive_fetch_error(self, err: Exception) -> Tuple[str, int, str]:
+        raw = str(err or "").strip()
+        lowered = raw.lower()
+
+        if any(token in lowered for token in ["invalid_grant", "refresh token", "revoked", "expired", "token has been expired"]):
+            return "auth", 86400, "🔑 انتهت/أُلغيت صلاحيات Google Drive. قم بربط Google Drive من الإعدادات ثم أعد المحاولة."
+        if any(token in lowered for token in ["insufficient permissions", "insufficientpermission", "permission", "403", "forbidden"]):
+            return "permission", 21600, "🚫 لا توجد صلاحيات كافية للوصول إلى المجلد في Google Drive. تأكد من المشاركة/الصلاحيات أو أعد الربط."
+        if any(token in lowered for token in ["404", "not found", "file not found", "folder"]):
+            return "not_found", 21600, "📁 المجلد غير موجود أو لا يمكن الوصول إليه. تحقق من Folder ID وصلاحيات المشاركة."
+        if any(token in lowered for token in ["429", "rate", "too many requests", "user rate limit", "quota exceeded"]):
+            return "rate_limited", 3600, "⏳ تم تقييد طلبات Google Drive مؤقتاً (Rate limit/Quota). سيتم إيقاف المصدر مؤقتاً ثم إعادة المحاولة تلقائياً."
+        if any(token in lowered for token in ["timed out", "timeout", "connection reset", "name resolution", "temporary failure", "network is unreachable"]):
+            return "network", 1800, "🌐 مشكلة شبكة أثناء الاتصال بـ Google Drive. سيتم إيقاف المصدر مؤقتاً ثم إعادة المحاولة."
+        return "unknown", 1800, f"⚠️ فشل جلب Google Drive بسبب خطأ غير معروف. سيتم إيقاف المصدر مؤقتاً. ({raw[:120]})"
+
+    async def fetch_videos_from_source(
+        self,
+        source_url: str,
+        items_range: str = "1-10",
+        platform: str = "youtube",
+        *,
+        notify_func=None,
+    ) -> List[Dict]:
         """
         جلب أحدث الفيديوهات من مصدر (يوتيوب/فيسبوك)
         يعتمد الآن حصرياً على yt-dlp مع retry لتجاوز الحظر
@@ -4492,11 +4515,38 @@ class AutoModFetcher:
         platform_norm = (platform or "").strip().lower()
         url_norm = (source_url or "").strip()
 
+        from src.agent.supabase_storage import is_source_rate_limited
+        if is_source_rate_limited(source_url):
+            logger.info(f"❄️ [CoolDown] Skipping source because it's rate-limited: {source_url}")
+            return []
+
         if platform_norm == "google_drive" or url_norm.lower().startswith("gdrive:"):
             try:
                 return await self._fetch_from_gdrive(url_norm, items_range)
             except Exception as e:
                 logger.error(f"Failed to fetch from google drive source {source_url}: {e}")
+                try:
+                    from src.agent.supabase_storage import mark_source_rate_limited
+                    kind, cooldown_seconds, user_msg = self._classify_gdrive_fetch_error(e)
+                    mark_source_rate_limited(source_url, duration=int(cooldown_seconds))
+                    if notify_func:
+                        try:
+                            await notify_func(
+                                "⛔ تم إيقاف مصدر Google Drive مؤقتاً بسبب مشكلة أثناء الجلب.\n\n"
+                                f"🧩 السبب: {user_msg}\n"
+                                f"⏳ مدة الإيقاف: `{int(cooldown_seconds)}` ثانية\n"
+                                f"🔗 المصدر: `{str(source_url)[:80]}`"
+                            )
+                        except Exception:
+                            pass
+                    logger.warning(
+                        "❄️ [CoolDown] Google Drive source put on cooldown (%s) for %ss: %s",
+                        kind,
+                        int(cooldown_seconds),
+                        str(source_url)[:120],
+                    )
+                except Exception as cooldown_err:
+                    logger.debug(f"Failed to mark Google Drive source as rate-limited: {cooldown_err}")
                 return []
 
         if platform_norm == "container" or url_norm.lower().startswith("container:"):
@@ -4505,11 +4555,6 @@ class AutoModFetcher:
             except Exception as e:
                 logger.error(f"Failed to fetch from container source {source_url}: {e}")
                 return []
-
-        from src.agent.supabase_storage import is_source_rate_limited
-        if is_source_rate_limited(source_url):
-            logger.info(f"❄️ [CoolDown] Skipping source because it's rate-limited: {source_url}")
-            return []
 
         try:
             # === جلب حصري عبر yt-dlp مع retry ===
@@ -6983,7 +7028,12 @@ class AutoModFetcher:
                                         logger.debug(f"⏳ Normalizing fetch rhythm... waiting {delay:.1f}s")
                                         await asyncio.sleep(delay)
 
-                                    batch_videos = await self.fetch_videos_from_source(fetch_url, items_range=s_range, platform=fetch_platform)
+                                    batch_videos = await self.fetch_videos_from_source(
+                                        fetch_url,
+                                        items_range=s_range,
+                                        platform=fetch_platform,
+                                        notify_func=notify_func,
+                                    )
                                     logger.info(
                                         f"📦 [AutoMod] Fetch {fetch_name}: fetched {len(batch_videos)} videos (range={s_range})"
                                     )
