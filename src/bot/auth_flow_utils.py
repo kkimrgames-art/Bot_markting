@@ -187,7 +187,12 @@ def start_ngrok_tunnel(port: int) -> Optional[str]:
         logger.error(f"Failed to start Ngrok tunnel: {e}")
         return None
 
-def create_flow_from_file_scopes(client_secrets_file: str, scopes: list[str]) -> Tuple[Flow, str, OAuthCallbackServer]:
+def create_flow_from_file_scopes(
+    client_secrets_file: str,
+    scopes: list[str],
+    *,
+    include_granted_scopes: bool = True,
+) -> Tuple[Flow, str, OAuthCallbackServer]:
     """إنشاء Flow وبدء الخادم وإرجاع رابط المصادقة"""
     
     # 1. إعداد الخادم ومحاولة استخدام المنفذ المحدد في الإعدادات
@@ -286,7 +291,11 @@ def create_flow_from_file_scopes(client_secrets_file: str, scopes: list[str]) ->
         )
     
     # 3. توليد رابط المصادقة
-    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline', include_granted_scopes='true')
+    auth_url, _ = flow.authorization_url(
+        prompt='consent',
+        access_type='offline',
+        include_granted_scopes='true' if include_granted_scopes else 'false',
+    )
     
     return flow, auth_url, server
 
@@ -335,8 +344,17 @@ def start_auth_flow(client_secrets_file: str) -> Tuple[str, OAuthCallbackServer,
     return auth_url, server, flow
 
 
-def start_auth_flow_scopes(client_secrets_file: str, scopes: list[str]) -> Tuple[str, OAuthCallbackServer, Flow]:
-    flow, auth_url, server = create_flow_from_file_scopes(client_secrets_file, scopes)
+def start_auth_flow_scopes(
+    client_secrets_file: str,
+    scopes: list[str],
+    *,
+    include_granted_scopes: bool = True,
+) -> Tuple[str, OAuthCallbackServer, Flow]:
+    flow, auth_url, server = create_flow_from_file_scopes(
+        client_secrets_file,
+        scopes,
+        include_granted_scopes=include_granted_scopes,
+    )
     return auth_url, server, flow
 
 

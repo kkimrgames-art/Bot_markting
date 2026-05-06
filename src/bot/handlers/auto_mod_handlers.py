@@ -775,7 +775,12 @@ async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         await query.edit_message_text("⏳ جاري تحضير رابط مصادقة Google Drive...", parse_mode="HTML")
-        auth_url, server, flow = await asyncio.to_thread(start_auth_flow_scopes, client_secrets, DRIVE_SCOPES)
+        auth_url, server, flow = await asyncio.to_thread(
+            start_auth_flow_scopes,
+            client_secrets,
+            DRIVE_SCOPES,
+            include_granted_scopes=False,
+        )
         context.user_data["am_gdrive_flow"] = flow
         context.user_data["am_gdrive_server"] = server
         redirect_uri = getattr(flow, "redirect_uri", None) or f"http://localhost:{server.port}/oauth2/callback"
