@@ -92,6 +92,17 @@ async def _safe_answer(query, **kwargs):
         pass
 
 
+async def _safe_edit_message_text(query, text: str, *, reply_markup=None, parse_mode: str = "HTML", **kwargs):
+    if not query:
+        return
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        raise
+
+
 def _get_db() -> AutoModDB:
     return AutoModDB(get_instance_id())
 
@@ -767,7 +778,16 @@ async def _continue_source_creation(update: Update, context: ContextTypes.DEFAUL
         if not draft.get("privacy_configured"):
             return await _ask_source_privacy(update, context)
 
-        return await add_source_overlay_start(update, context)
+        if not draft.get("overlay_configured"):
+            return await add_source_overlay_start(update, context)
+
+        if not draft.get("description_configured"):
+            return await add_source_description_start(update, context)
+
+        if not draft.get("raw_review_configured"):
+            return await add_source_raw_review_start(update, context)
+
+        return await _ask_source_name(update, context)
 
     return AM_ADD_SOURCE_CUSTOMIZE
 
@@ -2998,7 +3018,7 @@ async def add_source_overlay_start(update: Update, context: ContextTypes.DEFAULT
         [InlineKeyboardButton("⬜ تخطي / تعطيل", callback_data="am_src_ov:off")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
 
@@ -3008,7 +3028,8 @@ async def add_source_choose_overlay_enabled(update: Update, context: ContextType
     choice = query.data.split(":", 1)[1]
     if choice == "off":
         _update_draft_source_settings(context, {"shorts_overlay": {"enabled": False, "texts": []}})
-        return await add_source_description_start(update, context)
+        context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
+        return await _continue_source_creation(update, context)
 
     context.user_data["am_text_input_mode"] = "add_overlay_texts"
     text = (
@@ -3086,7 +3107,8 @@ async def add_source_choose_overlay_animation_kind(update: Update, context: Cont
         _update_draft_source_settings(context, {"shorts_overlay": {f"{target_key}_animation": _build_overlay_animation_config("none", 0.0)}})
         if target_key == "intro":
             return await _ask_source_overlay_animation_kind(update, context, "outro")
-        return await add_source_description_start(update, context)
+        context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
+        return await _continue_source_creation(update, context)
     return await _ask_source_overlay_animation_duration(update, context, target_key, animation_type)
 
 
@@ -3099,7 +3121,8 @@ async def add_source_choose_overlay_animation_duration(update: Update, context: 
     _update_draft_source_settings(context, {"shorts_overlay": {f"{target_key}_animation": _build_overlay_animation_config(animation_type, duration)}})
     if target_key == "intro":
         return await _ask_source_overlay_animation_kind(update, context, "outro")
-    return await add_source_description_start(update, context)
+    context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
+    return await _continue_source_creation(update, context)
 
 
 async def add_source_description_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3116,7 +3139,7 @@ async def add_source_description_start(update: Update, context: ContextTypes.DEF
         [InlineKeyboardButton("⬜ تخطي / تعطيل", callback_data="am_src_desc:off")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
 
@@ -3126,7 +3149,8 @@ async def add_source_choose_description_enabled(update: Update, context: Context
     choice = query.data.split(":", 1)[1]
     if choice == "off":
         _update_draft_source_settings(context, {"extra_description": {"enabled": False, "texts": []}})
-        return await add_source_raw_review_start(update, context)
+        context.user_data.setdefault("am_new_source", {})["description_configured"] = True
+        return await _continue_source_creation(update, context)
 
     context.user_data["am_text_input_mode"] = "add_desc_texts"
     text = (
@@ -3159,7 +3183,8 @@ async def add_source_description_placement(update: Update, context: ContextTypes
     await _safe_answer(query)
     placement = query.data.split(":", 1)[1]
     _update_draft_source_settings(context, {"extra_description": {"placement": placement, "enabled": True}})
-    return await add_source_raw_review_start(update, context)
+    context.user_data.setdefault("am_new_source", {})["description_configured"] = True
+    return await _continue_source_creation(update, context)
 
 
 async def add_source_raw_review_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3176,7 +3201,7 @@ async def add_source_raw_review_start(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("⬜ تعطيل والمتابعة المباشرة", callback_data="am_src_raw_review:off")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
 
@@ -3185,6 +3210,7 @@ async def add_source_choose_raw_review(update: Update, context: ContextTypes.DEF
     await _safe_answer(query)
     enabled = query.data.split(":", 1)[1] == "on"
     _update_draft_source_settings(context, {"require_raw_review": enabled})
+    context.user_data.setdefault("am_new_source", {})["raw_review_configured"] = True
     return await _continue_source_creation(update, context)
 
 
@@ -3302,6 +3328,9 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["am_new_source"]["outro_effect_configured"] = False
     context.user_data["am_new_source"]["hflip_configured"] = False
     context.user_data["am_new_source"]["privacy_configured"] = False
+    context.user_data["am_new_source"]["overlay_configured"] = False
+    context.user_data["am_new_source"]["description_configured"] = False
+    context.user_data["am_new_source"]["raw_review_configured"] = False
 
     return await _ask_source_tail_trim(update, context)
 
