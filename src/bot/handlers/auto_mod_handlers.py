@@ -755,6 +755,22 @@ async def _continue_source_creation(update: Update, context: ContextTypes.DEFAUL
         if not draft.get("tail_trim_configured"):
             return await _ask_source_tail_trim(update, context)
 
+        if not draft.get("intro_effect_configured"):
+            return await _ask_source_video_effect_kind(update, context, "intro")
+
+        if not draft.get("outro_effect_configured"):
+            return await _ask_source_video_effect_kind(update, context, "outro")
+
+        if not draft.get("hflip_configured"):
+            return await _ask_source_hflip(update, context)
+
+        if not draft.get("privacy_configured"):
+            return await _ask_source_privacy(update, context)
+
+        return await add_source_overlay_start(update, context)
+
+    return AM_ADD_SOURCE_CUSTOMIZE
+
 
 async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
