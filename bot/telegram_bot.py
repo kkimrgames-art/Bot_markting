@@ -130,6 +130,7 @@ def build_application(token: str):
     )
     application.add_handler(add_channel_conv)
 
+    application.add_handler(CallbackQueryHandler(auto_mod_handlers.auto_mod_menu, pattern="^main_menu$"))
     application.add_handler(CallbackQueryHandler(channel_handlers.list_channels, pattern="^list_channels:"))
     application.add_handler(CallbackQueryHandler(channel_handlers.view_channel, pattern="^view_channel:"))
     application.add_handler(CallbackQueryHandler(channel_handlers.callback_noop, pattern="^noop$"))
@@ -243,6 +244,36 @@ def build_application(token: str):
     application.add_handler(CallbackQueryHandler(edit_handlers.set_facecam_clip, pattern="^set_facecam_clip_idx:"))
     application.add_handler(CallbackQueryHandler(edit_handlers.facecam_delete_menu, pattern="^facecam_delete_menu:"))
     application.add_handler(CallbackQueryHandler(edit_handlers.delete_facecam_clip, pattern="^delete_facecam_clip_idx:"))
+    
+    # === Trim Settings ===
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_trim_menu, pattern="^edit_trim:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.toggle_trim, pattern="^toggle_trim:"))
+    
+    trim_max_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_handlers.edit_trim_max_start, pattern="^edit_trim_max_start:")],
+        states={
+            edit_handlers.TRIM_MAX_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_handlers.edit_trim_max_receive)
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(auto_mod_handlers.auto_mod_menu, pattern="^main_menu$"), CallbackQueryHandler(edit_handlers.edit_trim_menu, pattern="^edit_trim:")],
+        allow_reentry=True,
+        per_message=False
+    )
+    application.add_handler(trim_max_conv)
+    
+    trim_target_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_handlers.edit_trim_target_start, pattern="^edit_trim_target_start:")],
+        states={
+            edit_handlers.TRIM_TARGET_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_handlers.edit_trim_target_receive)
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(auto_mod_handlers.auto_mod_menu, pattern="^main_menu$"), CallbackQueryHandler(edit_handlers.edit_trim_menu, pattern="^edit_trim:")],
+        allow_reentry=True,
+        per_message=False
+    )
+    application.add_handler(trim_target_conv)
 
     application.add_handler(CallbackQueryHandler(language_edit_handlers.edit_language, pattern="^edit_language:"))
     application.add_handler(CallbackQueryHandler(language_edit_handlers.set_language, pattern="^set_language:"))
@@ -283,7 +314,8 @@ def build_application(token: str):
 
 
 async def run_polling_forever(application):
-    await application.initialize()
+    if not application._initialized:
+        await application.initialize()
     await application.start()
     if application.updater:
         await application.updater.start_polling()
@@ -301,7 +333,8 @@ async def run_polling_forever(application):
 
 
 async def run_webhook_forever(application, webhook_url: str, secret_token: str | None = None):
-    await application.initialize()
+    if not application._initialized:
+        await application.initialize()
     await application.start()
     await application.bot.set_webhook(
         url=webhook_url,

@@ -640,19 +640,22 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_status = "⌛ جاري الفحص..."
     auth_icon = "❓"
     try:
-        from pathlib import Path
-        token_path = Path(".data/youtube_tokens") / f"{channel.youtube_channel_id}.json"
-        
+        from ..channel_manager import resolve_channel_token_path
+
         def _check_auth():
-            if not token_path.exists():
+            token_path = resolve_channel_token_path(channel)
+            if not token_path or not os.path.exists(token_path):
                 return "مفقودة (يرجى الربط)", "❌"
             try:
-                from google.oauth2.credentials import Credentials
-                creds = Credentials.from_authorized_user_file(str(token_path))
-                if creds.valid or (creds.expired and creds.refresh_token):
+                cm = ChannelManager()
+                ok, reason = cm._validate_platform_auth(channel)
+                if ok:
                     return "متصلة وجاهزة", "✅"
-                else:
+                if reason:
+                    if "لا يوجد توكن" in reason:
+                        return "مفقودة (يرجى الربط)", "❌"
                     return "تحتاج إعادة مصادقة", "⚠️"
+                return "خطأ في الاتصال", "⚠️"
             except Exception:
                 return "خطأ في الاتصال", "⚠️"
 
@@ -684,6 +687,7 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         f"🎬 <b>خيارات المعالجة:</b>\n"
         f"✨ <b>جودة الفيديو:</b> <code>{quality}</code>\n"
+        f"✂️ <b>القص التلقائي:</b> {'✅ مفعل' if extra.get('auto_trim_enabled', True) else '❌ معطل'}\n"
         f"👤 <b>كاميرا الوجه:</b> {facecam}\n"
         f"🅰️ <b>نص التعليق:</b> {overlay}\n"
         f"✏️ <b>نص مخصص:</b> {custom_overlay_info}\n"
@@ -714,6 +718,9 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("🎞 الجودة", callback_data=f"edit_quality:{channel_id}"),
             InlineKeyboardButton("🎥 FaceCam", callback_data=f"edit_facecam:{channel_id}"),
+            InlineKeyboardButton("✂️ القص", callback_data=f"edit_trim:{channel_id}")
+        ],
+        [
             InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}")
         ]
     ]

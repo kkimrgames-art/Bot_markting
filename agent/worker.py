@@ -17,6 +17,9 @@ logger = logging.getLogger("JobWorker")
 
 def run_worker_process():
     """Entry point for the worker process."""
+    # Ensure worker process doesn't duplicate background sync with Supabase
+    os.environ["SUPABASE_DISABLE_BG_SYNC"] = "1"
+    
     # Set up logging for the new process
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -52,6 +55,48 @@ class JobWorker:
         self.instance_id = get_instance_id()
         self.fetcher = None  # Lazy init
         self.running = False
+        self.notifications_enabled = str(os.getenv("AUTO_MOD_WORKER_NOTIFICATIONS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+        self._last_notify_probe_log = 0.0
+
+    async def _notify(self, message: str):
+        """إرسال إشعارات تقدم المعالجة من العامل (Worker) إلى المسؤول."""
+        if not self.notifications_enabled:
+            return
+        try:
+            alert_system = get_alert_system()
+            admin_chat_id = alert_system.get_admin_chat_id()
+            if not admin_chat_id:
+                now = time.time()
+                if now - self._last_notify_probe_log >= 300:
+                    logger.warning("⚠️ Worker notifications are disabled: admin chat is not configured yet.")
+                    self._last_notify_probe_log = now
+                return
+
+            text = str(message or "").strip()
+            bot_app = alert_system.get_bot_app()
+            if bot_app is not None:
+                await bot_app.bot.send_message(chat_id=admin_chat_id, text=text, parse_mode="Markdown")
+                return
+
+            token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+            if not token:
+                return
+
+            import aiohttp
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {
+                "chat_id": admin_chat_id,
+                "text": text,
+                "parse_mode": "Markdown",
+            }
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.warning("Worker notification failed (%s): %s", resp.status, body[:200])
+        except Exception as notify_exc:
+            logger.warning("⚠️ Failed to send worker notification: %s", notify_exc)
 
     async def start(self):
         logger.info("👷 JobWorker started. Waiting for jobs...")
@@ -61,8 +106,8 @@ class JobWorker:
         self.fetcher = AutoModFetcher(self.instance_id)
 
         # Reset stuck jobs on startup (jobs that were processing when previous worker died)
-        # Timeout: 1 hour (3600s). If a job takes > 1h, it's probably stuck/dead.
-        self.queue.reset_stuck_jobs(timeout_seconds=3600)
+        # Timeout: 30 minutes (1800s).
+        self.queue.reset_stuck_jobs(timeout_seconds=1800)
 
         while self.running:
             try:
@@ -127,6 +172,7 @@ class JobWorker:
             await self.fetcher.run_cycle(
                 target_channel_id=payload.get('channel_id'),
                 target_content_type=payload.get('content_type'),
+                notify_func=self._notify,
                 force=True
             )
         elif task_type == 'keep_alive':

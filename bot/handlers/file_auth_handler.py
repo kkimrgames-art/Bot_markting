@@ -391,6 +391,18 @@ async def process_auth_result(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # إذا كنا في وضع إعادة المصادقة، ننتهي هنا
     if context.user_data.get('reauth_mode'):
+        try:
+            target_id = context.user_data.get('target_channel_id')
+            cm = ChannelManager()
+            token_payload = None
+            try:
+                token_payload = json.loads(creds.to_json())
+            except Exception:
+                token_payload = None
+            if target_id and token_payload:
+                cm.update_channel(target_id, platform_credentials=token_payload)
+        except Exception as e:
+            logger.warning(f"Failed to persist refreshed auth token for channel: {e}")
         await context.bot.send_message(
             chat_id,
             f"✅ <b>تم تحديث المصادقة بنجاح!</b>\nبقناة: <b>{html.escape(channel_info['title'])}</b>",

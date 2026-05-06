@@ -172,7 +172,7 @@ def _stable_hash(data: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def load_state(cfg: Config | None = None) -> Dict[str, Any]:
+def load_state(cfg: Config | None = None, *, force_refresh: bool = False) -> Dict[str, Any]:
     global _CACHED_STATE, _CACHED_STATE_TS, _CACHED_STATE_KEY
     cfg = cfg or load_config()
     path = _state_path(cfg)
@@ -186,7 +186,8 @@ def load_state(cfg: Config | None = None) -> Dict[str, Any]:
         ttl = _state_cache_ttl_sec()
         now = time.time()
         if (
-            ttl > 0
+            (not force_refresh)
+            and ttl > 0
             and _CACHED_STATE is not None
             and _CACHED_STATE_KEY == cache_key
             and (now - _CACHED_STATE_TS) < ttl
@@ -303,7 +304,7 @@ def _ensure_state_fields(state: Dict[str, Any], cfg: Config) -> None:
     raw_review = state.get("raw_review")
     if not isinstance(raw_review, dict):
         raw_review = {}
-    for key in ("pending", "approved", "blocked", "skipped"):
+    for key in ("pending", "approved", "blocked", "skipped", "token_index", "token_decisions"):
         if not isinstance(raw_review.get(key), dict):
             raw_review[key] = {}
     now_ts = time.time()
@@ -415,7 +416,14 @@ def save_state(state: Dict[str, Any], cfg: Config | None = None) -> None:
             interval_ok = (now - _LAST_SUPABASE_SAVE_TS) >= _min_supabase_save_interval_sec()
             force_all = (os.environ.get("SUPABASE_FORCE_SAVE_ALL") or "").strip().lower() in {"1", "true", "yes", "on"}
 
-            should_save_supabase = force_all or local_failed or (critical_changed and interval_ok)
+            # Raw review decisions must be durable immediately to keep Telegram buttons working across processes.
+            try:
+                rr = state.get("raw_review") or {}
+                force_raw_review = bool((rr.get("pending") or {}) or (rr.get("token_index") or {}) or (rr.get("token_decisions") or {}))
+            except Exception:
+                force_raw_review = False
+
+            should_save_supabase = force_all or local_failed or (critical_changed and (interval_ok or force_raw_review))
 
             if should_save_supabase:
                 try:
@@ -472,10 +480,17 @@ def has_pending_raw_reviews(cfg: Config | None = None) -> bool:
 
 def set_pending_raw_review(source_id: str, entry: Dict[str, Any], cfg: Config | None = None) -> Dict[str, Any]:
     payload = dict(entry or {})
+    token = str(payload.get("token") or "").strip()
 
     def _updater(state: Dict[str, Any]) -> None:
         _ensure_state_fields(state, cfg or load_config())
-        state.setdefault("raw_review", {}).setdefault("pending", {})[str(source_id)] = payload
+        raw_review = state.setdefault("raw_review", {})
+        raw_review.setdefault("pending", {})[str(source_id)] = payload
+        if token:
+            raw_review.setdefault("token_index", {})[token] = {
+                **payload,
+                "source_id": str(source_id),
+            }
 
     update_state(cfg, _updater)
     return payload
@@ -484,7 +499,14 @@ def set_pending_raw_review(source_id: str, entry: Dict[str, Any], cfg: Config | 
 def clear_pending_raw_review(source_id: str, cfg: Config | None = None) -> None:
     def _updater(state: Dict[str, Any]) -> None:
         _ensure_state_fields(state, cfg or load_config())
-        state.setdefault("raw_review", {}).setdefault("pending", {}).pop(str(source_id), None)
+        raw_review = state.setdefault("raw_review", {})
+        pending_entry = (raw_review.setdefault("pending", {}) or {}).pop(str(source_id), None)
+        try:
+            token = str((pending_entry or {}).get("token") or "").strip()
+        except Exception:
+            token = ""
+        if token:
+            raw_review.setdefault("token_index", {}).pop(token, None)
 
     update_state(cfg, _updater)
 
@@ -547,6 +569,8 @@ def _decide_pending_raw_review(
         _ensure_state_fields(state, cfg or load_config())
         raw_review = state.setdefault("raw_review", {})
         pending = raw_review.setdefault("pending", {})
+        token_index = raw_review.setdefault("token_index", {})
+        token_decisions = raw_review.setdefault("token_decisions", {})
 
         found_source_id = None
         found_entry = None
@@ -557,7 +581,13 @@ def _decide_pending_raw_review(
                 break
 
         if not found_source_id or not found_entry:
-            return
+            # Fallback: allow decisions even if pending entry was moved/cleaned.
+            token_entry = token_index.get(str(token or ""))
+            if isinstance(token_entry, dict) and token_entry:
+                found_source_id = str(token_entry.get("source_id") or "")
+                found_entry = dict(token_entry)
+            if not found_source_id or not found_entry:
+                return
 
         pending.pop(found_source_id, None)
         video_id = str(found_entry.get("video_id") or "")
@@ -578,6 +608,19 @@ def _decide_pending_raw_review(
             raw_review.setdefault("blocked", {})[key] = payload
         elif decision == "approved":
             raw_review.setdefault("approved", {})[key] = payload
+
+        # Record by token so late button clicks can be handled gracefully.
+        try:
+            token_value = str(payload.get("token") or token or "").strip()
+        except Exception:
+            token_value = ""
+        if token_value:
+            token_decisions[token_value] = {
+                "decision": decision,
+                "source_id": found_source_id,
+                "video_id": video_id,
+                "decided_at": payload.get("decided_at"),
+            }
 
         result["source_id"] = found_source_id
         result["entry"] = payload

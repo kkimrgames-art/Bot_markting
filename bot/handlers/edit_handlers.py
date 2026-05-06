@@ -1316,3 +1316,114 @@ async def delete_custom_overlay(update: Update, context: ContextTypes.DEFAULT_TY
         await edit_custom_overlay_start(update, context)
     else:
         await query.edit_message_text("❌ القناة غير موجودة.")
+
+# ==================== إعدادات القص التلقائي ====================
+
+TRIM_MAX_INPUT = "TRIM_MAX_INPUT"
+TRIM_TARGET_INPUT = "TRIM_TARGET_INPUT"
+
+async def edit_trim_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.edit_message_text("❌ القناة غير موجودة")
+        return
+        
+    extra = getattr(channel, "extra_data", {}) or {}
+    enabled = extra.get("auto_trim_enabled", True)
+    max_dl = extra.get("max_download_duration", 120)
+    target = extra.get("auto_trim_target_duration", 60)
+    
+    text = (
+        "✂️ <b>إعدادات القص التلقائي للفيديو</b>\n\n"
+        f"✅ مفعّل: <b>{'نعم' if enabled else 'لا'}</b>\n"
+        f"⬇️ الحد الأقصى للتحميل: <b>{max_dl}</b> ثانية\n"
+        f"🎯 القص إلى: <b>{target}</b> ثانية\n\n"
+        "يقوم هذا الخيار بتحميل الفيديوهات الطويلة نسبياً (حتى الحد الأقصى للتحميل) وقصها إلى مدة شورتس قياسية بدلاً من رفضها."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ تفعيل/تعطيل القص التلقائي", callback_data=f"toggle_trim:{channel_id}")],
+        [
+            InlineKeyboardButton("⬇️ تعديل حد التحميل", callback_data=f"edit_trim_max_start:{channel_id}"),
+            InlineKeyboardButton("🎯 تعديل حد القص", callback_data=f"edit_trim_target_start:{channel_id}")
+        ],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"view_channel:{channel_id}")]
+    ]
+    
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+async def toggle_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra["auto_trim_enabled"] = not extra.get("auto_trim_enabled", True)
+    manager.update_channel(channel_id, extra_data=extra)
+    await query.answer("✅ تم تحديث الحالة")
+    update.callback_query.data = f"edit_trim:{channel_id}"
+    await edit_trim_menu(update, context)
+
+async def edit_trim_max_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    context.user_data["channel_id"] = channel_id
+    await query.edit_message_text(
+        "⬇️ <b>أرسل الحد الأقصى المسموح لتحميل الفيديو (بالثواني)</b>\nمثال: <code>120</code>",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_trim:{channel_id}")]]),
+        parse_mode='HTML'
+    )
+    return TRIM_MAX_INPUT
+
+async def edit_trim_max_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = context.user_data.get("channel_id")
+    if not channel_id or not update.message: return ConversationHandler.END
+    try: val = int(update.message.text.strip())
+    except:
+        await update.message.reply_text("❌ قيمة غير صحيحة. أرسل رقماً صحيحاً، مثال: 120")
+        return TRIM_MAX_INPUT
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if channel:
+        extra = getattr(channel, "extra_data", {}) or {}
+        extra["max_download_duration"] = val
+        manager.update_channel(channel_id, extra_data=extra)
+        await update.message.reply_text("✅ تم الحفظ. اضغط 'رجوع' للعودة للقائمة.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_trim:{channel_id}")]]))
+    return ConversationHandler.END
+
+async def edit_trim_target_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    context.user_data["channel_id"] = channel_id
+    await query.edit_message_text(
+        "🎯 <b>أرسل مدة الفيديو المستهدفة بعد القص (بالثواني)</b>\nمثال: <code>60</code>",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_trim:{channel_id}")]]),
+        parse_mode='HTML'
+    )
+    return TRIM_TARGET_INPUT
+
+async def edit_trim_target_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = context.user_data.get("channel_id")
+    if not channel_id or not update.message: return ConversationHandler.END
+    try: val = int(update.message.text.strip())
+    except:
+        await update.message.reply_text("❌ قيمة غير صحيحة. أرسل رقماً صحيحاً، مثال: 60")
+        return TRIM_TARGET_INPUT
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if channel:
+        extra = getattr(channel, "extra_data", {}) or {}
+        extra["auto_trim_target_duration"] = val
+        manager.update_channel(channel_id, extra_data=extra)
+        await update.message.reply_text("✅ تم الحفظ. اضغط 'رجوع' للعودة للقائمة.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_trim:{channel_id}")]]))
+    return ConversationHandler.END

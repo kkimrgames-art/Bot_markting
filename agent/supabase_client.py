@@ -22,6 +22,13 @@ load_dotenv(dotenv_path=os.path.join(get_project_root(), ".env"), override=True)
 
 logger = logging.getLogger(__name__)
 
+class SupabaseInfrastructureError(Exception):
+    """استثناء يرفع عند وجود خطأ في البنية التحتية لـ Supabase (مثل 502 Bad Gateway)"""
+    def __init__(self, message, code=None, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
 # متغيرات البيئة
 SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
 SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
@@ -417,6 +424,9 @@ async def sync_pending_operations():
 
 def start_background_sync(interval_seconds: int = 60):
     """بدء المزامنة الخلفية التلقائية"""
+    if os.environ.get("SUPABASE_DISABLE_BG_SYNC") == "1":
+        logger.info("⏸️ Background sync is disabled via SUPABASE_DISABLE_BG_SYNC. Skipping.")
+        return
     global _background_sync_task, _background_sync_thread, _background_sync_interval
 
     async def _sync_loop():
@@ -515,6 +525,22 @@ def supabase_select(table: str, filters: Dict = None, fallback_local: Callable =
                 break
             except Exception as e:
                 msg = str(e).lower()
+                
+                # التحقق من أخطاء البنية التحتية (502, 503, 504)
+                error_data = None
+                if hasattr(e, 'message') and hasattr(e, 'code'):
+                    error_data = {"message": e.message, "code": e.code}
+                elif isinstance(e, dict) and "code" in e:
+                    error_data = e
+                
+                if error_data and str(error_data.get("code")) in ("502", "503", "504"):
+                    logger.critical(f"🚨 خطأ فادح في البنية التحتية لـ Supabase ({error_data.get('code')}): {error_data.get('message')}")
+                    raise SupabaseInfrastructureError(
+                        message=error_data.get("message", "Bad Gateway"),
+                        code=error_data.get("code"),
+                        details=error_data
+                    )
+
                 if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
                     logger.warning(f"⚠️ اتصال Supabase غير مستقر (select/ {table})، إعادة محاولة... [{e}]")
                     reset_connection()
@@ -606,7 +632,8 @@ def supabase_storage_upload(bucket: str, object_path: str, file_path: str, *, co
             return None
         with open(file_path, "rb") as f:
             data = f.read()
-        file_options: Dict[str, Any] = {"upsert": bool(upsert)}
+        # بعض إصدارات عميل التخزين تتطلب قيم Headers كنصوص
+        file_options: Dict[str, Any] = {"upsert": "true" if bool(upsert) else "false"}
         if content_type:
             file_options["content-type"] = content_type
         client.storage.from_(bucket).upload(object_path, data, file_options)
@@ -684,6 +711,24 @@ def supabase_storage_download_to_file(bucket: str, object_path: str, dest_path: 
             return False
     except Exception as e:
         logger.error(f"❌ فشل تنزيل الملف من Supabase Storage: {e}")
+        return False
+
+
+def supabase_storage_delete(bucket: str, object_path: str) -> bool:
+    """حذف ملف من Supabase Storage"""
+    if not (bucket and object_path):
+        return False
+    if not USE_SUPABASE or not is_online():
+        return False
+    try:
+        client = _get_supabase()
+        if not client:
+            return False
+        obj = str(object_path).strip().lstrip("/")
+        client.storage.from_(bucket).remove([obj])
+        return True
+    except Exception as e:
+        logger.error(f"❌ فشل حذف الملف من Supabase Storage: {e}")
         return False
 
 

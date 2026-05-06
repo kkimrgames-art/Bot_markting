@@ -50,6 +50,14 @@ class AlertSystem:
             if admin_ids:
                 self._admin_chat_id = int(admin_ids[0])
                 return self._admin_chat_id
+
+            # If config cache was initialized before admin auto-detection,
+            # retry once with a forced reload to pick up updated .env values.
+            cfg = load_config(force_reload=True)
+            admin_ids = getattr(cfg, "TELEGRAM_ALLOWED_USER_IDS", None) or []
+            if admin_ids:
+                self._admin_chat_id = int(admin_ids[0])
+                return self._admin_chat_id
         except Exception as e:
             logger.debug(f"AlertSystem failed to resolve admin from config: {e}")
 
@@ -166,8 +174,6 @@ class AlertSystem:
             mem = mem_status()
 
             report = (
-                "📊 *التقرير اليومي*\n"
-                "━━━━━━━━━━━━━━━━\n\n"
                 f"💾 القرص: `{disk.get('free_mb', '?')}MB` حر ({disk.get('level', '?')})\n"
                 f"🧠 الذاكرة: `{mem.get('rss_mb', '?')}MB` RSS ({mem.get('level', '?')})\n"
                 f"❌ أخطاء 24 ساعة: `{err_status.get('total_errors_24h', 0)}`\n"

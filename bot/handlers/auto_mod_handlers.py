@@ -3,11 +3,14 @@
 نظام إدارة المصادر والجدولة والحالة عبر بوت تيليجرام
 """
 import os
-import shutil
-import re
-import logging
-import asyncio
 import html
+import asyncio
+import logging
+import os
+import re
+import time
+import json
+from typing import Optional
 import uuid
 from io import BytesIO
 from datetime import datetime, timezone
@@ -25,13 +28,27 @@ from ...agent.auto_mod_fetcher import (
     normalize_source_settings,
     merge_source_settings,
     resolve_facecam_layout_config,
+    resolve_facebook_page_from_video_url,
 )
 from ...agent.ffmpeg_utils import convert_still_image_to_loop_video
+from ...agent.supabase_storage import upload_facecam_to_storage, delete_facecam_from_storage, delete_all_facecam_for_source
 # from .channel_handlers import list_channels  # Removed to avoid circular import
 
 async def _list_channels_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from .channel_handlers import list_channels
     return await list_channels(update, context)
+
+
+async def _open_ai_menu_from_auto_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .ai_manager_handler import show_ai_menu
+    await show_ai_menu(update, context)
+    return ConversationHandler.END
+
+
+async def _open_api_keys_menu_from_auto_mod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .api_key_handlers import api_keys_menu
+    await api_keys_menu(update, context)
+    return ConversationHandler.END
 
 
 
@@ -62,7 +79,9 @@ logger = logging.getLogger(__name__)
     AM_COOKIES_UPLOAD,
     AM_VIEW_CONTAINERS,
     AM_VIEW_CONTAINER_VIDEOS,
-) = range(22)
+    AM_VIEW_FACECAM_VIDEOS,
+    AM_CLIENT_SECRET_UPLOAD,
+) = range(24)
 
 
 async def _safe_answer(query, **kwargs):
@@ -335,6 +354,12 @@ def _facecam_document_is_image(document: Any) -> bool:
 
 
 def _delete_facecam_clip_file(clip: Dict[str, Any]) -> None:
+    clip_id = str((clip or {}).get("id") or "").strip()
+    if clip_id:
+        try:
+            delete_facecam_from_storage(clip_id)
+        except Exception:
+            pass
     raw_path = str((clip or {}).get("path") or "").strip()
     if not raw_path:
         return
@@ -351,7 +376,18 @@ def _cleanup_source_facecam_storage(source: Optional[Dict[str, Any]]) -> None:
     source_id = str(source.get("id") or "").strip()
     facecam_cfg = normalize_source_settings(source.get("settings")).get("facecam") or {}
     for clip in list(facecam_cfg.get("clips") or []):
+        clip_id = str(clip.get("id") or "").strip()
+        if clip_id:
+            try:
+                delete_facecam_from_storage(clip_id)
+            except Exception:
+                pass
         _delete_facecam_clip_file(clip)
+    if source_id:
+        try:
+            delete_all_facecam_for_source(source_id)
+        except Exception:
+            pass
     if not source_id:
         return
     source_dir = _project_local_path(".data", "facecam_sources", source_id)
@@ -439,6 +475,11 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
         file_name = f"{os.path.splitext(file_name)[0] or 'facecam'}.mp4"
+
+    try:
+        await asyncio.to_thread(upload_facecam_to_storage, source_id, clip_id, abs_path)
+    except Exception:
+        pass
 
     return {
         "id": clip_id,
@@ -713,16 +754,160 @@ async def _continue_source_creation(update: Update, context: ContextTypes.DEFAUL
     if draft.get("source_url"):
         if not draft.get("tail_trim_configured"):
             return await _ask_source_tail_trim(update, context)
+
         if not draft.get("intro_effect_configured"):
             return await _ask_source_video_effect_kind(update, context, "intro")
+
         if not draft.get("outro_effect_configured"):
             return await _ask_source_video_effect_kind(update, context, "outro")
+
         if not draft.get("hflip_configured"):
             return await _ask_source_hflip(update, context)
+
         if not draft.get("privacy_configured"):
             return await _ask_source_privacy(update, context)
+
+        if not draft.get("overlay_configured"):
+            return await add_source_overlay_start(update, context)
+
+        if not draft.get("description_configured"):
+            return await add_source_description_start(update, context)
+
+        if not draft.get("raw_review_configured"):
+            return await add_source_raw_review_start(update, context)
+
         return await _ask_source_name(update, context)
-    return await _ask_source_url(update, context)
+
+    return AM_ADD_SOURCE_CUSTOMIZE
+
+
+async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+
+    from ...agent.config import load_config
+    from ...agent.uploader import _find_client_secrets_file
+    from ..auth_flow_utils import DRIVE_SCOPES, start_auth_flow_scopes
+
+    cfg = load_config()
+    client_secrets = _find_client_secrets_file(cfg)
+    if not client_secrets:
+        await query.edit_message_text(
+            "❌ ملف client_secret.json غير موجود. أضف/ارفع ملف المصادقة أولاً (نفس الملف المستخدم ليوتيوب).",
+            parse_mode="HTML",
+        )
+        return AM_CONFIG
+
+    try:
+        await query.edit_message_text("⏳ جاري تحضير رابط مصادقة Google Drive...", parse_mode="HTML")
+        auth_url, server, flow = await asyncio.to_thread(
+            start_auth_flow_scopes,
+            client_secrets,
+            DRIVE_SCOPES,
+            include_granted_scopes=False,
+        )
+        context.user_data["am_gdrive_flow"] = flow
+        context.user_data["am_gdrive_server"] = server
+        redirect_uri = getattr(flow, "redirect_uri", None) or f"http://localhost:{server.port}/oauth2/callback"
+
+        text = (
+            "☁️ <b>ربط Google Drive</b>\n\n"
+            f"<a href=\"{auth_url}\">🔗 اضغط هنا للمصادقة</a>\n\n"
+            "⚠️ إذا ظهر لك خطأ <b>redirect_uri_mismatch</b> أضف هذا الرابط بالضبط في Google Cloud Console:\n"
+            f"<code>{html.escape(redirect_uri)}</code>\n\n"
+            "📌 بعد المصادقة سيتم الحفظ تلقائياً."
+        )
+        keyboard = [
+            [InlineKeyboardButton("✅ تم - لدي رابط التحويل", callback_data="am_gdrive_have_url")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="am_config")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", disable_web_page_preview=True)
+
+        task = context.application.create_task(gdrive_wait_for_auth_code(update, context))
+        context.bot_data.setdefault("am_gdrive_auth_tasks", set()).add(task)
+        task.add_done_callback(lambda t: context.bot_data.get("am_gdrive_auth_tasks", set()).discard(t))
+        return AM_CONFIG
+    except Exception as e:
+        logger.error(f"Google Drive auth start failed: {e}")
+        await query.edit_message_text(f"❌ خطأ: <code>{html.escape(str(e)[:200])}</code>", parse_mode="HTML")
+        return AM_CONFIG
+
+
+async def gdrive_wait_for_auth_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    server = context.user_data.get("am_gdrive_server")
+    if not server:
+        return
+    try:
+        response_uri = await asyncio.to_thread(server.wait_for_response, timeout=300)
+        if response_uri and server.error:
+            chat_id = update.effective_chat.id
+            await context.bot.send_message(chat_id, f"❌ فشلت مصادقة Google Drive: {server.error}")
+            return
+        if response_uri:
+            await gdrive_process_auth_result(update, context, response_uri)
+    except Exception as e:
+        logger.error(f"Google Drive auth wait error: {e}")
+
+
+async def gdrive_receive_auth_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    text = (
+        "🔗 <b>أرسل رابط التحويل النهائي</b>\n\n"
+        "بعد إكمال المصادقة في المتصفح، انسخ رابط الصفحة النهائية (الذي يحتوي على <code>code=</code>) وأرسله هنا."
+    )
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_config")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    context.user_data["am_gdrive_awaiting_url"] = True
+    return AM_SOURCE_TEXT_INPUT
+
+
+async def gdrive_receive_auth_url_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("am_gdrive_awaiting_url"):
+        return AM_SOURCE_TEXT_INPUT
+    url = (update.message.text or "").strip()
+    if "code=" not in url and len(url) < 20:
+        await update.message.reply_text("⚠️ الرابط/الكود يبدو غير صالح. أرسل رابط التحويل الكامل.")
+        return AM_SOURCE_TEXT_INPUT
+    context.user_data.pop("am_gdrive_awaiting_url", None)
+    await gdrive_process_auth_result(update, context, url)
+    return ConversationHandler.END
+
+
+async def gdrive_process_auth_result(update: Update, context: ContextTypes.DEFAULT_TYPE, response_uri: str):
+    from ..auth_flow_utils import exchange_code_and_get_creds
+
+    flow = context.user_data.get("am_gdrive_flow")
+    if not flow:
+        return
+    try:
+        creds = await asyncio.to_thread(exchange_code_and_get_creds, flow, response_uri)
+        token_payload = None
+        try:
+            token_payload = json.loads(creds.to_json())
+        except Exception:
+            token_payload = None
+
+        if not token_payload:
+            chat_id = update.effective_chat.id
+            await context.bot.send_message(chat_id, "❌ فشل استخراج توكن Google Drive.")
+            return
+
+        db = _get_db()
+        config = db.get_config()
+        config.setdefault("settings", {})
+        config["settings"].setdefault("google_drive", {})
+        config["settings"]["google_drive"]["token_json"] = token_payload
+        config["settings"]["google_drive"]["updated_at"] = time.time()
+        db.save_config(config)
+
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(chat_id, "✅ تم ربط Google Drive بنجاح! يمكنك الآن إضافة مصادر Drive.")
+    except Exception as e:
+        logger.error(f"Google Drive auth processing failed: {e}")
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(chat_id, f"❌ فشل ربط Google Drive: {e}")
+    return
 
 
 # ==================== القائمة الرئيسية ====================
@@ -756,12 +941,13 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     toggle_text = "⏸ إيقاف" if config.get("auto_fetch_enabled") else "▶️ تشغيل"
 
     keyboard = [
-        [InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources"),
-         InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule")],
-        [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
+        [InlineKeyboardButton("📋 القنوات", callback_data="list_channels:0"),
+         InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources")],
+        [InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule"),
          InlineKeyboardButton("📊 الحالة", callback_data="am_status")],
-        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config"),
-         InlineKeyboardButton("📺 القنوات", callback_data="list_channels:0")],
+        [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
+         InlineKeyboardButton("🎬 فيديوهات الفيس كام", callback_data="am_fc_viewer")],
+        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config")],
         [InlineKeyboardButton("🤖 الذكاء الاصطناعي", callback_data="ai_main_menu"),
          InlineKeyboardButton("🔑 مفاتيح API", callback_data="api_keys_menu")],
         [InlineKeyboardButton(toggle_text, callback_data="am_toggle"),
@@ -2427,12 +2613,14 @@ async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_T
         "📍 <b>اختر طريقة المصدر:</b>\n\n"
         "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
         "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
+        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
         "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)\n\n"
         "سيتم بعد ذلك تحديد المصدر الذي يعتمد عليه البوت ضمن أتمتة الجلب."
     )
     keyboard = [
         [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
         [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
         [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
@@ -2460,11 +2648,13 @@ async def add_source_custom_type(update: Update, context: ContextTypes.DEFAULT_T
         "📍 <b>اختر طريقة المصدر:</b>\n\n"
         "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
         "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
+        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
         "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)"
     )
     keyboard = [
         [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
         [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
         [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
@@ -2484,7 +2674,7 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
     await _safe_answer(query)
 
     kind = (query.data.split(":", 1)[1] if query and query.data else "").strip().lower()
-    if kind not in {"youtube", "container", "facebook"}:
+    if kind not in {"youtube", "container", "facebook", "gdrive"}:
         return AM_ADD_SOURCE_KIND
 
     context.user_data.setdefault("am_new_source", {})
@@ -2492,6 +2682,44 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
 
     if kind == "container":
         return await _show_container_picker(update, context, page=0)
+
+    if kind == "gdrive":
+        db = _get_db()
+        cfg = None
+        try:
+            cfg = db.get_config()
+        except Exception:
+            cfg = None
+        settings = (cfg or {}).get("settings") or {}
+        gcfg = settings.get("google_drive") or {}
+        token_json = gcfg.get("token_json")
+        linked = isinstance(token_json, dict) and bool(token_json) and (
+            bool(token_json.get("refresh_token")) or bool(token_json.get("token")) or bool(token_json.get("access_token"))
+        )
+        if not linked:
+            text = (
+                "❌ <b>Google Drive غير مربوط</b>\n\n"
+                "قبل إضافة مصدر Google Drive يجب ربط الحساب من قائمة الإعدادات."
+            )
+            keyboard = [
+                [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
+                [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            return AM_ADD_SOURCE_KIND
+
+        text = (
+            "☁️ <b>مصدر Google Drive</b>\n\n"
+            "أرسل <b>Folder ID</b> (معرف المجلد) الذي تريد أن يجلب منه البوت الفيديوهات.\n\n"
+            "💡 يمكنك الحصول عليه من رابط المجلد:\n"
+            "<code>https://drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>\n\n"
+            "⚠️ يجب أن تكون قد ربطت Google Drive من قائمة الإعدادات أولاً."
+        )
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        context.user_data.setdefault("am_new_source", {})["platform"] = "google_drive"
+        context.user_data["am_new_source"]["awaiting_url"] = True
+        return AM_ADD_SOURCE_URL
 
     if kind == "facebook":
         text = (
@@ -2789,7 +3017,8 @@ async def add_source_choose_overlay_enabled(update: Update, context: ContextType
     choice = query.data.split(":", 1)[1]
     if choice == "off":
         _update_draft_source_settings(context, {"shorts_overlay": {"enabled": False, "texts": []}})
-        return await add_source_description_start(update, context)
+        context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
+        return await _continue_source_creation(update, context)
 
     context.user_data["am_text_input_mode"] = "add_overlay_texts"
     text = (
@@ -2867,7 +3096,8 @@ async def add_source_choose_overlay_animation_kind(update: Update, context: Cont
         _update_draft_source_settings(context, {"shorts_overlay": {f"{target_key}_animation": _build_overlay_animation_config("none", 0.0)}})
         if target_key == "intro":
             return await _ask_source_overlay_animation_kind(update, context, "outro")
-        return await add_source_description_start(update, context)
+        context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
+        return await _continue_source_creation(update, context)
     return await _ask_source_overlay_animation_duration(update, context, target_key, animation_type)
 
 
@@ -2880,7 +3110,8 @@ async def add_source_choose_overlay_animation_duration(update: Update, context: 
     _update_draft_source_settings(context, {"shorts_overlay": {f"{target_key}_animation": _build_overlay_animation_config(animation_type, duration)}})
     if target_key == "intro":
         return await _ask_source_overlay_animation_kind(update, context, "outro")
-    return await add_source_description_start(update, context)
+    context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
+    return await _continue_source_creation(update, context)
 
 
 async def add_source_description_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2907,7 +3138,8 @@ async def add_source_choose_description_enabled(update: Update, context: Context
     choice = query.data.split(":", 1)[1]
     if choice == "off":
         _update_draft_source_settings(context, {"extra_description": {"enabled": False, "texts": []}})
-        return await add_source_raw_review_start(update, context)
+        context.user_data.setdefault("am_new_source", {})["description_configured"] = True
+        return await _continue_source_creation(update, context)
 
     context.user_data["am_text_input_mode"] = "add_desc_texts"
     text = (
@@ -2940,7 +3172,8 @@ async def add_source_description_placement(update: Update, context: ContextTypes
     await _safe_answer(query)
     placement = query.data.split(":", 1)[1]
     _update_draft_source_settings(context, {"extra_description": {"placement": placement, "enabled": True}})
-    return await add_source_raw_review_start(update, context)
+    context.user_data.setdefault("am_new_source", {})["description_configured"] = True
+    return await _continue_source_creation(update, context)
 
 
 async def add_source_raw_review_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2966,6 +3199,7 @@ async def add_source_choose_raw_review(update: Update, context: ContextTypes.DEF
     await _safe_answer(query)
     enabled = query.data.split(":", 1)[1] == "on"
     _update_draft_source_settings(context, {"require_raw_review": enabled})
+    context.user_data.setdefault("am_new_source", {})["raw_review_configured"] = True
     return await _continue_source_creation(update, context)
 
 
@@ -3008,15 +3242,22 @@ async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ إذا فشل الجلب، جرّب تزويد Cookies عبر متغير البيئة <code>YTDLP_COOKIES_PATH</code>."
         )
     else:
-        text = (
-            "🔗 <b>أدخل رابط مصدر يوتيوب:</b>\n\n"
-            "أمثلة:\n"
-            "• <code>https://www.youtube.com/@channelname/shorts</code>\n"
-            "• <code>https://www.youtube.com/@channelname/videos</code>\n"
-            "• <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>\n\n"
-            "⚠️ أرسل <b>رابط مصدر واحد فقط</b> في كل رسالة، وليس عدة روابط دفعة واحدة.\n"
-            "💡 يمكن أن يكون الرابط قناة أو تبويب <code>/videos</code> أو <code>/shorts</code> أو Playlist."
-        )
+        if platform == "google_drive":
+            text = (
+                "☁️ <b>أدخل Folder ID لمجلد Google Drive:</b>\n\n"
+                "مثال: <code>1AbCDefGhIjKlmNopQRstuVwxyz</code>\n\n"
+                "⚠️ أرسل <b>Folder ID فقط</b> بدون نص إضافي."
+            )
+        else:
+            text = (
+                "🔗 <b>أدخل رابط مصدر يوتيوب:</b>\n\n"
+                "أمثلة:\n"
+                "• <code>https://www.youtube.com/@channelname/shorts</code>\n"
+                "• <code>https://www.youtube.com/@channelname/videos</code>\n"
+                "• <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>\n\n"
+                "⚠️ أرسل <b>رابط مصدر واحد فقط</b> في كل رسالة، وليس عدة روابط دفعة واحدة.\n"
+                "💡 يمكن أن يكون الرابط قناة أو تبويب <code>/videos</code> أو <code>/shorts</code> أو Playlist."
+            )
     keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     context.user_data["am_new_source"]["awaiting_url"] = True
@@ -3039,6 +3280,17 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ أدخل معرف حاوية صالح (UUID أو container:UUID).")
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"container:{cid}"
+    elif platform == "google_drive":
+        folder_id = raw
+        folder_id = folder_id.strip()
+        if folder_id.startswith("http"):
+            await update.message.reply_text("❌ أرسل Folder ID فقط (ليس رابط).")
+            return AM_ADD_SOURCE_URL
+        if not folder_id or len(folder_id) < 10:
+            await update.message.reply_text("❌ Folder ID غير صالح. تحقق منه وأعد الإرسال.")
+            return AM_ADD_SOURCE_URL
+        context.user_data["am_new_source"]["source_url"] = f"gdrive:folder:{folder_id}"
+        context.user_data["am_new_source"]["platform"] = "google_drive"
     else:
         url = raw
         url_matches = re.findall(r"https?://\S+", raw)
@@ -3051,6 +3303,13 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not url.startswith("http"):
             await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
             return AM_ADD_SOURCE_URL
+
+        # Facebook UX: user may paste a video link instead of page/profile.
+        if platform.startswith("facebook"):
+            page_url = await asyncio.to_thread(resolve_facebook_page_from_video_url, url)
+            if page_url:
+                url = page_url
+
         context.user_data["am_new_source"]["source_url"] = url
 
     context.user_data["am_new_source"]["tail_trim_configured"] = False
@@ -3058,6 +3317,9 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["am_new_source"]["outro_effect_configured"] = False
     context.user_data["am_new_source"]["hflip_configured"] = False
     context.user_data["am_new_source"]["privacy_configured"] = False
+    context.user_data["am_new_source"]["overlay_configured"] = False
+    context.user_data["am_new_source"]["description_configured"] = False
+    context.user_data["am_new_source"]["raw_review_configured"] = False
 
     return await _ask_source_tail_trim(update, context)
 
@@ -3307,6 +3569,11 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw_text:
         await update.message.reply_text("⚠️ أرسل نصًا واحدًا على الأقل.")
         return AM_SOURCE_TEXT_INPUT
+
+    if context.user_data.get("am_gdrive_awaiting_url"):
+        context.user_data.pop("am_gdrive_awaiting_url", None)
+        await gdrive_process_auth_result(update, context, raw_text)
+        return ConversationHandler.END
 
     if mode == "add_overlay_texts":
         texts = _split_overlay_texts(raw_text)
@@ -3804,6 +4071,8 @@ async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📏 تردد الفحص: {config.get('auto_fetch_interval_seconds', 60)}s",
             callback_data="am_cfg_loop_interval"
         )],
+        [InlineKeyboardButton("📂 رفع ملف المصادقة (client_secret.json)", callback_data="am_client_secret_start")],
+        [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
         [InlineKeyboardButton("🍪 تحديث ملف الكوكيز (cookies.txt)", callback_data="am_cookies_start")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
     ]
@@ -3883,6 +4152,56 @@ async def cookies_upload_start(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="am_config")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_COOKIES_UPLOAD
+
+
+async def client_secret_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+
+    text = (
+        "📂 <b>رفع ملف المصادقة (client_secret.json)</b>\n\n"
+        "يرجى إرسال ملف <code>client_secret.json</code> الآن (كمستند).\n\n"
+        "سيتم حفظه واستخدامه لربط Google Drive و YouTube OAuth.\n\n"
+        "<i>سيتم استبدال الملف القديم فوراً إن وجد.</i>"
+    )
+    keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="am_config")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_CLIENT_SECRET_UPLOAD
+
+
+async def receive_client_secret_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.document:
+        await update.message.reply_text("⚠️ يرجى إرسال ملف <code>client_secret.json</code> بصيغة مستند.", parse_mode="HTML")
+        return AM_CLIENT_SECRET_UPLOAD
+
+    doc = update.message.document
+    if not str(doc.file_name or "").lower().endswith(".json"):
+        await update.message.reply_text("⚠️ يجب أن يكون الملف بصيغة <code>.json</code> (client_secret.json).", parse_mode="HTML")
+        return AM_CLIENT_SECRET_UPLOAD
+
+    try:
+        from ...agent.config import load_config
+
+        cfg = load_config()
+        target_dir = os.path.dirname(cfg.TELEGRAM_DB_PATH) or ".data"
+        os.makedirs(target_dir, exist_ok=True)
+        target_path = os.path.join(target_dir, "client_secret.json")
+
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(custom_path=target_path)
+
+        await update.message.reply_text(
+            "✅ تم حفظ ملف <code>client_secret.json</code> بنجاح. يمكنك الآن ربط Google Drive.",
+            parse_mode="HTML",
+        )
+        return await config_menu(update, context)
+    except Exception as e:
+        logger.error(f"Error saving client_secret.json: {e}")
+        await update.message.reply_text(
+            f"❌ حدث خطأ أثناء حفظ الملف: <code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+        )
+        return AM_CLIENT_SECRET_UPLOAD
 
 
 async def receive_cookies_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4015,6 +4334,165 @@ async def container_videos_viewer(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_VIEW_CONTAINER_VIDEOS
 
+# ==================== عرض وإدارة فيديوهات الفيس كام ====================
+
+async def facecam_videos_viewer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض جميع فيديوهات الفيس كام المخزنة في قاعدة البيانات"""
+    query = update.callback_query
+    if query:
+        await _safe_answer(query)
+
+    try:
+        from ...agent.supabase_storage import FACECAM_STORAGE_LOCAL_PATH, _load_local_list
+        from ...agent.supabase_client import supabase_select, USE_SUPABASE, is_online
+
+        if USE_SUPABASE and is_online():
+            rows = await asyncio.to_thread(supabase_select, "facecam_storage") or []
+        else:
+            rows = _load_local_list(FACECAM_STORAGE_LOCAL_PATH)
+    except Exception as e:
+        logger.error(f"Error listing facecam videos: {e}")
+        rows = []
+
+    if not rows:
+        text = "🎬 <b>فيديوهات الفيس كام</b>\n\n⚠️ لا توجد فيديوهات فيس كام مخزنة حالياً."
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+        if query:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        else:
+            await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_MENU
+
+    text = f"🎬 <b>فيديوهات الفيس كام</b>\n\nإجمالي: <code>{len(rows)}</code> فيديو\n\n"
+    keyboard: List[List[InlineKeyboardButton]] = []
+
+    for i, row in enumerate(rows[:20], 1):
+        clip_id = row.get("id", "")[:8]
+        source_id = row.get("source_id", "")[:8]
+        created = ""
+        if row.get("created_at"):
+            try:
+                dt = datetime.fromisoformat(row.get("created_at").replace("Z", "+00:00"))
+                created = dt.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        text += f"{i}. 🎬 <code>{clip_id}</code> | مصدر: <code>{source_id}</code> | {created}\n"
+        keyboard.append([
+            InlineKeyboardButton(f"🗑 حذف {clip_id}", callback_data=f"am_fc_del:{row.get('id')}")
+        ])
+
+    if len(rows) > 20:
+        text += f"\n<i>... وعندك {len(rows) - 20} فيديو آخر</i>"
+
+    keyboard.append([InlineKeyboardButton("🗑 حذف الكل", callback_data="am_fc_del_all_confirm")])
+    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="am_fc_viewer")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+
+    if query:
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        except Exception:
+            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+    return AM_VIEW_FACECAM_VIDEOS
+
+
+async def facecam_video_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف فيديو فيس كام واحد"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    clip_id = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
+    if not clip_id:
+        await query.answer("❌ معرف الفيديو غير صالح", show_alert=True)
+        return await facecam_videos_viewer_menu(update, context)
+
+    try:
+        from ...agent.supabase_storage import delete_facecam_from_storage
+        success = await asyncio.to_thread(delete_facecam_from_storage, clip_id)
+        if success:
+            await query.answer("🗑 تم حذف الفيديو بنجاح", show_alert=False)
+        else:
+            await query.answer("❌ فشل حذف الفيديو", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error deleting facecam video: {e}")
+        await query.answer(f"❌ خطأ: {str(e)[:50]}", show_alert=True)
+
+    return await facecam_videos_viewer_menu(update, context)
+
+
+async def facecam_delete_all_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تأكيد حذف جميع فيديوهات الفيس كام"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    text = (
+        "⚠️ <b>تأكيد حذف جميع فيديوهات الفيس كام</b>\n\n"
+        "هل أنت متأكد من حذف جميع فيديوهات الفيس كام من قاعدة البيانات؟\n"
+        "هذا الإجراء لا يمكن التراجع عنه!"
+    )
+    keyboard = [
+        [InlineKeyboardButton("✅ نعم، احذف الكل", callback_data="am_fc_del_all_yes")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="am_fc_viewer")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_VIEW_FACECAM_VIDEOS
+
+
+async def facecam_delete_all_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تنفيذ حذف جميع فيديوهات الفيس كام"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent.supabase_storage import (
+            FACECAM_STORAGE_BUCKET,
+            FACECAM_STORAGE_LOCAL_PATH,
+            _load_local_list,
+            _save_local_list,
+        )
+        from ...agent.supabase_client import (
+            supabase_select,
+            supabase_delete,
+            supabase_storage_delete,
+            USE_SUPABASE,
+            is_online,
+        )
+
+        count = 0
+        if USE_SUPABASE and is_online():
+            rows = await asyncio.to_thread(supabase_select, "facecam_storage") or []
+            for row in rows:
+                clip_id = row.get("id")
+                bucket = row.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+                obj = row.get("storage_path")
+                if obj:
+                    supabase_storage_delete(bucket, obj)
+                if clip_id:
+                    supabase_delete("facecam_storage", "id", clip_id)
+                    count += 1
+
+        local_items = _load_local_list(FACECAM_STORAGE_LOCAL_PATH)
+        if local_items:
+            for item in local_items:
+                clip_id = item.get("id")
+                bucket = item.get("storage_bucket") or FACECAM_STORAGE_BUCKET
+                obj = item.get("storage_path")
+                if obj:
+                    supabase_storage_delete(bucket, obj)
+                count += 1
+            _save_local_list(FACECAM_STORAGE_LOCAL_PATH, [])
+
+        await query.answer(f"🗑 تم حذف {count} فيديو", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error deleting all facecam videos: {e}")
+        await query.answer(f"❌ خطأ: {str(e)[:50]}", show_alert=True)
+
+    return await facecam_videos_viewer_menu(update, context)
+
+
 # ==================== تسجيل المعالجات ====================
 
 async def _end_auto_mod_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4033,13 +4511,16 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(status_view, pattern=r"^am_status$"),
         CallbackQueryHandler(config_menu, pattern=r"^am_config$"),
         CallbackQueryHandler(containers_viewer_menu, pattern=r"^am_view_containers$"),
+        CallbackQueryHandler(facecam_videos_viewer_menu, pattern=r"^am_fc_viewer$"),
         CallbackQueryHandler(toggle_auto_fetch, pattern=r"^am_toggle$"),
         CallbackQueryHandler(run_now, pattern=r"^am_run_now$"),
         CallbackQueryHandler(test_render_menu, pattern=r"^am_test_render$"),
         CallbackQueryHandler(test_render_run, pattern=r"^am_test_render_src:"),
         CallbackQueryHandler(_list_channels_wrapper, pattern=r"^list_channels:"),
+        CallbackQueryHandler(_open_ai_menu_from_auto_mod, pattern=r"^ai_main_menu$"),
+        CallbackQueryHandler(_open_api_keys_menu_from_auto_mod, pattern=r"^api_keys_menu$"),
+        CallbackQueryHandler(auto_mod_menu, pattern=r"^main_menu$"),
         CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
-        CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^ai_main_menu$|^api_keys_menu$|^main_menu$"),
     ]
 
 
@@ -4065,6 +4546,13 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             ],
             AM_VIEW_CONTAINER_VIDEOS: [
                 CallbackQueryHandler(containers_viewer_menu, pattern=r"^am_view_containers$"),
+                *_auto_mod_common_nav_handlers(),
+            ],
+            AM_VIEW_FACECAM_VIDEOS: [
+                CallbackQueryHandler(facecam_video_delete, pattern=r"^am_fc_del:"),
+                CallbackQueryHandler(facecam_delete_all_confirm, pattern=r"^am_fc_del_all_confirm$"),
+                CallbackQueryHandler(facecam_delete_all_execute, pattern=r"^am_fc_del_all_yes$"),
+                CallbackQueryHandler(facecam_videos_viewer_menu, pattern=r"^am_fc_viewer$"),
                 *_auto_mod_common_nav_handlers(),
             ],
             AM_SOURCES: [
@@ -4210,6 +4698,9 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             ],
             AM_CONFIG: [
                 CallbackQueryHandler(cookies_upload_start, pattern=r"^am_cookies_start$"),
+                CallbackQueryHandler(client_secret_upload_start, pattern=r"^am_client_secret_start$"),
+                CallbackQueryHandler(gdrive_connect_start, pattern=r"^am_gdrive_connect$"),
+                CallbackQueryHandler(gdrive_receive_auth_url, pattern=r"^am_gdrive_have_url$"),
                 CallbackQueryHandler(config_toggle, pattern=r"^am_cfg_"),
                 *_auto_mod_common_nav_handlers(),
             ],
@@ -4217,10 +4708,14 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.Document.ALL, receive_cookies_file),
                 *_auto_mod_common_nav_handlers(),
             ],
+            AM_CLIENT_SECRET_UPLOAD: [
+                MessageHandler(filters.Document.ALL, receive_client_secret_file),
+                *_auto_mod_common_nav_handlers(),
+            ],
         },
         fallbacks=[
             CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
-            CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^main_menu$"),
+            CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^am_end$"),
         ],
         name="auto_mod_conversation",
         persistent=False,

@@ -48,6 +48,7 @@ def _maybe_allow_insecure_transport(redirect_uri: str) -> None:
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/blogger"]
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 class OAuthCallbackServer:
     """خادم محلي بسيط لاستقبال رد كود المصادقة"""
@@ -186,7 +187,12 @@ def start_ngrok_tunnel(port: int) -> Optional[str]:
         logger.error(f"Failed to start Ngrok tunnel: {e}")
         return None
 
-def create_flow_from_file(client_secrets_file: str) -> Tuple[Flow, str, OAuthCallbackServer]:
+def create_flow_from_file_scopes(
+    client_secrets_file: str,
+    scopes: list[str],
+    *,
+    include_granted_scopes: bool = True,
+) -> Tuple[Flow, str, OAuthCallbackServer]:
     """إنشاء Flow وبدء الخادم وإرجاع رابط المصادقة"""
     
     # 1. إعداد الخادم ومحاولة استخدام المنفذ المحدد في الإعدادات
@@ -274,20 +280,28 @@ def create_flow_from_file(client_secrets_file: str) -> Tuple[Flow, str, OAuthCal
     if client_config:
         flow = Flow.from_client_config(
             client_config,
-            scopes=SCOPES,
+            scopes=scopes,
             redirect_uri=redirect_uri
         )
     else:
         flow = Flow.from_client_secrets_file(
             client_secrets_file,
-            scopes=SCOPES,
+            scopes=scopes,
             redirect_uri=redirect_uri
         )
     
     # 3. توليد رابط المصادقة
-    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline', include_granted_scopes='true')
+    auth_url, _ = flow.authorization_url(
+        prompt='consent',
+        access_type='offline',
+        include_granted_scopes='true' if include_granted_scopes else 'false',
+    )
     
     return flow, auth_url, server
+
+
+def create_flow_from_file(client_secrets_file: str) -> Tuple[Flow, str, OAuthCallbackServer]:
+    return create_flow_from_file_scopes(client_secrets_file, SCOPES)
 
 def exchange_code_and_get_creds(flow: Flow, authorization_response: str) -> Credentials:
     """تبادل الكود (عبر الرابط الكامل لضمان تطابق state) والحصول على Credentials"""
@@ -327,6 +341,20 @@ def start_auth_flow(client_secrets_file: str) -> Tuple[str, OAuthCallbackServer,
     """
     # استخدام الدالة الموحدة لضمان التطابق مع عملية رفع الملف الجديد
     flow, auth_url, server = create_flow_from_file(client_secrets_file)
+    return auth_url, server, flow
+
+
+def start_auth_flow_scopes(
+    client_secrets_file: str,
+    scopes: list[str],
+    *,
+    include_granted_scopes: bool = True,
+) -> Tuple[str, OAuthCallbackServer, Flow]:
+    flow, auth_url, server = create_flow_from_file_scopes(
+        client_secrets_file,
+        scopes,
+        include_granted_scopes=include_granted_scopes,
+    )
     return auth_url, server, flow
 
 

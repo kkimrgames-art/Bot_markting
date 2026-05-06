@@ -9,7 +9,10 @@ import time
 import re
 import uuid
 import hashlib
+import queue
+import threading
 from typing import Optional, Tuple, Dict, Any
+from collections import deque
 from pathlib import Path
 from .ffmpeg_utils import ffmpeg_bin, ffprobe_bin
 from .config import load_config
@@ -30,6 +33,256 @@ except ImportError:
     HAS_ARABIC_SUPPORT = False
 
 logger = logging.getLogger(__name__)
+
+
+def _terminate_subprocess_tree(proc: subprocess.Popen) -> None:
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+
+    for stop in ("terminate", "kill"):
+        try:
+            getattr(proc, stop)()
+        except Exception:
+            continue
+        try:
+            proc.wait(timeout=8)
+            return
+        except Exception:
+            continue
+
+
+def _run_ffmpeg_with_idle_timeout(
+    cmd: list[str],
+    *,
+    timeout_s: int = 300,
+    idle_timeout_s: int = 90,
+    label: str = "FFmpeg",
+) -> Tuple[int, str]:
+    """Run an FFmpeg command with both hard-timeout AND idle-timeout.
+
+    Unlike ``subprocess.run(timeout=N)`` which only enforces a hard wall-clock
+    timeout, this function monitors stderr output and kills the process if
+    **no output at all** is produced for ``idle_timeout_s`` seconds.  This is
+    critical on Render free-tier where FFmpeg can stall at 0% CPU due to
+    resource throttling, causing the bot to appear frozen for the entire
+    hard-timeout duration.
+
+    Returns (returncode, stderr_tail).  returncode == -1 indicates a timeout.
+    """
+    popen_kwargs: Dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+        "bufsize": 0,
+    }
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            popen_kwargs["creationflags"] = creation_flag
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    stderr_parts: deque[bytes] = deque(maxlen=200)
+    stderr_lock = threading.Lock()
+    stderr_total_bytes = 0
+
+    def _stderr_tail_text() -> str:
+        with stderr_lock:
+            snapshot = list(stderr_parts)
+        return b"".join(snapshot).decode(errors="ignore")[-2500:]
+
+    # Background thread to drain stderr so the pipe buffer never fills up
+    # (which would block FFmpeg and cause a deadlock).
+    drain_done = threading.Event()
+
+    def _drain_stderr() -> None:
+        nonlocal stderr_total_bytes
+        try:
+            while True:
+                chunk = proc.stderr.read(4096)
+                if not chunk:
+                    break
+                with stderr_lock:
+                    stderr_parts.append(chunk)
+                    stderr_total_bytes += len(chunk)
+        except Exception:
+            pass
+        finally:
+            drain_done.set()
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+
+    drain_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    drain_thread.start()
+
+    start_ts = time.monotonic()
+    last_activity_ts = start_ts
+    last_output_len = 0
+
+    while True:
+        try:
+            proc.wait(timeout=2.0)
+            break  # Process finished
+        except subprocess.TimeoutExpired:
+            pass
+
+        now = time.monotonic()
+
+        # Hard timeout
+        if timeout_s > 0 and (now - start_ts) >= timeout_s:
+            logger.warning(f"⏰ [{label}] Hard timeout after {int(now - start_ts)}s — killing FFmpeg")
+            _terminate_subprocess_tree(proc)
+            drain_done.wait(timeout=5)
+            stderr_text = _stderr_tail_text()
+            return -1, stderr_text
+
+        # Idle timeout: check if stderr has produced new output
+        with stderr_lock:
+            current_len = stderr_total_bytes
+        if current_len != last_output_len:
+            last_output_len = current_len
+            last_activity_ts = now
+        elif idle_timeout_s > 0 and (now - last_activity_ts) >= idle_timeout_s:
+            logger.warning(
+                f"⏰ [{label}] Idle timeout — no output for {int(now - last_activity_ts)}s — killing FFmpeg"
+            )
+            _terminate_subprocess_tree(proc)
+            drain_done.wait(timeout=5)
+            stderr_text = _stderr_tail_text()
+            return -1, stderr_text
+
+    drain_done.wait(timeout=5)
+    stderr_text = _stderr_tail_text()
+    return int(proc.returncode or 0), stderr_text
+
+
+def _run_ffmpeg_command_with_progress(
+    cmd: list[str],
+    *,
+    timeout_s: int,
+    idle_timeout_s: Optional[int] = None,
+    progress_label: str = "FFmpeg",
+) -> Tuple[int, str, str]:
+    progress_cmd = list(cmd)
+    try:
+        if "-progress" not in progress_cmd:
+            progress_cmd[1:1] = ["-progress", "pipe:1"]
+        if "-nostats" not in progress_cmd:
+            progress_cmd[1:1] = ["-nostats"]
+    except Exception:
+        pass
+
+    popen_kwargs: Dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "ignore",
+        "bufsize": 1,
+    }
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            popen_kwargs["creationflags"] = creation_flag
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(progress_cmd, **popen_kwargs)
+    events: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+    stderr_tail_parts: deque[str] = deque(maxlen=160)
+    stderr_tail_lock = threading.Lock()
+
+    def _stderr_tail_text() -> str:
+        with stderr_tail_lock:
+            snapshot = list(stderr_tail_parts)
+        return "\n".join(snapshot)[-2500:]
+
+    def _pump(stream: Any, stream_name: str) -> None:
+        try:
+            while True:
+                line = stream.readline()
+                if line == "":
+                    break
+                events.put((stream_name, line.rstrip()))
+        except Exception:
+            pass
+        finally:
+            events.put((stream_name, None))
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    stdout_thread = threading.Thread(target=_pump, args=(proc.stdout, "stdout"), daemon=True)
+    stderr_thread = threading.Thread(target=_pump, args=(proc.stderr, "stderr"), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    start_ts = time.monotonic()
+    last_activity_ts = start_ts
+    last_progress_ts = start_ts
+    last_log_ts = start_ts
+    closed_streams = set()
+    current_out_time = ""
+
+    while True:
+        now = time.monotonic()
+        if timeout_s > 0 and (now - start_ts) >= timeout_s:
+            _terminate_subprocess_tree(proc)
+            stderr_tail = _stderr_tail_text()
+            return -1, stderr_tail, f"ffmpeg timed out after {int(timeout_s)}s"
+
+        effective_idle_timeout = int(idle_timeout_s or 0)
+        if effective_idle_timeout > 0 and (now - last_progress_ts) >= effective_idle_timeout:
+            _terminate_subprocess_tree(proc)
+            stderr_tail = _stderr_tail_text()
+            return -1, stderr_tail, f"ffmpeg stalled with no progress for {effective_idle_timeout}s"
+
+        try:
+            stream_name, payload = events.get(timeout=1.0)
+        except queue.Empty:
+            if proc.poll() is not None and len(closed_streams) >= 2:
+                break
+            continue
+
+        if payload is None:
+            closed_streams.add(stream_name)
+            if proc.poll() is not None and len(closed_streams) >= 2:
+                break
+            continue
+
+        last_activity_ts = time.monotonic()
+        if stream_name == "stderr":
+            if payload:
+                with stderr_tail_lock:
+                    stderr_tail_parts.append(payload)
+            continue
+
+        if payload.startswith("out_time="):
+            current_out_time = payload.split("=", 1)[1].strip()
+            last_progress_ts = last_activity_ts
+        elif payload.startswith("out_time_ms="):
+            current_out_time = payload.split("=", 1)[1].strip()
+            last_progress_ts = last_activity_ts
+        elif payload.startswith("progress="):
+            state = payload.split("=", 1)[1].strip()
+            last_progress_ts = last_activity_ts
+            if (last_activity_ts - last_log_ts) >= 20:
+                suffix = f" | out_time={current_out_time}" if current_out_time else ""
+                logger.info(f"⏱️ {progress_label}: state={state}{suffix}")
+                last_log_ts = last_activity_ts
+        elif payload:
+            with stderr_tail_lock:
+                stderr_tail_parts.append(payload)
+
+    proc.wait(timeout=5)
+    stderr_tail = _stderr_tail_text()
+    return int(proc.returncode or 0), stderr_tail, ""
 
 
 def _parse_volume_ratio(raw: str, default_ratio: float) -> float:
@@ -61,10 +314,35 @@ def _is_low_resource_env() -> bool:
     """Detect if running in a low-resource environment (Render free tier, etc.).
     Uses multiple signals to avoid missing detection."""
     render_explicit = str(os.getenv("RENDER", "")).strip().lower() in {"1", "true", "yes", "on"}
-    render_platform = bool(os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_EXTERNAL_URL"))
+    render_platform = bool(
+        os.getenv("RENDER_SERVICE_ID")
+        or os.getenv("RENDER_INSTANCE_ID")
+        or os.getenv("RENDER_EXTERNAL_URL")
+        or os.getenv("RENDER_SERVICE_NAME")
+        or os.getenv("RENDER_GIT_REPOSITORY")
+    )
     low_res = str(os.getenv("LOW_RESOURCE_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
     low_cpu = str(os.getenv("FFMPEG_LOW_CPU", "")).strip().lower() in {"1", "true", "yes", "on"}
-    return render_explicit or render_platform or low_res or low_cpu
+    if render_explicit or render_platform or low_res or low_cpu:
+        return True
+
+    try:
+        from .resource_guard import get_resource_snapshot
+
+        snap = get_resource_snapshot()
+        total_mb = int(snap.ram_total_mb or 0)
+        available_mb = int(snap.ram_available_mb or 0)
+        cpu_count = int(os.cpu_count() or 0)
+        if total_mb and total_mb <= 3584:
+            return True
+        if available_mb and available_mb <= 900:
+            return True
+        if cpu_count and cpu_count <= 2 and total_mb and total_mb <= 6144:
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _safe_processing_fps(raw_fps: Optional[float]) -> float:
@@ -85,6 +363,53 @@ def _safe_processing_fps(raw_fps: Optional[float]) -> float:
 
 
 """معالج فيديوهات المودات"""
+
+
+def _ffmpeg_memory_guard_args() -> list:
+    """إرجاع وسيطات حماية الذاكرة لـ FFmpeg في بيئات الموارد المحدودة (Render).
+    
+    يحد من تخصيص الذاكرة لمنع OOM kill أثناء الترميز الثقيل.
+    """
+    if not _is_low_resource_env():
+        return []
+    
+    try:
+        max_alloc_mb = int((os.getenv("FFMPEG_MAX_ALLOC_MB", "256") or "256").strip())
+    except Exception:
+        max_alloc_mb = 256
+    max_alloc_bytes = max(64, max_alloc_mb) * 1024 * 1024
+    
+    return ["-max_alloc", str(max_alloc_bytes)]
+
+
+def _shorts_target_resolution() -> Tuple[int, int]:
+    def _env_int(name: str, default: int) -> int:
+        try:
+            return int(float((os.getenv(name, str(default)) or str(default)).strip()))
+        except Exception:
+            return default
+
+    is_low = _is_low_resource_env()
+    if is_low:
+        default_width = _env_int("SHORTS_LOW_RESOURCE_WIDTH", 720)
+        default_height = _env_int("SHORTS_LOW_RESOURCE_HEIGHT", 1280)
+    else:
+        default_width = 1080
+        default_height = 1920
+
+    width = _env_int("SHORTS_TARGET_WIDTH", default_width)
+    height = _env_int("SHORTS_TARGET_HEIGHT", default_height)
+
+    width = max(144, width)
+    height = max(256, height)
+    if width % 2 != 0:
+        width -= 1
+    if height % 2 != 0:
+        height -= 1
+
+    if width <= 0 or height <= 0:
+        return (720, 1280) if is_low else (1080, 1920)
+    return width, height
 
 
 def _get_shorts_encoder_settings() -> dict:
@@ -378,6 +703,17 @@ class ModVideoProcessor:
         try:
             current_path = input_video
             target_fps = self._get_video_fps(current_path)
+            explicit_effects = video_effects if isinstance(video_effects, dict) else None
+            intro_cfg = self._normalize_explicit_video_effect((explicit_effects or {}).get("intro") or {})
+            outro_cfg = self._normalize_explicit_video_effect((explicit_effects or {}).get("outro") or {})
+            has_post_convert_processing = bool(
+                top_text
+                or enhance
+                or apply_processing_effects
+                or intro_cfg.get("enabled")
+                or outro_cfg.get("enabled")
+            )
+            skip_final_encode = False
             
             # الخطوة 1: قص البداية والنهاية (فقط إذا كانت القيم أكبر من 0)
             # 🔧 استخدام stream copy للحفاظ على الجودة الأصلية
@@ -393,13 +729,8 @@ class ModVideoProcessor:
                 step_timings["trim"] = time.time() - step_start
                 logger.info(f"✅ Step 1/5 completed in {step_timings['trim']:.2f}s")
             
-            # الخطوة 1.5: قلب الفيديو أفقياً (إذا تم طلبه)
-            if hflip:
-                logger.info("↔️ Flipping video horizontally (mirroring)...")
-                self._flip_video(current_path, flipped_path)
-                current_path = str(flipped_path)
-            
-            # الخطوة 2: تحويل لصيغة شورتس (9:16)
+            # التحقق المبكر: هل سيتم تحويل الفيديو فعلاً إلى صيغة Shorts بترميز كامل؟
+            will_convert_to_shorts = False
             if convert_to_shorts:
                 fmt = (shorts_format or "crop").strip().lower()
                 try:
@@ -414,7 +745,19 @@ class ModVideoProcessor:
                     except Exception:
                         should_skip_conversion = False
 
-                if should_skip_conversion:
+                if not should_skip_conversion:
+                    will_convert_to_shorts = True
+
+            # الخطوة 1.5: قلب الفيديو أفقياً (إذا تم طلبه)
+            # 🔧 تحسين: إذا كنا سنقوم بترجميز الفيديو لتحويله إلى Shorts، سنمرر طلب القلب له هناك لتجنب ترميز مزدوج.
+            if hflip and not will_convert_to_shorts:
+                logger.info("↔️ Flipping video horizontally (separate encode)...")
+                self._flip_video(current_path, flipped_path)
+                current_path = str(flipped_path)
+            
+            # الخطوة 2: تحويل لصيغة شورتس (9:16)
+            if convert_to_shorts:
+                if not will_convert_to_shorts:
                     logger.info(f"📐 Step 2/5: Skipping shorts conversion (already 9:16: {width}x{height})")
                     if progress_callback:
                         try: progress_callback("2/5 📐 تخطي التحويل (الفيديو عمودي 9:16 مسبقاً)...")
@@ -422,15 +765,20 @@ class ModVideoProcessor:
                     step_timings["convert"] = 0.0
                 else:
                     step_start = time.time()
-                    logger.info("📐 Step 2/5: Converting to shorts format...")
+                    if hflip:
+                        logger.info("📐 Step 2/5: Converting to shorts format (incl. horizontal flip)...")
+                    else:
+                        logger.info("📐 Step 2/5: Converting to shorts format...")
                     if progress_callback:
                         try: progress_callback("2/5 📐 تحويل لصيغة شورتس...")
                         except Exception: pass
-                    self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format)
+                    self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format, hflip=hflip)
                     current_path = str(resized_path)
-                    final_width, final_height = 1080, 1920
+                    final_width, final_height = _shorts_target_resolution()
                     step_timings["convert"] = time.time() - step_start
                     logger.info(f"✅ Step 2/5 completed in {step_timings['convert']:.2f}s")
+                    if not has_post_convert_processing:
+                        skip_final_encode = True
             
             # الخطوة 3: إضافة نص علوي (اختياري)
             if top_text:
@@ -485,18 +833,37 @@ class ModVideoProcessor:
             
             # الخطوة 6: الترميز النهائي
             encode_start = time.time()
-            logger.info("🎬 Step 6/6: Final encoding...")
-            if progress_callback:
-                try: progress_callback("6/6 🎬 الترميز النهائي...")
-                except Exception: pass
-            if convert_to_shorts:
-                ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
-                if not ok_final:
-                    raise RuntimeError(f"Failed to encode final shorts: {final_path}")
+            if convert_to_shorts and skip_final_encode:
+                logger.info("⏭️ Step 6/6: Skipping final encoding and reusing the shorts-converted file directly...")
+                if progress_callback:
+                    try: progress_callback("6/6 ⏭️ تخطي الترميز النهائي...")
+                    except Exception: pass
+                try:
+                    if os.path.exists(str(final_path)):
+                        os.remove(str(final_path))
+                except Exception:
+                    pass
+                try:
+                    os.replace(current_path, str(final_path))
+                except Exception:
+                    import shutil
+                    shutil.copy2(current_path, str(final_path))
+                current_path = str(final_path)
+                step_timings["encode"] = time.time() - encode_start
+                logger.info(f"✅ Step 6/6 skipped in {step_timings['encode']:.2f}s")
             else:
-                self._optimize_for_youtube(current_path, str(final_path))
-            step_timings["encode"] = time.time() - encode_start
-            logger.info(f"✅ Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
+                logger.info("🎬 Step 6/6: Final encoding...")
+                if progress_callback:
+                    try: progress_callback("6/6 🎬 الترميز النهائي...")
+                    except Exception: pass
+                if convert_to_shorts:
+                    ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
+                    if not ok_final:
+                        raise RuntimeError(f"Failed to encode final shorts: {final_path}")
+                else:
+                    self._optimize_for_youtube(current_path, str(final_path))
+                step_timings["encode"] = time.time() - encode_start
+                logger.info(f"✅ Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
             
             # معلومات الفيديو المعالج
             info = {
@@ -649,16 +1016,22 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
-        try:
-            default_timeout = "300" if is_low else "1800"
-            timeout_s = int((os.getenv("SHORTS_EFFECTS_TIMEOUT_SECONDS", default_timeout) or default_timeout).strip())
-        except Exception:
-            timeout_s = 300 if is_low else 1800
-        timeout_s = max(120, timeout_s)
-        logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s): {' '.join(cmd[-6:])}")
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-        if res.returncode != 0:
-            raise RuntimeError((res.stderr or "")[-2500:])
+        timeout_s = self._resolve_ffmpeg_timeout(
+            input_path,
+            "SHORTS_EFFECTS_TIMEOUT_SECONDS",
+            300,
+            1800,
+            10.0,
+            12.0,
+            extra_seconds=120,
+        )
+        idle_timeout_s = min(90, max(30, timeout_s // 4))
+        logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s, idle={idle_timeout_s}s): {' '.join(cmd[-6:])}")
+        rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=timeout_s, idle_timeout_s=idle_timeout_s, label="Effects"
+        )
+        if rc != 0:
+            raise RuntimeError(stderr_text[-2500:] or f"Effects FFmpeg exited with code {rc}")
     
     def _optimize_for_youtube(self, input_path: str, output_path: str) -> bool:
         # Ensure temp and output dirs exist
@@ -684,8 +1057,13 @@ class ModVideoProcessor:
                 output_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode == 0 and os.path.exists(output_path):
+            _opt_timeout = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_YOUTUBE_OPT_TIMEOUT_SECONDS", 120, 300, 3.0, 3.0, extra_seconds=30,
+            )
+            rc, _stderr = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=_opt_timeout, idle_timeout_s=60, label="YouTubeOpt"
+            )
+            if rc == 0 and os.path.exists(output_path):
                 logger.debug("✅ YouTube optimization successful")
                 return True
             else:
@@ -705,6 +1083,7 @@ class ModVideoProcessor:
                 if gop < 1:
                     gop = 30
                 has_audio = self._has_audio(input_path)
+                is_low = _is_low_resource_env()
 
                 out_s = str(output_path)
                 if out_s.lower().endswith(".mp4"):
@@ -724,6 +1103,10 @@ class ModVideoProcessor:
 
                 cmd = [
                     ffmpeg_bin(),
+                    *_ffmpeg_memory_guard_args(),
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-nostats",
                     "-y",
                     "-fflags", "+genpts+igndts",
                     "-i", input_path,
@@ -792,10 +1175,21 @@ class ModVideoProcessor:
                     str(tmp_out),
                 ]
 
-                _timeout = 300 if _is_low_resource_env() else 600
-                result = subprocess.run(cmd, capture_output=True, timeout=_timeout)
-                stderr = (result.stderr or b"").decode(errors="ignore")
-                if result.returncode != 0:
+                _timeout = self._resolve_ffmpeg_timeout(
+                    input_path,
+                    "FFMPEG_FINAL_ENCODE_TIMEOUT_SECONDS",
+                    300,
+                    600,
+                    10.0,
+                    8.0,
+                    extra_seconds=90,
+                )
+                _idle_timeout = min(120, max(45, _timeout // 4))
+                logger.info(f"🎬 [FinalEncode] timeout={_timeout}s idle={_idle_timeout}s encoder={enc_settings.get('encoder')}")
+                rc, stderr = _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_timeout, idle_timeout_s=_idle_timeout, label="FinalEncode"
+                )
+                if rc != 0:
                     return False, stderr
                 try:
                     self._validate_video_file(str(tmp_out))
@@ -829,7 +1223,7 @@ class ModVideoProcessor:
             # Fallback to libx264 if GPU encoder fails
             if str(settings.get("encoder") or "").lower() != "libx264":
                 ff_threads, preset, crf = self._shorts_x264_settings()
-                lvl = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+                lvl = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
                 fallback = {
                     "encoder": "libx264",
                     "preset": preset,
@@ -938,10 +1332,15 @@ class ModVideoProcessor:
                     # x264 lossless is not supported with profile=high/yuv420p
                     # use high444 for intermediates
                     cmd[cmd.index("-c:v") + 2:cmd.index("-c:v") + 2] = ["-profile:v", v_profile]
-                result = subprocess.run(cmd, capture_output=True, timeout=300 if _is_low_resource_env() else 600)
-                stderr = (result.stderr or b"").decode(errors="ignore")
-                ok = (result.returncode == 0) and os.path.exists(output_path) and os.path.getsize(output_path) > 0
-                return ok, stderr
+                _enh_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_ENHANCE_TIMEOUT_SECONDS", 300, 600, 8.0, 8.0, extra_seconds=90,
+                )
+                _enh_idle = min(120, max(45, _enh_timeout // 4))
+                rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_enh_timeout, idle_timeout_s=_enh_idle, label="Enhance"
+                )
+                ok = (rc == 0) and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+                return ok, stderr_text
 
             # Try 1: eq + colorbalance (highlights) + blend (intensity)
             fc1 = (
@@ -1277,10 +1676,16 @@ class ModVideoProcessor:
             fps = self._get_video_fps(input_path)
             if not fps or fps <= 0:
                 fps = 30.0
-            
+
+            low_resource = _is_low_resource_env()
+            video_extra_args = []
+            if low_resource:
+                video_extra_args.extend(["-bf", "0", "-tune", "zerolatency"])
+
             base_cmd = [
                 ffmpeg_bin(),
                 "-y",
+                *_ffmpeg_memory_guard_args(),
                 "-i", input_path,
                 "-vf", "",
                 "-c:v", "libx264",
@@ -1292,14 +1697,20 @@ class ModVideoProcessor:
                 "-vsync", "cfr",
                 "-r", f"{fps:.6f}",
                 "-threads", str(ff_threads),
+                *video_extra_args,
                 "-c:a", "copy",
                 str(output_path)
             ]
 
-            def _run_filter(vf: str) -> subprocess.CompletedProcess:
+            def _run_filter(vf: str) -> Tuple[int, str]:
                 cmd = list(base_cmd)
-                cmd[5] = vf
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                cmd[cmd.index("-vf") + 1] = vf
+                _ovl_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                return _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_ovl_timeout, idle_timeout_s=90, label="TopOverlay"
+                )
 
             attempts = []
 
@@ -1324,11 +1735,11 @@ class ModVideoProcessor:
             last_stderr = ""
             for vf in attempts:
                 logger.debug(f"Applying VF filter: {vf}")
-                result = _run_filter(vf)
-                if result.returncode == 0:
+                rc, stderr_text = _run_filter(vf)
+                if rc == 0:
                     logger.info("✅ Top overlay text added to video")
                     return
-                last_stderr = (result.stderr or "")[-2500:]
+                last_stderr = (stderr_text or "")[-2500:]
                 logger.error(f"FFmpeg failed to add top overlay text: {last_stderr}")
 
             raise RuntimeError(f"Failed to add top overlay text via FFmpeg drawtext. Last error: {last_stderr}")
@@ -1499,10 +1910,15 @@ class ModVideoProcessor:
                 str(output_path)
             ]
 
-            def _run_filter(vf: str) -> subprocess.CompletedProcess:
+            def _run_filter(vf: str) -> Tuple[int, str]:
                 cmd = list(base_cmd)
                 cmd[5] = vf
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                _ovl_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                return _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_ovl_timeout, idle_timeout_s=90, label="CustomOverlay"
+                )
 
             attempts = [drawtext_filter]
             attempts.append(drawtext_filter.replace(":fix_bounds=1", ""))
@@ -1514,11 +1930,11 @@ class ModVideoProcessor:
             last_stderr = ""
             for vf in attempts:
                 logger.debug(f"Custom overlay attempt: {vf}")
-                result = _run_filter(vf)
-                if result.returncode == 0:
+                rc, stderr_text = _run_filter(vf)
+                if rc == 0:
                     logger.info("✅ Custom overlay text added to video")
                     return
-                last_stderr = (result.stderr or "")[-2500:]
+                last_stderr = (stderr_text or "")[-2500:]
                 logger.error(f"FFmpeg custom overlay failed: {last_stderr}")
 
             raise RuntimeError(f"Failed to add custom overlay text via FFmpeg. Last error: {last_stderr}")
@@ -1690,17 +2106,26 @@ class ModVideoProcessor:
 
         filter_complex = ",".join(overlay_chain) + f"[ovl];[0:v][ovl]overlay=x=(W-w)/2:y={y_expr}:shortest=1:enable='between(t,{visible_start:.2f},{visible_end:.2f})'[vout]"
 
-        ff_threads, _, _ = self._shorts_x264_settings()
-        preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", "veryfast") or "veryfast").strip() or "veryfast"
-        crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "20") or "20")
-        level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+        ff_threads, base_preset, base_crf = self._shorts_x264_settings()
+        if _is_low_resource_env():
+            preset = base_preset
+            crf = base_crf
+        else:
+            preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+            crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+        level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
         fps = self._get_video_fps(input_path)
         if not fps or fps <= 0:
             fps = 30.0
 
+        video_extra_args = []
+        if _is_low_resource_env():
+            video_extra_args.extend(["-bf", "0", "-tune", "zerolatency"])
+
         cmd = [
             ffmpeg_bin(),
             "-y",
+            *_ffmpeg_memory_guard_args(),
             "-i", input_path,
             "-loop", "1",
             "-i", str(overlay_path),
@@ -1716,15 +2141,21 @@ class ModVideoProcessor:
             "-vsync", "cfr",
             "-r", f"{fps:.6f}",
             "-threads", str(ff_threads),
+            *video_extra_args,
             "-c:a", "copy",
             str(output_path),
         ]
 
         try:
             logger.debug("Custom animated overlay filter: %s", filter_complex)
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or "")[-2500:] or "Animated overlay failed")
+            _anim_timeout = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+            )
+            rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=_anim_timeout, idle_timeout_s=90, label="AnimatedOverlay"
+            )
+            if rc != 0:
+                raise RuntimeError(stderr_text[-2500:] or "Animated overlay failed")
             if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
                 raise RuntimeError("Animated overlay output file missing or empty")
             logger.info("✅ Custom animated overlay text added to video")
@@ -1814,14 +2245,15 @@ class ModVideoProcessor:
 
             # 🔧 استخدام إعدادات وسيط محسّنة
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-            if os.getenv("LOW_RESOURCE_MODE") == "1":
+            if _is_low_resource_env():
                 base_preset = "ultrafast"
                 base_crf = 26
             preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
             crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-            level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+            level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
             base_cmd = [
                 ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
                 "-y",
                 "-i", input_path,
                 "-vf", "",
@@ -1836,10 +2268,15 @@ class ModVideoProcessor:
                 str(output_path),
             ]
 
-            def _run_filter(vf: str) -> subprocess.CompletedProcess:
+            def _run_filter(vf: str) -> Tuple[int, str]:
                 cmd = list(base_cmd)
                 cmd[5] = vf
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                _wm_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_WATERMARK_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                return _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_wm_timeout, idle_timeout_s=90, label="Watermark"
+                )
 
             attempts = [
                 drawtext_filter,
@@ -1850,10 +2287,10 @@ class ModVideoProcessor:
 
             last_stderr = ""
             for vf in attempts:
-                result = _run_filter(vf)
-                if result.returncode == 0:
+                rc, stderr_text = _run_filter(vf)
+                if rc == 0:
                     return
-                last_stderr = (result.stderr or "")[-2500:]
+                last_stderr = (stderr_text or "")[-2500:]
 
             raise RuntimeError(f"Failed to add watermark via FFmpeg drawtext. Last error: {last_stderr}")
         finally:
@@ -1879,9 +2316,9 @@ class ModVideoProcessor:
                 "-use_editlist", "0",
                 str(output_path),
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if res.returncode != 0:
-                raise RuntimeError((res.stderr or "")[-2500:])
+            rc, _stderr = _run_ffmpeg_with_idle_timeout(cmd, timeout_s=300, idle_timeout_s=60, label="SimpleEffectsCopy")
+            if rc != 0:
+                raise RuntimeError(_stderr[-2500:] if _stderr else "SimpleEffects copy failed")
             return
 
         duration_s = None
@@ -1976,12 +2413,12 @@ class ModVideoProcessor:
 
         # 🔧 استخدام إعدادات وسيط محسّنة
         ff_threads, base_preset, base_crf = self._shorts_x264_settings()
-        if os.getenv("LOW_RESOURCE_MODE") == "1":
+        if _is_low_resource_env():
             base_preset = "ultrafast"
             base_crf = 26
         preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
         crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-        level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
+        level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
         has_audio = self._has_audio(input_path)
         fps = self._get_video_fps(input_path)
         if not fps or fps <= 0:
@@ -1991,6 +2428,7 @@ class ModVideoProcessor:
             gop = 30
         cmd = [
             ffmpeg_bin(),
+            *_ffmpeg_memory_guard_args(),
             "-y",
             "-i", input_path,
             "-vf", vf,
@@ -2014,9 +2452,21 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd += ["-movflags", "+faststart", str(output_path)]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if res.returncode != 0:
-            raise RuntimeError((res.stderr or "")[-2500:])
+        _fx_timeout = self._resolve_ffmpeg_timeout(
+            input_path,
+            "SHORTS_SIMPLE_EFFECTS_TIMEOUT_SECONDS",
+            300,
+            600,
+            8.0,
+            8.0,
+            extra_seconds=90,
+        )
+        _fx_idle = min(90, max(30, _fx_timeout // 4))
+        rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_fx_timeout, idle_timeout_s=_fx_idle, label="SimpleEffects"
+        )
+        if rc != 0:
+            raise RuntimeError(stderr_text[-2500:] or f"SimpleEffects FFmpeg exited with code {rc}")
     
     def _get_video_duration(self, video_path: str) -> float:
         """الحصول على مدة الفيديو"""
@@ -2147,6 +2597,86 @@ class ModVideoProcessor:
             ff_threads = 1
 
         return ff_threads, preset, crf
+
+    def _resolve_ffmpeg_timeout(
+        self,
+        input_path: str,
+        env_name: str,
+        default_low: int,
+        default_high: int,
+        multiplier_low: float,
+        multiplier_high: float,
+        extra_seconds: int = 120,
+        minimum_seconds: int = 120,
+        maximum_seconds: int = 7200,
+    ) -> int:
+        is_low = _is_low_resource_env()
+        default_timeout = default_low if is_low else default_high
+        try:
+            timeout_s = int((os.getenv(env_name, str(default_timeout)) or str(default_timeout)).strip())
+        except Exception:
+            timeout_s = default_timeout
+
+        duration_s = 0.0
+        try:
+            duration_s = max(0.0, float(self._get_video_duration(input_path) or 0.0))
+        except Exception:
+            duration_s = 0.0
+
+        multiplier = multiplier_low if is_low else multiplier_high
+        if duration_s > 0 and multiplier > 0:
+            timeout_s = max(timeout_s, int(round(duration_s * multiplier)) + int(extra_seconds))
+
+        timeout_s = max(int(minimum_seconds), timeout_s)
+        if maximum_seconds > 0:
+            timeout_s = min(timeout_s, int(maximum_seconds))
+        return timeout_s
+
+    def _iter_retry_short_resolutions(self, target_width: int, target_height: int) -> list[Tuple[int, int]]:
+        def _normalize_pair(width: int, height: int) -> Optional[Tuple[int, int]]:
+            try:
+                width = int(width)
+                height = int(height)
+            except Exception:
+                return None
+            width = max(144, width)
+            height = max(256, height)
+            if width % 2 != 0:
+                width -= 1
+            if height % 2 != 0:
+                height -= 1
+            if width <= 0 or height <= 0:
+                return None
+            return width, height
+
+        candidates: list[Tuple[int, int]] = []
+        seen: set[Tuple[int, int]] = set()
+
+        primary = _normalize_pair(target_width, target_height)
+        if primary:
+            candidates.append(primary)
+            seen.add(primary)
+
+        env_width = os.getenv("SHORTS_FALLBACK_WIDTH")
+        env_height = os.getenv("SHORTS_FALLBACK_HEIGHT")
+        if env_width and env_height:
+            fallback = _normalize_pair(env_width, env_height)
+            if fallback and fallback not in seen and fallback[0] <= target_width and fallback[1] <= target_height:
+                candidates.append(fallback)
+                seen.add(fallback)
+
+        for width, height in ((540, 960), (360, 640)):
+            fallback = _normalize_pair(width, height)
+            if not fallback:
+                continue
+            if fallback in seen:
+                continue
+            if fallback[0] > target_width or fallback[1] > target_height:
+                continue
+            candidates.append(fallback)
+            seen.add(fallback)
+
+        return candidates
     
     def _trim_video(self, input_path: str, output_path: str, start: float, end: float, force_encode: bool = False):
         """قص الفيديو من البداية والنهاية"""
@@ -2175,7 +2705,7 @@ class ModVideoProcessor:
 
         # 🔧 استخدام _shorts_x264_settings() لاحترام RENDER / LOW_RESOURCE_MODE
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
-        trim_mode = _env_str("FFMPEG_TRIM_MODE", "encode").lower()
+        trim_mode = _env_str("FFMPEG_TRIM_MODE", "copy").lower()
         if _env_bool("FFMPEG_LOW_CPU", False) and trim_mode == "encode":
             trim_mode = "copy"
 
@@ -2185,6 +2715,7 @@ class ModVideoProcessor:
         if trim_mode == "copy":
             cmd = [
                 ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
                 "-y",
                 "-ss", str(start),
                 "-i", input_path,
@@ -2201,6 +2732,7 @@ class ModVideoProcessor:
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
             cmd = [
                 ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
                 "-y",
                 "-ss", str(start),  # البداية
                 "-i", input_path,
@@ -2222,14 +2754,19 @@ class ModVideoProcessor:
                 str(output_path),
             ]
         
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        _trim_timeout = self._resolve_ffmpeg_timeout(
+            input_path, "FFMPEG_TRIM_TIMEOUT_SECONDS", 120, 180, 2.0, 2.0, extra_seconds=30,
+        )
+        rc, _stderr = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_trim_timeout, idle_timeout_s=60, label="Trim"
+        )
         
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to trim video: {result.stderr.decode()}")
+        if rc != 0:
+            raise RuntimeError(f"Failed to trim video: {_stderr[-500:]}")
         
         logger.info(f"✅ Video trimmed: {start}s from start, {end}s from end")
     
-    def _convert_to_shorts(self, input_path: str, output_path: str, orig_width: int, orig_height: int, shorts_format: str = "crop"):
+    def _convert_to_shorts(self, input_path: str, output_path: str, orig_width: int, orig_height: int, shorts_format: str = "crop", hflip: bool = False):
         """تحويل الفيديو لصيغة شورتس (9:16 - 1080x1920)
 
         shorts_format:
@@ -2237,6 +2774,15 @@ class ModVideoProcessor:
             - fit_blur: عرض كامل + خلفية ضبابية من نفس الفيديو
             - partial_blur: تكبير متوسط (إظهار جزء أكبر من الأعلى/الأسفل) + خلفية ضبابية
         """
+        if hflip:
+            hf_filter = "hflip,"
+            hf_graph = "[0:v]hflip[vin];"
+            vin = "vin"
+        else:
+            hf_filter = ""
+            hf_graph = ""
+            vin = "0:v"
+        is_low = _is_low_resource_env()
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         
@@ -2260,17 +2806,26 @@ class ModVideoProcessor:
             v_profile = "high444"
             v_pix_fmt = "yuv444p"
         else:
-            # 🆕 Improved settings: Lower CRF with fast preset, respecting RENDER mode
             _, base_preset, base_crf = self._shorts_x264_settings()
-            x264_preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
-            x264_crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
+            if is_low:
+                x264_preset = base_preset
+                x264_crf = base_crf
+            else:
+                x264_preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                x264_crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
             v_profile = "high"
-            v_pix_fmt = "yuv420p"  # No color space conversion later
+            v_pix_fmt = "yuv420p"
 
         shorts_vol = _parse_volume_ratio(os.getenv("SHORTS_AUDIO_VOLUME", "60"), 0.6)
+        scale_flags = "fast_bilinear" if is_low else "lanczos"
+        audio_bitrate = "128k" if is_low else "384k"
 
-        target_width = 1080
-        target_height = 1920
+        target_width, target_height = _shorts_target_resolution()
+        if is_low and (target_width > 720 or target_height > 1280):
+            logger.warning(
+                f"⚠️ Shorts target resolution {target_width}x{target_height} is too heavy for low-resource mode; clamping to 720x1280"
+            )
+            target_width, target_height = 720, 1280
         
         # حساب نسبة العرض للارتفاع
         input_ratio = orig_width / orig_height
@@ -2292,192 +2847,314 @@ class ModVideoProcessor:
             except Exception:
                 pass
 
-        cmd = [
-            ffmpeg_bin(),
-            "-y",
-            "-i", input_path,
-        ]
-
-        if fmt == "fit_blur":
-            # خلفية: تكبير لملء 9:16 ثم قص + ضبابية
-            # مقدمة: scale ليلائم الإطار (بدون قص) ثم overlay في المنتصف
-            filter_complex = (
-                f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                f"crop={target_width}:{target_height},"
-                f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:flags=lanczos,"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={v_pix_fmt}[outv]"
-            )
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "[outv]",
-                "-c:v", "libx264",
-                "-preset", x264_preset,
-                "-crf", str(x264_crf),
-                "-profile:v", v_profile,
-                "-level", level,
-                "-pix_fmt", v_pix_fmt,
-                "-vsync", "cfr",
-                "-r", f"{fps:.6f}",
-                "-g", str(gop),
-                "-threads", str(ff_threads),
-            ]
-        elif fmt == "partial_blur":
-            # نفس فكرة الخلفية الضبابية، لكن نجعل المقدمة أكبر قليلاً (Zoom متوسط)
-            # لتقليل الفراغ العلوي/السفلي مع قص جزء من اليمين/اليسار.
-            # zoom=1.25 => المقدمة 1350x2400 ثم crop إلى 1080x1920.
-            zoom = float(os.getenv("SHORTS_PARTIAL_ZOOM", "1.25") or "1.25")
-            if zoom < 1.0:
-                zoom = 1.0
-            if zoom > 2.0:
-                zoom = 2.0
-            def _even(n: int) -> int:
-                try:
-                    n = int(n)
-                except Exception:
-                    return 2
-                if n <= 0:
-                    return 2
-                return n if (n % 2 == 0) else (n - 1)
-
-            fg_w = _even(int(target_width * zoom))
-            fg_h = _even(int(target_height * zoom))
-            filter_complex = (
-                f"[0:v]scale={target_width}:{target_height}:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                f"crop={target_width}:{target_height},"
-                f"boxblur=luma_radius=20:luma_power=1[bg];"
-                f"[0:v]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-                f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                f"crop={target_width}:{target_height}[fg];"
-                f"[bg][fg]overlay=0:0,format={v_pix_fmt}[outv]"
-            )
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", "[outv]",
-                "-c:v", "libx264",
-                "-preset", x264_preset,
-                "-crf", str(x264_crf),
-                "-profile:v", v_profile,
-                "-level", level,
-                "-pix_fmt", v_pix_fmt,
-                "-vsync", "cfr",
-                "-r", f"{fps:.6f}",
-                "-g", str(gop),
-                "-threads", str(ff_threads),
-            ]
-        else:
-            # تحديد استراتيجية التحويل (قص/ملء أو pad عند الحاجة)
-            def _even(n: int) -> int:
-                try:
-                    n = int(n)
-                except Exception:
-                    return 2
-                if n <= 0:
-                    return 2
-                return n if (n % 2 == 0) else (n - 1)
-
-            if abs(input_ratio - target_ratio) < 0.01:
-                vf = f"scale={target_width}:{target_height}:flags=lanczos"
-            elif input_ratio > target_ratio:
-                # IMPORTANT: for yuv420p, crop width/height and offsets should be even
-                safe_h = _even(orig_height)
-                new_width = _even(int(safe_h * target_ratio))
-                crop_x = _even((orig_width - new_width) // 2)
-                vf = f"crop={new_width}:{safe_h}:{crop_x}:0,scale={target_width}:{target_height}:flags=lanczos"
-            else:
-                scale_height = target_height
-                scale_width = int(scale_height * input_ratio)
-                if scale_width > target_width:
-                    scale_width = target_width
-                    scale_height = int(scale_width / input_ratio)
-
-                # IMPORTANT: for yuv420p, intermediate scaled dimensions should be even
-                scale_width = _even(scale_width)
-                scale_height = _even(scale_height)
-
-                pad_x = (target_width - scale_width) // 2
-                pad_y = (target_height - scale_height) // 2
-
-                vf = f"scale={scale_width}:{scale_height}:flags=lanczos,pad={target_width}:{target_height}:{pad_x}:{pad_y}:black"
-
-            cmd += [
-                "-vf", vf,
-                "-map", "0:v",
-                "-c:v", "libx264",
-                "-preset", x264_preset,
-                "-crf", str(x264_crf),
-                "-profile:v", v_profile,
-                "-level", level,
-                "-pix_fmt", v_pix_fmt,
-                "-vsync", "cfr",
-                "-r", f"{fps:.6f}",
-                "-g", str(gop),
-                "-threads", str(ff_threads),
-            ]
         has_audio = self._has_audio(input_path)
-        if has_audio:
-            cmd += [
-                "-map", "0:a?",
-                "-c:a", "aac",
-                "-b:a", "384k",  # YouTube recommended: 384kbps stereo
-                "-ar", "48000",  # YouTube recommended: 48kHz
-                "-af", f"volume={shorts_vol}",
-                "-movflags", "+faststart",  # Essential for YouTube streaming
-                "-shortest",
-            ]
-        else:
-            cmd += ["-an", "-movflags", "+faststart"]
-        out_s = str(output_path)
-        if out_s.lower().endswith(".mp4"):
-            tmp_out = out_s[:-4] + ".tmp.mp4"
-        else:
-            tmp_out = out_s + ".tmp.mp4"
-        try:
-            if os.path.exists(tmp_out):
-                os.remove(tmp_out)
-        except Exception:
-            pass
-        # Ensure ffmpeg picks correct container even for temporary paths
-        cmd += ["-f", "mp4"]
-        cmd.append(str(tmp_out))
 
-        try:
-            timeout_s = int((os.getenv("FFMPEG_TIMEOUT_SECONDS", "600") or "600").strip())
-        except Exception:
-            timeout_s = 600
-        if timeout_s <= 0:
-            timeout_s = 600
-
-        result = subprocess.run(cmd, capture_output=True, timeout=timeout_s)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to convert to shorts: {result.stderr.decode()}")
-
-        # Validate output container to avoid later 'moov atom not found'
-        try:
-            self._validate_video_file(str(tmp_out))
-        except Exception as e:
-            raise RuntimeError(f"Failed to convert to shorts: output invalid: {e}")
-
-        try:
-            if os.path.exists(str(output_path)):
-                os.remove(str(output_path))
-        except Exception:
-            pass
-        try:
-            os.replace(str(tmp_out), str(output_path))
-        except Exception:
-            # fallback copy if replace fails
-            import shutil
-            shutil.copy2(str(tmp_out), str(output_path))
+        def _even(n: int) -> int:
             try:
-                os.remove(str(tmp_out))
+                n = int(n)
+            except Exception:
+                return 2
+            if n <= 0:
+                return 2
+            return n if (n % 2 == 0) else (n - 1)
+
+        def _stderr_tail(raw: Any) -> str:
+            if raw is None:
+                return ""
+            if isinstance(raw, bytes):
+                return raw.decode(errors="ignore")[-2500:]
+            return str(raw)[-2500:]
+
+        def _build_cmd(
+            attempt_width: int,
+            attempt_height: int,
+            attempt_scale_flags: str,
+            attempt_preset: str,
+            attempt_crf: int,
+            attempt_profile: str,
+            attempt_pix_fmt: str,
+            attempt_audio_bitrate: str,
+            apply_audio_filter: bool,
+            tmp_out: str,
+        ) -> list[str]:
+            attempt_ratio = attempt_width / attempt_height
+            cmd = [
+                ffmpeg_bin(),
+                *_ffmpeg_memory_guard_args(),
+                "-hide_banner",
+                "-loglevel", "error",
+                "-nostats",
+                "-y",
+                "-i", input_path,
+            ]
+
+            if fmt == "fit_blur":
+                blur_val = 10 if is_low else 20
+                filter_complex = (
+                    f"{hf_graph}"
+                    f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    f"crop={attempt_width}:{attempt_height},"
+                    f"boxblur=luma_radius={blur_val}:luma_power=1[bg];"
+                    f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=decrease:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format={attempt_pix_fmt}[outv]"
+                )
+                cmd += [
+                    "-filter_complex", filter_complex,
+                    "-map", "[outv]",
+                    "-c:v", "libx264",
+                    "-preset", attempt_preset,
+                    "-crf", str(attempt_crf),
+                    "-profile:v", attempt_profile,
+                    "-level", level,
+                    "-pix_fmt", attempt_pix_fmt,
+                    "-vsync", "cfr",
+                    "-r", f"{fps:.6f}",
+                    "-g", str(gop),
+                    "-threads", str(ff_threads),
+                ]
+            elif fmt == "partial_blur":
+                zoom = float(os.getenv("SHORTS_PARTIAL_ZOOM", "1.25") or "1.25")
+                if zoom < 1.0:
+                    zoom = 1.0
+                if zoom > 2.0:
+                    zoom = 2.0
+
+                blur_val = 10 if is_low else 20
+                fg_w = _even(int(attempt_width * zoom))
+                fg_h = _even(int(attempt_height * zoom))
+                filter_complex = (
+                    f"{hf_graph}"
+                    f"[{vin}]scale={attempt_width}:{attempt_height}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    f"crop={attempt_width}:{attempt_height},"
+                    f"boxblur=luma_radius={blur_val}:luma_power=1[bg];"
+                    f"[{vin}]scale={fg_w}:{fg_h}:force_original_aspect_ratio=increase:flags={attempt_scale_flags},"
+                    f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                    f"crop={attempt_width}:{attempt_height}[fg];"
+                    f"[bg][fg]overlay=0:0,format={attempt_pix_fmt}[outv]"
+                )
+                cmd += [
+                    "-filter_complex", filter_complex,
+                    "-map", "[outv]",
+                    "-c:v", "libx264",
+                    "-preset", attempt_preset,
+                    "-crf", str(attempt_crf),
+                    "-profile:v", attempt_profile,
+                    "-level", level,
+                    "-pix_fmt", attempt_pix_fmt,
+                    "-vsync", "cfr",
+                    "-r", f"{fps:.6f}",
+                    "-g", str(gop),
+                    "-threads", str(ff_threads),
+                ]
+            else:
+                if abs(input_ratio - attempt_ratio) < 0.01:
+                    vf = f"{hf_filter}scale={attempt_width}:{attempt_height}:flags={attempt_scale_flags}"
+                elif input_ratio > attempt_ratio:
+                    safe_h = _even(orig_height)
+                    new_width = _even(int(safe_h * attempt_ratio))
+                    crop_x = _even((orig_width - new_width) // 2)
+                    vf = f"{hf_filter}crop={new_width}:{safe_h}:{crop_x}:0,scale={attempt_width}:{attempt_height}:flags={attempt_scale_flags}"
+                else:
+                    scale_height = attempt_height
+                    scale_width = int(scale_height * input_ratio)
+                    if scale_width > attempt_width:
+                        scale_width = attempt_width
+                        scale_height = int(scale_width / input_ratio)
+
+                    scale_width = _even(scale_width)
+                    scale_height = _even(scale_height)
+
+                    pad_x = (attempt_width - scale_width) // 2
+                    pad_y = (attempt_height - scale_height) // 2
+
+                    vf = f"{hf_filter}scale={scale_width}:{scale_height}:flags={attempt_scale_flags},pad={attempt_width}:{attempt_height}:{pad_x}:{pad_y}:black"
+
+                cmd += [
+                    "-vf", vf,
+                    "-map", "0:v",
+                    "-c:v", "libx264",
+                    "-preset", attempt_preset,
+                    "-crf", str(attempt_crf),
+                    "-profile:v", attempt_profile,
+                    "-level", level,
+                    "-pix_fmt", attempt_pix_fmt,
+                    "-vsync", "cfr",
+                    "-r", f"{fps:.6f}",
+                    "-g", str(gop),
+                    "-threads", str(ff_threads),
+                ]
+
+            if has_audio:
+                cmd += [
+                    "-map", "0:a?",
+                    "-c:a", "aac",
+                    "-b:a", attempt_audio_bitrate,
+                    "-ar", "48000",
+                ]
+                if apply_audio_filter:
+                    cmd += ["-af", f"volume={shorts_vol}"]
+                cmd += [
+                    "-movflags", "+faststart",
+                    "-shortest",
+                ]
+            else:
+                cmd += ["-an", "-movflags", "+faststart"]
+
+            cmd += ["-f", "mp4", str(tmp_out)]
+            return cmd
+
+        primary_timeout = self._resolve_ffmpeg_timeout(
+            input_path,
+            "FFMPEG_TIMEOUT_SECONDS",
+            600,
+            600,
+            12.0,
+            8.0,
+            extra_seconds=120,
+        )
+        fallback_timeout = self._resolve_ffmpeg_timeout(
+            input_path,
+            "FFMPEG_FALLBACK_TIMEOUT_SECONDS",
+            420,
+            540,
+            7.0,
+            6.0,
+            extra_seconds=90,
+        )
+        idle_timeout_default = 120 if is_low else 180
+        try:
+            progress_idle_timeout_s = int(
+                (os.getenv("FFMPEG_PROGRESS_IDLE_TIMEOUT_SECONDS", str(idle_timeout_default)) or str(idle_timeout_default)).strip()
+            )
+        except Exception:
+            progress_idle_timeout_s = idle_timeout_default
+        progress_idle_timeout_s = max(45, min(progress_idle_timeout_s, max(45, primary_timeout - 15)))
+
+        attempts: list[Dict[str, Any]] = [
+            {
+                "label": "primary",
+                "width": target_width,
+                "height": target_height,
+                "scale_flags": scale_flags,
+                "preset": x264_preset,
+                "crf": x264_crf,
+                "profile": v_profile,
+                "pix_fmt": v_pix_fmt,
+                "audio_bitrate": audio_bitrate,
+                "apply_audio_filter": True,
+                "timeout": primary_timeout,
+            }
+        ]
+        for index, (fallback_width, fallback_height) in enumerate(self._iter_retry_short_resolutions(target_width, target_height)[1:], start=1):
+            attempts.append(
+                {
+                    "label": f"fallback_{index}",
+                    "width": fallback_width,
+                    "height": fallback_height,
+                    "scale_flags": "fast_bilinear",
+                    "preset": "ultrafast",
+                    "crf": 30 if index == 1 else 32,
+                    "profile": "high",
+                    "pix_fmt": "yuv420p",
+                    "audio_bitrate": "96k" if has_audio else audio_bitrate,
+                    "apply_audio_filter": False,
+                    "timeout": fallback_timeout,
+                }
+            )
+
+        out_s = str(output_path)
+        last_error = ""
+        for attempt_index, attempt in enumerate(attempts, start=1):
+            if out_s.lower().endswith(".mp4"):
+                tmp_out = out_s[:-4] + f".{attempt['label']}.tmp.mp4"
+            else:
+                tmp_out = out_s + f".{attempt['label']}.tmp.mp4"
+            try:
+                if os.path.exists(tmp_out):
+                    os.remove(tmp_out)
             except Exception:
                 pass
+
+            cmd = _build_cmd(
+                attempt_width=int(attempt["width"]),
+                attempt_height=int(attempt["height"]),
+                attempt_scale_flags=str(attempt["scale_flags"]),
+                attempt_preset=str(attempt["preset"]),
+                attempt_crf=int(attempt["crf"]),
+                attempt_profile=str(attempt["profile"]),
+                attempt_pix_fmt=str(attempt["pix_fmt"]),
+                attempt_audio_bitrate=str(attempt["audio_bitrate"]),
+                apply_audio_filter=bool(attempt["apply_audio_filter"]),
+                tmp_out=tmp_out,
+            )
+            timeout_s = max(120, int(attempt["timeout"]))
+            logger.info(
+                f"🎛️ Shorts conversion attempt {attempt_index}/{len(attempts)} "
+                f"({attempt['label']}, {attempt['width']}x{attempt['height']}, preset={attempt['preset']}, timeout={timeout_s}s)"
+            )
+
+            returncode, stderr_text, stop_reason = _run_ffmpeg_command_with_progress(
+                cmd,
+                timeout_s=timeout_s,
+                idle_timeout_s=min(progress_idle_timeout_s, max(45, timeout_s - 15)),
+                progress_label=f"Shorts {attempt['label']}",
+            )
+            stderr_text = _stderr_tail(stderr_text)
+            if stop_reason:
+                last_error = stop_reason
+                if stderr_text:
+                    last_error = f"{last_error}: {stderr_text}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} timed out/stalled. {last_error[-1200:]}")
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+                continue
+
+            if returncode != 0:
+                last_error = stderr_text or f"ffmpeg exited with status {returncode}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} failed. {last_error[-1200:]}")
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+                continue
+
+            try:
+                self._validate_video_file(str(tmp_out))
+            except Exception as e:
+                last_error = f"output invalid: {e}"
+                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} produced invalid output. {last_error[-1200:]}")
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+                continue
+
+            try:
+                if os.path.exists(str(output_path)):
+                    os.remove(str(output_path))
+            except Exception:
+                pass
+            try:
+                os.replace(str(tmp_out), str(output_path))
+            except Exception:
+                import shutil
+                shutil.copy2(str(tmp_out), str(output_path))
+                try:
+                    os.remove(str(tmp_out))
+                except Exception:
+                    pass
+            logger.info(f"✅ Video converted to shorts format: {attempt['width']}x{attempt['height']}")
+            return
         
-        logger.info(f"✅ Video converted to shorts format: 1080x1920")
+        raise RuntimeError(f"Failed to convert to shorts after {len(attempts)} attempts: {last_error}")
     
     def _add_cta_text(self, input_path: str, output_path: str, text: str, duration: float, custom_font: Optional[str] = None):
         """إضافة نص الدعوة في نهاية الفيديو"""
@@ -2583,8 +3260,13 @@ class ModVideoProcessor:
         else:
             cmd += ["-an"]
         cmd.append(str(output_path))
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
-        if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        _outro_timeout = self._resolve_ffmpeg_timeout(
+            input_path, "FFMPEG_OUTRO_BLUR_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+        )
+        rc, _stderr = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_outro_timeout, idle_timeout_s=90, label="OutroBlur"
+        )
+        if rc != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
             import shutil
             shutil.copy2(input_path, output_path)
 
@@ -2936,9 +3618,15 @@ class ModVideoProcessor:
                 "-movflags", "+faststart",
                 str(output_path)
             ]
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                raise RuntimeError((result.stderr or b"").decode())
+            _cta_timeout = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_CTA_TIMEOUT_SECONDS", 300, 600, 8.0, 8.0, extra_seconds=90,
+            )
+            _cta_idle = min(120, max(45, _cta_timeout // 4))
+            rc, _stderr = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=_cta_timeout, idle_timeout_s=_cta_idle, label="CTAReliable"
+            )
+            if rc != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                raise RuntimeError(_stderr[-2500:] if _stderr else "CTA Reliable overlay failed")
         finally:
             try:
                 if text_file.exists():
@@ -3151,14 +3839,21 @@ class ModVideoProcessor:
             "-c:a", "copy",
             str(output_path)
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        
+        _cta2_timeout = self._resolve_ffmpeg_timeout(
+            input_path, "FFMPEG_CTA_TIMEOUT_SECONDS", 300, 600, 8.0, 8.0, extra_seconds=90,
+        )
+        _cta2_idle = min(120, max(45, _cta2_timeout // 4))
+        rc, _stderr = _run_ffmpeg_with_idle_timeout(
+            cmd, timeout_s=_cta2_timeout, idle_timeout_s=_cta2_idle, label="CTAImageOverlay"
+        )
         try:
             if overlay_path.exists():
                 overlay_path.unlink()
         except Exception:
             pass
-        if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            raise RuntimeError(result.stderr.decode() if result.stderr else "CTA image overlay failed")
+        if rc != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise RuntimeError(_stderr[-2500:] if _stderr else "CTA image overlay failed")
 
     def _flip_video(self, input_path: str, output_path: Path) -> None:
         """قلب الفيديو أفقياً (Mirror)"""
@@ -3182,9 +3877,14 @@ class ModVideoProcessor:
                 str(output_path)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode != 0 or not os.path.exists(output_path):
-                raise RuntimeError(f"FFmpeg hflip failed: {result.stderr.decode()[:500]}")
+            timeout_s = self._resolve_ffmpeg_timeout(
+                input_path, "FFMPEG_FLIP_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+            )
+            rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                cmd, timeout_s=timeout_s, idle_timeout_s=90, label="Flip"
+            )
+            if rc != 0 or not os.path.exists(output_path):
+                raise RuntimeError(f"FFmpeg hflip failed: {stderr_text[-500:]}")
                 
         except Exception as e:
             logger.error(f"Error flipping video: {e}")

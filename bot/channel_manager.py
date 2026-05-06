@@ -5,6 +5,7 @@
 import os
 import json
 import uuid
+import shutil
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from pathlib import Path
@@ -50,17 +51,25 @@ def _channel_token_candidates(channel: Optional["Channel"], cfg: Any = None) -> 
     if channel is None:
         return candidates
 
-    direct_token_path = str(getattr(channel, "token_path", "") or "").strip()
+    direct_token_path = str((getattr(channel, "extra_data", {}) or {}).get("token_path") or "").strip()
     if direct_token_path:
         candidates.append(direct_token_path)
 
+    creds = getattr(channel, "platform_credentials", None)
+    if isinstance(creds, dict):
+        creds_token_path = str(creds.get("token_path") or "").strip()
+        if creds_token_path:
+            candidates.append(creds_token_path)
+
+    extra_creds = (getattr(channel, "extra_data", {}) or {}).get("platform_credentials")
+    if isinstance(extra_creds, dict):
+        extra_token_path = str(extra_creds.get("token_path") or "").strip()
+        if extra_token_path:
+            candidates.append(extra_token_path)
+
     yt_channel_id = str(getattr(channel, "youtube_channel_id", "") or "").strip()
-    if yt_channel_id and cfg is not None:
-        try:
-            base_dir = os.path.dirname(getattr(cfg, "TELEGRAM_DB_PATH", "") or "") or ".data"
-            candidates.append(os.path.join(base_dir, "youtube_tokens", f"{yt_channel_id}.json"))
-        except Exception:
-            pass
+    if yt_channel_id:
+        candidates.extend(_youtube_token_candidates_by_channel_id(yt_channel_id, cfg))
 
     deduped: List[str] = []
     seen = set()
@@ -70,6 +79,98 @@ def _channel_token_candidates(channel: Optional["Channel"], cfg: Any = None) -> 
             seen.add(key)
             deduped.append(path_value)
     return deduped
+
+
+def _youtube_token_candidates_by_channel_id(youtube_channel_id: str, cfg: Any = None) -> List[str]:
+    channel_id = str(youtube_channel_id or "").strip()
+    if not channel_id:
+        return []
+
+    base_candidates: List[str] = []
+    try:
+        if cfg is None:
+            cfg = load_config()
+    except Exception:
+        cfg = None
+
+    try:
+        base_dir = os.path.dirname(getattr(cfg, "TELEGRAM_DB_PATH", "") or "") or ""
+    except Exception:
+        base_dir = ""
+
+    if base_dir:
+        base_candidates.append(base_dir)
+        nested = os.path.join(base_dir, ".data")
+        if os.path.normpath(nested) != os.path.normpath(base_dir):
+            base_candidates.append(nested)
+
+    project_data_dir = str((_project_root_dir() / ".data").resolve())
+    base_candidates.append(project_data_dir)
+    nested_project_data = str((_project_root_dir() / ".data" / ".data").resolve())
+    if os.path.normpath(nested_project_data) != os.path.normpath(project_data_dir):
+        base_candidates.append(nested_project_data)
+
+    candidates: List[str] = []
+    seen = set()
+    for base in base_candidates:
+        norm_base = _resolve_storage_path(base)
+        if not norm_base or norm_base in seen:
+            continue
+        seen.add(norm_base)
+        candidates.append(os.path.join(norm_base, "youtube_tokens", f"{channel_id}.json"))
+    return candidates
+
+
+def _canonical_youtube_token_path(youtube_channel_id: str, cfg: Any = None) -> str:
+    candidates = _youtube_token_candidates_by_channel_id(youtube_channel_id, cfg)
+    return candidates[0] if candidates else ""
+
+
+def resolve_youtube_token_path(youtube_channel_id: str, cfg: Any = None) -> str:
+    channel_id = str(youtube_channel_id or "").strip()
+    if not channel_id:
+        return ""
+
+    canonical = _canonical_youtube_token_path(channel_id, cfg)
+    canonical_abs = _resolve_storage_path(canonical)
+
+    for candidate in _youtube_token_candidates_by_channel_id(channel_id, cfg):
+        candidate_abs = _resolve_storage_path(candidate)
+        if not candidate_abs or not os.path.exists(candidate_abs):
+            continue
+        if canonical_abs and candidate_abs != canonical_abs:
+            try:
+                os.makedirs(os.path.dirname(canonical_abs), exist_ok=True)
+                if not os.path.exists(canonical_abs):
+                    shutil.copy2(candidate_abs, canonical_abs)
+                    logger.info(f"Restored canonical token file for channel: {channel_id}")
+                if os.path.exists(canonical_abs):
+                    return canonical_abs
+            except Exception as e:
+                logger.warning(f"Failed to mirror token file for {channel_id}: {e}")
+        return candidate_abs
+
+    return canonical_abs or ""
+
+
+def resolve_channel_token_path(channel: Optional["Channel"], cfg: Any = None) -> str:
+    if channel is None:
+        return ""
+
+    for candidate in _channel_token_candidates(channel, cfg):
+        candidate_abs = _resolve_storage_path(candidate)
+        if candidate_abs and os.path.exists(candidate_abs):
+            yt_channel_id = str(getattr(channel, "youtube_channel_id", "") or "").strip()
+            if yt_channel_id:
+                resolved = resolve_youtube_token_path(yt_channel_id, cfg)
+                if resolved and os.path.exists(resolved):
+                    return resolved
+            return candidate_abs
+
+    yt_channel_id = str(getattr(channel, "youtube_channel_id", "") or "").strip()
+    if yt_channel_id:
+        return resolve_youtube_token_path(yt_channel_id, cfg)
+    return ""
 
 
 class Channel:
@@ -192,13 +293,11 @@ class Channel:
         """الحصول على مسار ملف التوكن المتوقع لهذه القناة"""
         if self.platform != "youtube" or not self.youtube_channel_id:
             return None
-            
+
         try:
-            from ..agent.config import load_config
-            cfg = load_config()
-            token_dir = os.path.join(os.path.dirname(cfg.TELEGRAM_DB_PATH) or ".data", "youtube_tokens")
-            return os.path.join(token_dir, f"{self.youtube_channel_id}.json")
-        except:
+            resolved = resolve_channel_token_path(self)
+            return resolved or _canonical_youtube_token_path(self.youtube_channel_id)
+        except Exception:
             return None
     
     def to_dict(self) -> Dict[str, Any]:
@@ -447,9 +546,13 @@ class ChannelManager:
         - إمكان تحميل Credentials بهذه الصلاحيات وتجديدها عند الحاجة
         """
         try:
-            tokens_dir = Path(".data/youtube_tokens")
-            token_file = tokens_dir / f"{youtube_channel_id}.json"
-            if not token_file.exists() or token_file.stat().st_size <= 0:
+            try:
+                cfg = load_config()
+            except Exception:
+                cfg = None
+            token_path = resolve_youtube_token_path(youtube_channel_id, cfg)
+            token_file = Path(token_path) if token_path else None
+            if not token_file or not token_file.exists() or token_file.stat().st_size <= 0:
                 return False, "🔒 لا يوجد توكن مصادقة (Re-auth مطلوب)"
             try:
                 from ..agent.uploader import _creds_from_token_file, AuthenticationRequiredError
@@ -704,18 +807,9 @@ class ChannelManager:
             if ch.get("channel_id") == channel.youtube_channel_id:
                 found = ch
                 break
-        token_guess = None
-        try:
-            import os
-            tp = os.path.join(".data", "youtube_tokens", f"{channel.youtube_channel_id}.json")
-            if os.path.exists(tp):
-                token_guess = tp
-            else:
-                dp = os.path.join(os.path.dirname(cfg.TELEGRAM_DB_PATH) or ".data", "youtube_token.json")
-                if os.path.exists(dp):
-                    token_guess = dp
-        except Exception:
-            token_guess = None
+        token_guess = resolve_channel_token_path(channel, cfg)
+        if token_guess:
+            token_guess = _resolve_storage_path(token_guess)
 
         # إعدادات إضافية لكل قناة نشر (تُخزَّن في حالة البوت)
         extra = getattr(channel, "extra_data", {}) or {}
