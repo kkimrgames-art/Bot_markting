@@ -13,7 +13,7 @@ import json
 from typing import Optional
 import uuid
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -90,6 +90,50 @@ async def _safe_answer(query, **kwargs):
             await query.answer(**kwargs)
     except (BadRequest, Exception):
         pass
+
+
+async def _safe_edit_message_text(query, text: str, *, reply_markup=None, parse_mode: str = "HTML", **kwargs):
+    if not query:
+        return
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+    except BadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return
+        raise
+
+
+def _am_parse_datetime_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _am_format_remaining(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        return "الآن"
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days > 0:
+        if hours > 0:
+            return f"{days}ي {hours}س"
+        return f"{days}ي"
+    if hours > 0:
+        if minutes > 0:
+            return f"{hours}س {minutes}د"
+        return f"{hours}س"
+    return f"{minutes}د"
 
 
 def _get_db() -> AutoModDB:
@@ -3007,7 +3051,7 @@ async def add_source_overlay_start(update: Update, context: ContextTypes.DEFAULT
         [InlineKeyboardButton("⬜ تخطي / تعطيل", callback_data="am_src_ov:off")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
 
@@ -3128,7 +3172,7 @@ async def add_source_description_start(update: Update, context: ContextTypes.DEF
         [InlineKeyboardButton("⬜ تخطي / تعطيل", callback_data="am_src_desc:off")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
 
@@ -3190,7 +3234,7 @@ async def add_source_raw_review_start(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("⬜ تعطيل والمتابعة المباشرة", callback_data="am_src_raw_review:off")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
 
@@ -3281,13 +3325,20 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"container:{cid}"
     elif platform == "google_drive":
-        folder_id = raw
-        folder_id = folder_id.strip()
+        folder_id = raw.strip()
         if folder_id.startswith("http"):
-            await update.message.reply_text("❌ أرسل Folder ID فقط (ليس رابط).")
-            return AM_ADD_SOURCE_URL
+            m = re.search(r"/folders/([a-zA-Z0-9_-]+)", folder_id)
+            if m:
+                folder_id = m.group(1).strip()
+            else:
+                await update.message.reply_text("❌ لم أستطع استخراج Folder ID من الرابط. أرسل Folder ID أو رابط مجلد صحيح.")
+                return AM_ADD_SOURCE_URL
+        folder_id = re.sub(r"[^a-zA-Z0-9_-]", "", folder_id)
         if not folder_id or len(folder_id) < 10:
             await update.message.reply_text("❌ Folder ID غير صالح. تحقق منه وأعد الإرسال.")
+            return AM_ADD_SOURCE_URL
+        if len(folder_id) < 20:
+            await update.message.reply_text("⚠️ Folder ID يبدو قصيراً/ناقصاً. تأكد أنك نسخته كاملاً من رابط المجلد (بعد /folders/).")
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"gdrive:folder:{folder_id}"
         context.user_data["am_new_source"]["platform"] = "google_drive"
@@ -3689,16 +3740,35 @@ async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for src in sources[:15]:
             src_id = src.get("id", "")
             src_name = src.get("source_name", "مصدر")[:25]
-            # التحقق إذا كان لهذا المصدر جدول بالفعل (تبسيطي: فحص القناة والنوع)
-            has_sch = any(
-                s.get("channel_id") == src.get("channel_id") and
-                s.get("content_type") == src.get("content_type")
-                for s in schedules
+
+            sch = next(
+                (
+                    s
+                    for s in schedules
+                    if s.get("channel_id") == src.get("channel_id")
+                    and s.get("content_type") == src.get("content_type")
+                ),
+                None,
             )
+            has_sch = bool(sch)
             status_icon = "📅" if has_sch else "➕"
+
+            remaining_label = ""
+            if sch:
+                if not sch.get("enabled", True):
+                    remaining_label = "متوقف"
+                else:
+                    now = datetime.now(timezone.utc)
+                    next_dt = _am_parse_datetime_utc(sch.get("next_publish_at"))
+                    if next_dt:
+                        remaining_label = _am_format_remaining(next_dt - now)
+                    else:
+                        remaining_label = "الآن"
+
+            label = f"{status_icon} {src_name}" if not remaining_label else f"{status_icon} {src_name} ⏳ {remaining_label}"
             keyboard.append([
                 InlineKeyboardButton(
-                    f"{status_icon} {src_name}",
+                    label,
                     callback_data=f"am_sch_src:{src_id}"
                 )
             ])

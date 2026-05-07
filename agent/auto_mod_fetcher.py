@@ -4522,7 +4522,68 @@ class AutoModFetcher:
 
         if platform_norm == "google_drive" or url_norm.lower().startswith("gdrive:"):
             try:
-                return await self._fetch_from_gdrive(url_norm, items_range)
+                # Lightweight monitoring + backoff when Drive folder has no new items.
+                folder_id = self._parse_gdrive_folder_id(url_norm)
+                if folder_id and self._gdrive_should_delay_full_fetch(source_url):
+                    entry = self._gdrive_poll_state(source_url) or {}
+                    prev_latest = str(entry.get("last_latest_id") or "").strip()
+                    loop = asyncio.get_running_loop()
+                    latest_id = await loop.run_in_executor(None, self._gdrive_light_latest_id_sync, folder_id)
+
+                    # If lightweight check returns empty, validate folder access and proceed with full fetch.
+                    # This avoids being stuck in silent backoff when the query is failing due to permissions
+                    # or filter mismatch.
+                    if not latest_id:
+                        await loop.run_in_executor(None, self._gdrive_validate_folder_sync, folder_id)
+                        self._gdrive_reset_backoff(source_url, prev_latest or None)
+                    else:
+                        if (not latest_id) or (prev_latest and latest_id == prev_latest):
+                            self._gdrive_mark_empty(source_url, latest_id or prev_latest or None)
+                            logger.info(
+                                "📭 [GDrive] No new files (light-check). Skipping full fetch for now: %s",
+                                str(source_url)[:120],
+                            )
+                            return []
+
+                        # New/latest file changed -> reset backoff and proceed to full fetch.
+                        self._gdrive_reset_backoff(source_url, latest_id)
+
+                videos = await self._fetch_from_gdrive(url_norm, items_range)
+
+                # If first range returns empty, enable backoff to reduce quota usage.
+                try:
+                    start, _ = self._parse_items_range(items_range)
+                except Exception:
+                    start = 1
+                if start == 1:
+                    if not videos:
+                        # Validate folder id/access when empty to avoid silent failures.
+                        if folder_id:
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(None, self._gdrive_validate_folder_sync, folder_id)
+                        if folder_id:
+                            loop = asyncio.get_running_loop()
+                            latest_id = await loop.run_in_executor(None, self._gdrive_light_latest_id_sync, folder_id)
+                        else:
+                            latest_id = ""
+                        self._gdrive_mark_empty(source_url, latest_id or None)
+                    else:
+                        first_id = str((videos[0] or {}).get("id") or "").strip()
+                        self._gdrive_reset_backoff(source_url, first_id or None)
+                else:
+                    # Keep last_latest_id updated even when we're fetching deeper ranges.
+                    try:
+                        entry = self._gdrive_poll_state(source_url) or {}
+                        if folder_id and not str(entry.get("last_latest_id") or "").strip():
+                            loop = asyncio.get_running_loop()
+                            latest_id = await loop.run_in_executor(None, self._gdrive_light_latest_id_sync, folder_id)
+                            if latest_id:
+                                entry["last_latest_id"] = str(latest_id)
+                                self._set_gdrive_poll_state(source_url, entry)
+                    except Exception:
+                        pass
+
+                return videos
             except Exception as e:
                 logger.error(f"Failed to fetch from google drive source {source_url}: {e}")
                 try:
@@ -4624,7 +4685,34 @@ class AutoModFetcher:
         creds = GoogleCredentials.from_authorized_user_info(token_json)
         return google_build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    async def _fetch_from_gdrive(self, source_url: str, items_range: str) -> List[Dict]:
+    def _gdrive_validate_folder_sync(self, folder_id: str) -> None:
+        service = self._gdrive_service()
+        try:
+            meta = (
+                service.files()
+                .get(
+                    fileId=folder_id,
+                    fields="id,name,mimeType,driveId,trashed",
+                    supportsAllDrives=True,
+                )
+                .execute()
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "📁 Folder ID غير صحيح أو لا يمكن الوصول إليه. "
+                "تأكد من أن المجلد موجود وأنه مشارك مع الحساب المرتبط بالبوت. "
+                f"({str(e)[:120]})"
+            )
+
+        mime = str((meta or {}).get("mimeType") or "").strip().lower()
+        trashed = bool((meta or {}).get("trashed"))
+        if trashed:
+            raise RuntimeError("🗑️ هذا المجلد موجود لكنه في سلة المهملات (trashed).")
+        if mime != "application/vnd.google-apps.folder":
+            name = str((meta or {}).get("name") or "").strip()
+            raise RuntimeError(f"📄 المعرف الذي أرسلته ليس مجلد (Folder). الاسم: {name!r}, النوع: {mime!r}")
+
+    def _parse_gdrive_folder_id(self, source_url: str) -> str:
         raw = (source_url or "").strip()
         folder_id = ""
         if raw.lower().startswith("gdrive:folder:"):
@@ -4633,6 +4721,93 @@ class AutoModFetcher:
             folder_id = raw.split(":", 1)[1].strip()
         else:
             folder_id = raw
+        return folder_id
+
+    def _gdrive_poll_state(self, source_url: str) -> Dict[str, Any]:
+        try:
+            from src.agent.supabase_storage import load_bot_state
+            state = load_bot_state() or {}
+            gdrive_poll = state.get("gdrive_poll") or {}
+            entry = gdrive_poll.get(source_url) or {}
+            if not isinstance(entry, dict):
+                return {}
+            return entry
+        except Exception:
+            return {}
+
+    def _set_gdrive_poll_state(self, source_url: str, entry: Dict[str, Any]) -> None:
+        try:
+            from src.agent.supabase_storage import load_bot_state, save_bot_state
+            state = load_bot_state() or {}
+            gdrive_poll = state.get("gdrive_poll") or {}
+            if not isinstance(gdrive_poll, dict):
+                gdrive_poll = {}
+            gdrive_poll[source_url] = entry or {}
+            state["gdrive_poll"] = gdrive_poll
+            save_bot_state(state)
+        except Exception:
+            return
+
+    def _gdrive_backoff_seconds(self, empty_checks: int) -> int:
+        # 2m, 5m, 15m, 30m, 1h, 2h, 6h (max)
+        steps = [120, 300, 900, 1800, 3600, 7200, 21600]
+        idx = max(0, min(int(empty_checks or 0), len(steps) - 1))
+        return int(steps[idx])
+
+    def _gdrive_mark_empty(self, source_url: str, latest_id: Optional[str] = None) -> None:
+        now = time.time()
+        entry = self._gdrive_poll_state(source_url) or {}
+        empty_checks = int(entry.get("empty_checks") or 0) + 1
+        wait_s = self._gdrive_backoff_seconds(empty_checks - 1)
+        next_check_at = float(entry.get("next_check_at") or 0.0)
+        # إذا كان هناك next_check_at مستقبلي بالفعل لا نقصّره
+        next_check_at = max(next_check_at, now + float(wait_s))
+        if latest_id:
+            entry["last_latest_id"] = str(latest_id)
+        entry["empty_checks"] = empty_checks
+        entry["next_check_at"] = next_check_at
+        entry["last_empty_at"] = now
+        self._set_gdrive_poll_state(source_url, entry)
+
+    def _gdrive_reset_backoff(self, source_url: str, latest_id: Optional[str] = None) -> None:
+        entry = self._gdrive_poll_state(source_url) or {}
+        entry["empty_checks"] = 0
+        entry["next_check_at"] = 0.0
+        if latest_id:
+            entry["last_latest_id"] = str(latest_id)
+        self._set_gdrive_poll_state(source_url, entry)
+
+    def _gdrive_should_delay_full_fetch(self, source_url: str) -> bool:
+        entry = self._gdrive_poll_state(source_url) or {}
+        try:
+            next_check_at = float(entry.get("next_check_at") or 0.0)
+        except Exception:
+            next_check_at = 0.0
+        return bool(next_check_at and time.time() < next_check_at)
+
+    def _gdrive_light_latest_id_sync(self, folder_id: str) -> str:
+        service = self._gdrive_service()
+        q = f"'{folder_id}' in parents and trashed=false and (mimeType contains 'video/' or mimeType='application/octet-stream')"
+        resp = (
+            service.files()
+            .list(
+                q=q,
+                fields="files(id,createdTime,modifiedTime)",
+                orderBy="createdTime desc",
+                pageSize=1,
+                corpora="allDrives",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            )
+            .execute()
+        )
+        files = resp.get("files") or []
+        if not files:
+            return ""
+        return str((files[0] or {}).get("id") or "").strip()
+
+    async def _fetch_from_gdrive(self, source_url: str, items_range: str) -> List[Dict]:
+        folder_id = self._parse_gdrive_folder_id(source_url)
 
         if not folder_id:
             return []
@@ -4655,6 +4830,7 @@ class AutoModFetcher:
                         orderBy="createdTime desc",
                         pageSize=200,
                         pageToken=page_token,
+                        corpora="allDrives",
                         supportsAllDrives=True,
                         includeItemsFromAllDrives=True,
                     )
@@ -6649,6 +6825,19 @@ class AutoModFetcher:
             if not self._is_publish_time(schedule):
                 continue
             if self._reached_daily_limit(schedule):
+                continue
+
+            # 2.5) Skip scheduling if no sources exist (e.g., user deleted sources).
+            try:
+                sources_list = self.db.get_sources(channel_id, content_type)
+            except Exception:
+                sources_list = []
+            if not sources_list:
+                logger.info(
+                    "⏭️ [AutoMod] Schedule skipped because no sources exist (channel=%s, content_type=%s)",
+                    channel_id[:10],
+                    content_type,
+                )
                 continue
                 
             # 3. Add to queue
