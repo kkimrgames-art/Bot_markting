@@ -4530,16 +4530,23 @@ class AutoModFetcher:
                     loop = asyncio.get_running_loop()
                     latest_id = await loop.run_in_executor(None, self._gdrive_light_latest_id_sync, folder_id)
 
-                    if (not latest_id) or (prev_latest and latest_id == prev_latest):
-                        self._gdrive_mark_empty(source_url, latest_id or prev_latest or None)
-                        logger.info(
-                            "📭 [GDrive] No new files (light-check). Skipping full fetch for now: %s",
-                            str(source_url)[:120],
-                        )
-                        return []
+                    # If lightweight check returns empty, validate folder access and proceed with full fetch.
+                    # This avoids being stuck in silent backoff when the query is failing due to permissions
+                    # or filter mismatch.
+                    if not latest_id:
+                        await loop.run_in_executor(None, self._gdrive_validate_folder_sync, folder_id)
+                        self._gdrive_reset_backoff(source_url, prev_latest or None)
+                    else:
+                        if (not latest_id) or (prev_latest and latest_id == prev_latest):
+                            self._gdrive_mark_empty(source_url, latest_id or prev_latest or None)
+                            logger.info(
+                                "📭 [GDrive] No new files (light-check). Skipping full fetch for now: %s",
+                                str(source_url)[:120],
+                            )
+                            return []
 
-                    # New/latest file changed -> reset backoff and proceed to full fetch.
-                    self._gdrive_reset_backoff(source_url, latest_id)
+                        # New/latest file changed -> reset backoff and proceed to full fetch.
+                        self._gdrive_reset_backoff(source_url, latest_id)
 
                 videos = await self._fetch_from_gdrive(url_norm, items_range)
 
@@ -6818,6 +6825,19 @@ class AutoModFetcher:
             if not self._is_publish_time(schedule):
                 continue
             if self._reached_daily_limit(schedule):
+                continue
+
+            # 2.5) Skip scheduling if no sources exist (e.g., user deleted sources).
+            try:
+                sources_list = self.db.get_sources(channel_id, content_type)
+            except Exception:
+                sources_list = []
+            if not sources_list:
+                logger.info(
+                    "⏭️ [AutoMod] Schedule skipped because no sources exist (channel=%s, content_type=%s)",
+                    channel_id[:10],
+                    content_type,
+                )
                 continue
                 
             # 3. Add to queue

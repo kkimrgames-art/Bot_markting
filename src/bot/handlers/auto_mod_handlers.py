@@ -13,7 +13,7 @@ import json
 from typing import Optional
 import uuid
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -101,6 +101,39 @@ async def _safe_edit_message_text(query, text: str, *, reply_markup=None, parse_
         if "message is not modified" in str(e).lower():
             return
         raise
+
+
+def _am_parse_datetime_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _am_format_remaining(delta: timedelta) -> str:
+    total_seconds = int(delta.total_seconds())
+    if total_seconds <= 0:
+        return "الآن"
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days > 0:
+        if hours > 0:
+            return f"{days}ي {hours}س"
+        return f"{days}ي"
+    if hours > 0:
+        if minutes > 0:
+            return f"{hours}س {minutes}د"
+        return f"{hours}س"
+    return f"{minutes}د"
 
 
 def _get_db() -> AutoModDB:
@@ -3707,16 +3740,35 @@ async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for src in sources[:15]:
             src_id = src.get("id", "")
             src_name = src.get("source_name", "مصدر")[:25]
-            # التحقق إذا كان لهذا المصدر جدول بالفعل (تبسيطي: فحص القناة والنوع)
-            has_sch = any(
-                s.get("channel_id") == src.get("channel_id") and
-                s.get("content_type") == src.get("content_type")
-                for s in schedules
+
+            sch = next(
+                (
+                    s
+                    for s in schedules
+                    if s.get("channel_id") == src.get("channel_id")
+                    and s.get("content_type") == src.get("content_type")
+                ),
+                None,
             )
+            has_sch = bool(sch)
             status_icon = "📅" if has_sch else "➕"
+
+            remaining_label = ""
+            if sch:
+                if not sch.get("enabled", True):
+                    remaining_label = "متوقف"
+                else:
+                    now = datetime.now(timezone.utc)
+                    next_dt = _am_parse_datetime_utc(sch.get("next_publish_at"))
+                    if next_dt:
+                        remaining_label = _am_format_remaining(next_dt - now)
+                    else:
+                        remaining_label = "الآن"
+
+            label = f"{status_icon} {src_name}" if not remaining_label else f"{status_icon} {src_name} ⏳ {remaining_label}"
             keyboard.append([
                 InlineKeyboardButton(
-                    f"{status_icon} {src_name}",
+                    label,
                     callback_data=f"am_sch_src:{src_id}"
                 )
             ])
