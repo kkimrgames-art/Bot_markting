@@ -75,7 +75,9 @@ class JobWorker:
             text = str(message or "").strip()
             bot_app = alert_system.get_bot_app()
             if bot_app is not None:
-                await bot_app.bot.send_message(chat_id=admin_chat_id, text=text, parse_mode="Markdown")
+                # Messages are dynamic (titles/urls/ids) and can easily break Markdown parsing.
+                # Send as plain text to avoid Telegram entity parsing errors.
+                await bot_app.bot.send_message(chat_id=admin_chat_id, text=text)
                 return
 
             token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -87,7 +89,6 @@ class JobWorker:
             payload = {
                 "chat_id": admin_chat_id,
                 "text": text,
-                "parse_mode": "Markdown",
             }
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:

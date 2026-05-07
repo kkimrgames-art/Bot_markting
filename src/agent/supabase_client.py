@@ -490,6 +490,12 @@ def supabase_upsert(table: str, data: Dict, key_field: str = "id", fallback_loca
                 break
             except Exception as e:
                 msg = str(e).lower()
+                # إذا كان الجدول غير موجود (مثل PGRST205)، لا نقوم بإضافته للطابور كي لا يحدث سبام مزامنة دائم.
+                if ("pgrst205" in msg) or ("could not find the table" in msg) or ("in the schema cache" in msg):
+                    logger.error(f"❌ Supabase table missing (upsert/{table}). Skipping queue for this table. [{e}]")
+                    if fallback_local:
+                        fallback_local(data)
+                    return False
                 if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
                     logger.warning(f"⚠️ اتصال Supabase غير مستقر (upsert/ {table})، إعادة محاولة... [{e}]")
                     reset_connection()

@@ -4490,6 +4490,20 @@ class AutoModFetcher:
 
         if any(token in lowered for token in ["invalid_grant", "refresh token", "revoked", "expired", "token has been expired"]):
             return "auth", 86400, "🔑 انتهت/أُلغيت صلاحيات Google Drive. قم بربط Google Drive من الإعدادات ثم أعد المحاولة."
+        if any(token in lowered for token in [
+            "accessnotconfigured",
+            "drive api has not been used",
+            "drive.googleapis.com/overview",
+            "api has not been used in project",
+            "it is disabled",
+            "enable it by visiting",
+        ]):
+            return (
+                "api_disabled",
+                21600,
+                "🛠️ Google Drive API غير مفعّل في مشروع Google المرتبط ببيانات OAuth. "
+                "فعّل Drive API من Google Cloud Console لنفس project_id ثم انتظر دقائق لإتمام التفعيل وأعد المحاولة."
+            )
         if any(token in lowered for token in ["insufficient permissions", "insufficientpermission", "permission", "403", "forbidden"]):
             return "permission", 21600, "🚫 لا توجد صلاحيات كافية للوصول إلى المجلد في Google Drive. تأكد من المشاركة/الصلاحيات أو أعد الربط."
         if any(token in lowered for token in ["404", "not found", "file not found", "folder"]):
@@ -6832,9 +6846,10 @@ class AutoModFetcher:
                 sources_list = self.db.get_sources(channel_id, content_type)
             except Exception:
                 sources_list = []
-            if not sources_list:
+            enabled_sources = [s for s in (sources_list or []) if bool((s or {}).get("enabled", True))]
+            if not enabled_sources:
                 logger.info(
-                    "⏭️ [AutoMod] Schedule skipped because no sources exist (channel=%s, content_type=%s)",
+                    "⏭️ [AutoMod] Schedule skipped because no enabled sources exist (channel=%s, content_type=%s)",
                     channel_id[:10],
                     content_type,
                 )
@@ -7073,6 +7088,9 @@ class AutoModFetcher:
                         source for source in sources_list
                         if str(source.get("id") or f"{channel_id}:{source.get('source_url', '')}") == str(target_source_id)
                     ]
+
+                if not preview_mode:
+                    sources_list = [s for s in (sources_list or []) if bool((s or {}).get("enabled", True))]
                 if not sources_list:
                     logger.info(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
                     if meta_notifications_enabled:
