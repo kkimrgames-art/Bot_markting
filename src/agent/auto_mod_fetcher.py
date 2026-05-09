@@ -4728,14 +4728,43 @@ class AutoModFetcher:
 
     def _parse_gdrive_folder_id(self, source_url: str) -> str:
         raw = (source_url or "").strip()
-        folder_id = ""
-        if raw.lower().startswith("gdrive:folder:"):
-            folder_id = raw.split(":", 2)[2].strip()
-        elif raw.lower().startswith("gdrive:"):
-            folder_id = raw.split(":", 1)[1].strip()
-        else:
-            folder_id = raw
-        return folder_id
+        if not raw:
+            return ""
+
+        # Support explicit prefixes used by the UI: gdrive:folder:<id> or gdrive:<id>
+        low = raw.lower()
+        if low.startswith("gdrive:folder:"):
+            return raw.split(":", 2)[2].strip()
+        if low.startswith("gdrive:"):
+            return raw.split(":", 1)[1].strip()
+
+        # If the user pasted a full Google Drive URL, try to extract the ID from
+        # common patterns like /folders/<id>, /file/d/<id>/..., or ?id=<id>
+        try:
+            parsed = urlparse(raw)
+            path = parsed.path or ""
+            query = parse_qs(parsed.query)
+
+            m = re.search(r"/folders/([a-zA-Z0-9_-]+)", path)
+            if m:
+                return m.group(1)
+
+            m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", path)
+            if m:
+                return m.group(1)
+
+            if "id" in query and query.get("id"):
+                return query.get("id")[0]
+
+            # Fallback: extract a bare-looking id chunk from the input
+            m = re.search(r"([a-zA-Z0-9_-]{10,})", raw)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+
+        # As last resort return the raw value (existing behavior)
+        return raw
 
     def _gdrive_poll_state(self, source_url: str) -> Dict[str, Any]:
         try:
