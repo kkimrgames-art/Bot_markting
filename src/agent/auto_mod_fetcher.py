@@ -1320,8 +1320,10 @@ def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, sourc
     if explicit_video_type in ("shorts", "long"):
         return explicit_video_type
 
+    normalized_source_settings = normalize_source_settings(source_settings)
+
     # Check if source has shorts_only setting enabled
-    if source_settings and _to_bool(source_settings.get("shorts_only"), False):
+    if normalized_source_settings and _to_bool(normalized_source_settings.get("shorts_only"), False):
         return "shorts"
 
     platform = str(src_platform or "").strip().lower()
@@ -1329,6 +1331,13 @@ def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, sourc
         return "shorts"
     if "long" in platform:
         return "long"
+
+    # Google Drive sources do not expose `/shorts` style URLs and are added
+    # without a duration-mode picker, so default them to shorts unless the
+    # source explicitly opted out via `shorts_only=false`.
+    if platform == "google_drive" or str(source_url or "").strip().lower().startswith("gdrive:"):
+        if not (normalized_source_settings and "shorts_only" in normalized_source_settings):
+            return "shorts"
 
     for candidate_url in (
         (video or {}).get("url"),
