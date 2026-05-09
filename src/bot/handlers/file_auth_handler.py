@@ -2,6 +2,7 @@
 معالج إضافة القنوات عبر ملف المصادقة
 """
 import os
+import json
 import logging
 import asyncio
 import html

@@ -5363,7 +5363,7 @@ class AutoModFetcher:
 
     def _preflight_youtube_upload_auth(self, channel_id: str) -> None:
         from src.agent.error_tracker import get_error_tracker
-        from src.agent.uploader import _creds_from_token_file
+        from src.agent.uploader import _creds_from_token_file, _recover_token_from_db
         from src.bot.channel_manager import ChannelManager
 
         et = get_error_tracker()
@@ -5376,9 +5376,20 @@ class AutoModFetcher:
 
         token_path = channel.token_path
         if not token_path or not os.path.exists(token_path):
-            logger.error(f"Token not found for channel {channel_id} during upload preflight")
-            et.record_error("upload", "token_missing", channel_id)
-            raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
+            # محاولة استعادة التوكن من قاعدة البيانات (Render يفقد الملفات عند إعادة التشغيل)
+            yt_id = channel.youtube_channel_id or ""
+            if token_path and yt_id:
+                recovered = _recover_token_from_db(token_path, yt_id)
+                if recovered and os.path.exists(token_path):
+                    logger.info(f"🔄 Token recovered from DB for channel {channel_id[:20]} during preflight")
+                else:
+                    logger.error(f"Token not found for channel {channel_id} during upload preflight (DB recovery failed)")
+                    et.record_error("upload", "token_missing", channel_id)
+                    raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
+            else:
+                logger.error(f"Token not found for channel {channel_id} during upload preflight")
+                et.record_error("upload", "token_missing", channel_id)
+                raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
 
         try:
             _creds_from_token_file(token_path)
@@ -5446,27 +5457,111 @@ class AutoModFetcher:
         except Exception:
             pass
 
+        # الحد الأقصى لحجم الملف (ميغابايت) - مهم جداً لخطة Render المجانية
+        max_file_size_mb = int(os.environ.get("GDRIVE_MAX_FILE_SIZE_MB", "400") or 400)
+
         try:
             service = self._gdrive_service()
-            meta = service.files().get(fileId=file_id, fields="name,mimeType", supportsAllDrives=True).execute()
+            meta = service.files().get(
+                fileId=file_id,
+                fields="name,mimeType,size",
+                supportsAllDrives=True
+            ).execute()
             name = str((meta or {}).get("name") or "").strip() or file_id
+
+            # فحص حجم الملف قبل التحميل لمنع استنفاد القرص/الذاكرة
+            file_size_bytes = int((meta or {}).get("size") or 0)
+            file_size_mb = file_size_bytes / (1024 * 1024) if file_size_bytes > 0 else 0
+            if file_size_mb > max_file_size_mb:
+                logger.warning(
+                    f"⏭️ [GDrive] Skipping file {file_id} ({name}): "
+                    f"size {file_size_mb:.1f}MB exceeds limit {max_file_size_mb}MB"
+                )
+                self._last_download_error = (
+                    f"gdrive_file_too_large: الملف كبير جداً "
+                    f"({file_size_mb:.0f}MB > الحد {max_file_size_mb}MB)"
+                )
+                return None
+
+            # فحص المساحة المتاحة على القرص
+            try:
+                import shutil
+                disk_usage = shutil.disk_usage(output_dir)
+                free_mb = disk_usage.free / (1024 * 1024)
+                # نحتاج ضعف حجم الملف تقريباً (الأصلي + المعالج)
+                needed_mb = file_size_mb * 2.5 if file_size_mb > 0 else 200
+                if free_mb < needed_mb:
+                    logger.warning(
+                        f"⚠️ [GDrive] Low disk space: {free_mb:.0f}MB free, "
+                        f"need ~{needed_mb:.0f}MB for file {name}"
+                    )
+                    # محاولة تنظيف الملفات المؤقتة القديمة
+                    try:
+                        from src.agent.disk_guard import cleanup_old_files
+                        cleanup_old_files(max_age_hours=0.5)
+                    except Exception:
+                        pass
+                    # إعادة فحص المساحة
+                    disk_usage = shutil.disk_usage(output_dir)
+                    free_mb = disk_usage.free / (1024 * 1024)
+                    if free_mb < file_size_mb * 1.2:
+                        logger.error(
+                            f"❌ [GDrive] Not enough disk space even after cleanup: "
+                            f"{free_mb:.0f}MB free < {file_size_mb * 1.2:.0f}MB needed"
+                        )
+                        self._last_download_error = (
+                            f"disk_space_low: لا توجد مساحة كافية على القرص "
+                            f"({free_mb:.0f}MB متاح)"
+                        )
+                        return None
+            except ImportError:
+                pass
+            except Exception as disk_err:
+                logger.debug(f"Disk space check failed (non-fatal): {disk_err}")
+
         except Exception:
             name = file_id
+            file_size_mb = 0
 
         ext = os.path.splitext(name)[1] or ".mp4"
         dest = os.path.join(output_dir, f"{file_id}{ext}")
 
         try:
-            request = self._gdrive_service().files().get_media(fileId=file_id, supportsAllDrives=True)
+            request = self._gdrive_service().files().get_media(
+                fileId=file_id, supportsAllDrives=True
+            )
+            # حجم القطعة 2MB بدلاً من 8MB لتقليل استهلاك الذاكرة على Render
+            chunk_size = int(os.environ.get("GDRIVE_CHUNK_SIZE_MB", "2") or 2) * 1024 * 1024
+            chunk_size = max(256 * 1024, min(chunk_size, 16 * 1024 * 1024))
+
             with open(dest, "wb") as fh:
-                downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
+                downloader = MediaIoBaseDownload(fh, request, chunksize=chunk_size)
                 done = False
+                chunk_num = 0
                 while not done:
-                    _, done = downloader.next_chunk()
+                    status, done = downloader.next_chunk()
+                    chunk_num += 1
+                    if status and chunk_num % 5 == 0:
+                        pct = int(status.progress() * 100)
+                        logger.info(
+                            f"📥 [GDrive] Downloading {name}: {pct}% "
+                            f"(chunk {chunk_num})"
+                        )
+
             if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                final_size_mb = os.path.getsize(dest) / (1024 * 1024)
+                logger.info(
+                    f"✅ [GDrive] Downloaded {name}: {final_size_mb:.1f}MB"
+                )
                 return dest
             return None
         except Exception as e:
+            # تنظيف الملف الجزئي عند الفشل
+            try:
+                if os.path.exists(dest):
+                    os.remove(dest)
+            except Exception:
+                pass
             self._remember_download_error(e)
             logger.error(f"Failed to download gdrive file {file_id}: {e}")
             return None

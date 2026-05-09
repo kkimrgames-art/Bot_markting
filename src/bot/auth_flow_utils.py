@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/blogger"]
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+# جميع الصلاحيات التي قد يمنحها البوت — يستخدم عند إنشاء Flow لتجنب خطأ Scope has changed
+ALL_SCOPES = SCOPES + DRIVE_SCOPES
 
 class OAuthCallbackServer:
     """خادم محلي بسيط لاستقبال رد كود المصادقة"""
@@ -301,15 +303,27 @@ def create_flow_from_file_scopes(
 
 
 def create_flow_from_file(client_secrets_file: str) -> Tuple[Flow, str, OAuthCallbackServer]:
-    return create_flow_from_file_scopes(client_secrets_file, SCOPES)
+    # نستخدم ALL_SCOPES لتجنب خطأ "Scope has changed" عند إعادة المصادقة
+    # إذا كان المستخدم قد منح drive.readonly سابقاً
+    return create_flow_from_file_scopes(client_secrets_file, ALL_SCOPES)
 
 def exchange_code_and_get_creds(flow: Flow, authorization_response: str) -> Credentials:
     """تبادل الكود (عبر الرابط الكامل لضمان تطابق state) والحصول على Credentials"""
     # Fix for http vs https mismatch if ngrok is used
     if "http://" in authorization_response and "https://" in flow.redirect_uri:
         authorization_response = authorization_response.replace("http://", "https://", 1)
-        
-    flow.fetch_token(authorization_response=authorization_response)
+
+    # السماح بتغيير الصلاحيات عند تبادل التوكن
+    # يحدث عند استخدام include_granted_scopes='true' وإضافة صلاحيات جديدة مثل drive.readonly
+    os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
+    try:
+        flow.fetch_token(authorization_response=authorization_response)
+    except Warning as w:
+        # oauthlib قد يرسل Warning بدلاً من Exception عند RELAX_TOKEN_SCOPE
+        logger.info(f"Token scope warning (ignored): {w}")
+    finally:
+        # تنظيف المتغير البيئي بعد الاستخدام
+        os.environ.pop('OAUTHLIB_RELAX_TOKEN_SCOPE', None)
     return flow.credentials
 
 def get_channel_info_from_creds(creds: Credentials) -> dict:
