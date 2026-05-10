@@ -1570,9 +1570,20 @@ def _build_upload_metadata(
         if not final_title:
             final_title = "#shorts" if (is_shorts and not strict_local_script) else "#video"
 
-        final_description = _join_hashtags(description_tags, 4900)
-        if not final_description:
-            final_description = final_title
+        description_plain = _strip_hashtags(merged_description)
+        if len(description_plain) < 20:
+            description_plain = _strip_hashtags(ai_meta.get("description", ""))
+        if len(description_plain) < 20:
+            description_plain = _strip_hashtags(source_description)
+
+        hashtags_block = _join_hashtags(description_tags, 700)
+        if description_plain and hashtags_block:
+            final_description = f"{description_plain}\n\n{hashtags_block}".strip()
+        elif description_plain:
+            final_description = description_plain
+        else:
+            final_description = hashtags_block or final_title
+        final_description = final_description[:4900].rstrip()
     else:
         # عنوان قابل للقراءة + هاشتاغات
         final_title = _strip_hashtags(ai_meta.get("title", ""))
@@ -1630,6 +1641,46 @@ def _build_upload_metadata(
     if not upload_tags:
         upload_tags = _keywords_from_hashtags(title_tags or description_tags, source_title or content_type, target_lang, limit=15)
     return final_title, final_description, upload_tags
+
+
+def _build_hashtag_only_upload_metadata(
+    ai_meta: Dict[str, Any],
+    *,
+    source_title: str,
+    source_name: str,
+    content_type: str,
+    target_lang: str,
+    is_shorts: bool,
+    source_description: str = "",
+    source_settings: Any = None,
+) -> Tuple[str, str, List[str]]:
+    """طبقة توافق للاختبارات والمسارات القديمة التي تحتاج مخرجات هاشتاغ فقط."""
+    from src.agent.ai import _extract_hashtags_from_text, _filter_hashtags_by_target_language
+
+    final_title, final_description, upload_tags = _build_upload_metadata(
+        ai_meta,
+        channel_key="legacy_hashtag_only",
+        source_title=source_title,
+        source_name=source_name,
+        content_type=content_type,
+        target_lang=target_lang,
+        is_shorts=is_shorts,
+        source_description=source_description,
+        source_settings=source_settings,
+    )
+
+    title_tags = _filter_hashtags_by_target_language(_extract_hashtags_from_text(final_title), target_lang)
+    description_tags = _filter_hashtags_by_target_language(_extract_hashtags_from_text(final_description), target_lang)
+
+    compact_title = _join_hashtags(title_tags, 95)
+    if not compact_title:
+        compact_title = "#shorts" if is_shorts else "#video"
+
+    compact_description = _join_hashtags(description_tags, 4900)
+    if not compact_description:
+        compact_description = compact_title
+
+    return compact_title, compact_description, upload_tags
 
 
 def _parse_datetime_utc(value: Any) -> Optional[datetime]:
@@ -6981,7 +7032,7 @@ class AutoModFetcher:
                 sources_list = []
             enabled_sources = [s for s in (sources_list or []) if bool((s or {}).get("enabled", True))]
             if not enabled_sources:
-                logger.info(
+                logger.debug(
                     "⏭️ [AutoMod] Schedule skipped because no enabled sources exist (channel=%s, content_type=%s)",
                     channel_id[:10],
                     content_type,
@@ -7225,7 +7276,7 @@ class AutoModFetcher:
                 if not preview_mode:
                     sources_list = [s for s in (sources_list or []) if bool((s or {}).get("enabled", True))]
                 if not sources_list:
-                    logger.info(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
+                    logger.debug(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
                     if meta_notifications_enabled:
                         await _notify(
                             f"⚠️ الجدول {sch_idx}: لا توجد مصادر للقناة `{channel_id[:20]}...`"
@@ -7972,7 +8023,16 @@ class AutoModFetcher:
                                     _ch = _CM().get_channel(channel_id)
                                     _overlay_texts = getattr(_ch, "custom_overlay_texts", None) or [] if _ch else []
                                     if _overlay_texts:
-                                        channel_overlay = random.choice(_overlay_texts)
+                                        selected_overlay = str(random.choice(_overlay_texts) or "").strip()
+                                        if selected_overlay:
+                                            channel_overlay = {
+                                                "text": selected_overlay,
+                                                "timing": "full",
+                                                "duration": 2.0,
+                                                "screen_position": "top",
+                                                "intro_animation": {"enabled": False, "type": "none", "duration": 0.0},
+                                                "outro_animation": {"enabled": False, "type": "none", "duration": 0.0},
+                                            }
                                 except Exception:
                                     channel_overlay = None
 

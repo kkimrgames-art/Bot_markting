@@ -265,6 +265,24 @@ def _check_circuit_breaker():
         _consecutive_failures = 0  # تصفير بعد فتح الدائرة
 
 
+def _is_transient_supabase_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    transient_markers = (
+        "disconnect",
+        "timeout",
+        "timed out",
+        "network",
+        "closed",
+        "10054",
+        "temporarily unavailable",
+        "resource temporarily unavailable",
+        "errno 11",
+        "[errno 11]",
+        "eagain",
+    )
+    return any(marker in msg for marker in transient_markers)
+
+
 def reset_connection():
     """إعادة تعيين الاتصال"""
     global _supabase_client, _is_online, _last_connection_check
@@ -496,9 +514,10 @@ def supabase_upsert(table: str, data: Dict, key_field: str = "id", fallback_loca
                     if fallback_local:
                         fallback_local(data)
                     return False
-                if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
-                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (upsert/ {table})، إعادة محاولة... [{e}]")
+                if attempt == 0 and _is_transient_supabase_error(e):
+                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (upsert/{table})، إعادة محاولة... [{e}]")
                     reset_connection()
+                    time.sleep(0.5)
                 else:
                     logger.error(f"❌ فشل upsert في {table}: {e}")
                     break
@@ -547,9 +566,10 @@ def supabase_select(table: str, filters: Dict = None, fallback_local: Callable =
                         details=error_data
                     )
 
-                if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
-                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (select/ {table})، إعادة محاولة... [{e}]")
+                if attempt == 0 and _is_transient_supabase_error(e):
+                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (select/{table})، إعادة محاولة... [{e}]")
                     reset_connection()
+                    time.sleep(0.5)
                 else:
                     logger.error(f"❌ فشل select من {table}: {e}")
                     break
@@ -584,10 +604,10 @@ def supabase_delete(table: str, key_field: str, key_value: Any, fallback_local: 
                     return True
                 break
             except Exception as e:
-                msg = str(e).lower()
-                if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
-                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (delete/ {table})، إعادة محاولة... [{e}]")
+                if attempt == 0 and _is_transient_supabase_error(e):
+                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (delete/{table})، إعادة محاولة... [{e}]")
                     reset_connection()
+                    time.sleep(0.5)
                 else:
                     logger.error(f"❌ فشل delete من {table}: {e}")
                     break
@@ -613,10 +633,10 @@ def supabase_insert_many(table: str, records: List[Dict]) -> bool:
                     return True
                 break
             except Exception as e:
-                msg = str(e).lower()
-                if attempt == 0 and ("disconnect" in msg or "timeout" in msg or "network" in msg or "closed" in msg or "10054" in msg):
-                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (insert_many/ {table})، إعادة محاولة... [{e}]")
+                if attempt == 0 and _is_transient_supabase_error(e):
+                    logger.warning(f"⚠️ اتصال Supabase غير مستقر (insert_many/{table})، إعادة محاولة... [{e}]")
                     reset_connection()
+                    time.sleep(0.5)
                 else:
                     logger.error(f"❌ فشل insert_many في {table}: {e}")
                     break

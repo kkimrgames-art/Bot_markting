@@ -1439,6 +1439,19 @@ class ModVideoProcessor:
             except Exception:
                 return False
 
+        def _iter_font_files(font_dir: str) -> list[str]:
+            out: list[str] = []
+            if not font_dir or not os.path.isdir(font_dir):
+                return out
+            try:
+                for root, _, files in os.walk(font_dir):
+                    for name in files:
+                        if name.lower().endswith((".ttf", ".otf", ".ttc")):
+                            out.append(os.path.abspath(os.path.join(root, name)))
+            except Exception:
+                return out
+            return out
+
         required_cps = _iter_required_codepoints(text)
         # 1. الأولوية القصوى للخط المخصص (إذا تم رفعه للقناة أو الجلسة)
         if custom_font:
@@ -1501,23 +1514,29 @@ class ModVideoProcessor:
             font_candidates = []
 
             # خطوط المستخدم (أولوية عالية)
-            user_font_dir = os.path.join("font", "arabic")
-            try:
-                if os.path.isdir(user_font_dir):
-                    for name in os.listdir(user_font_dir):
-                        if not name.lower().endswith((".ttf", ".otf")):
-                            continue
-                        font_candidates.append(os.path.abspath(os.path.join(user_font_dir, name)))
-            except Exception:
-                pass
+            for user_font_dir in (
+                os.path.join("font", "arabic"),
+                os.path.join("fonts", "arabic"),
+                os.path.join(".data", "fonts"),
+                os.path.join(".temp", "fonts"),
+            ):
+                font_candidates.extend(_iter_font_files(user_font_dir))
 
             # خطوط النظام
             font_candidates.extend(
                 [
+                    "C:/Windows/Fonts/arialuni.ttf",
                     "C:/Windows/Fonts/tahoma.ttf",
                     "C:/Windows/Fonts/arial.ttf",
                     "C:/Windows/Fonts/arabtype.ttf",
+                    "C:/Windows/Fonts/segoeui.ttf",
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+                    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                    "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
+                    "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
                     "/system/fonts/NotoNaskhArabic-Regular.ttf", # Android
+                    "/system/fonts/NotoSansArabic-Regular.ttf",
                     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", # Linux
                 ]
             )
@@ -1556,11 +1575,16 @@ class ModVideoProcessor:
         
         # 6. خط احتياطي نهائي شامل
         if not fontfile:
-            global_fallback = os.path.join("data", "fonts", "overlay_fallback.ttf")
-            if os.path.exists(global_fallback):
-                cand = os.path.abspath(global_fallback)
-                if _font_supports_required_chars(cand, required_cps):
-                    fontfile = cand
+            for global_fallback in (
+                os.path.join(".data", "fonts", "overlay_fallback.ttf"),
+                os.path.join(".data", "fonts", "fallback_ar.ttf"),
+                os.path.join(".temp", "fonts", "overlay_fallback.ttf"),
+            ):
+                if os.path.exists(global_fallback):
+                    cand = os.path.abspath(global_fallback)
+                    if _font_supports_required_chars(cand, required_cps):
+                        fontfile = cand
+                        break
 
         # 7. التنزيل التلقائي لخط احتياطي إذا لم يتم العثور على أي خط
         if not fontfile:
@@ -1574,12 +1598,25 @@ class ModVideoProcessor:
                 
                 if not os.path.exists(downloaded_font_path):
                     logger.info("⬇️ Downloading fallback font 'Cairo-Regular.ttf' from Google Fonts...")
-                    # رابط مباشر لخط Cairo من Google Fonts
-                    font_url = "https://github.com/googlefonts/cairo/raw/main/fonts/ttf/Cairo-Regular.ttf"
-                    urllib.request.urlretrieve(font_url, downloaded_font_path)
-                    logger.info("✅ Fallback font downloaded successfully.")
+                    font_urls = [
+                        "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo-Regular.ttf",
+                        "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/static/Cairo-Regular.ttf",
+                        "https://raw.githubusercontent.com/googlefonts/cairo/main/fonts/ttf/Cairo-Regular.ttf",
+                    ]
+                    last_download_error = None
+                    for font_url in font_urls:
+                        try:
+                            urllib.request.urlretrieve(font_url, downloaded_font_path)
+                            last_download_error = None
+                            logger.info("✅ Fallback font downloaded successfully.")
+                            break
+                        except Exception as download_err:
+                            last_download_error = download_err
+                            continue
+                    if last_download_error is not None and not os.path.exists(downloaded_font_path):
+                        raise last_download_error
                 
-                if os.path.exists(downloaded_font_path):
+                if os.path.exists(downloaded_font_path) and _font_supports_required_chars(downloaded_font_path, required_cps):
                     fontfile = downloaded_font_path
             except Exception as e:
                 logger.warning(f"Failed to auto-download fallback font: {e}")
