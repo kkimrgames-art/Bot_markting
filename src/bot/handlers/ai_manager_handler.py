@@ -21,6 +21,14 @@ from ..persistence import load_state, save_state
 
 logger = logging.getLogger(__name__)
 
+try:
+    from ...agent.supabase_storage import save_bot_state as _force_supabase_save_state
+    from ...agent.supabase_client import USE_SUPABASE, is_online as _supabase_is_online
+except Exception:
+    _force_supabase_save_state = None
+    USE_SUPABASE = False
+
+
 # ==================== حالات محادثة إدارة الذكاء الاصطناعي ====================
 AI_MENU, AI_SELECT_PROVIDER, AI_ADD_KEY, AI_TEST_KEY, AI_REMOVE_KEY = range(5)
 
@@ -142,6 +150,26 @@ def _sync_provider_runtime_state(provider_id: str, keys: List[str]) -> None:
         from ...agent.supabase_storage import save_api_keys
         save_api_keys("mistral", {"keys": {key: {"active": True} for key in keys}})
         return
+
+
+def _persist_ai_state_with_status(state: Dict[str, Any], cfg) -> str:
+    """
+    احفظ الحالة محلياً دائماً، ثم حاول فرض حفظ فوري إلى Supabase
+    لتفادي ضياع مفاتيح AI عند إعادة التشغيل قبل دورة المزامنة التالية.
+    """
+    save_state(state, cfg)
+
+    if not (USE_SUPABASE and _force_supabase_save_state):
+        return "local"
+
+    try:
+        if _supabase_is_online() and _force_supabase_save_state(state):
+            primary = (os.environ.get("SUPABASE_PRIMARY_STORAGE") or "").strip().lower() in {"1", "true", "yes", "on"}
+            return "database_only" if primary else "database_and_local"
+    except Exception as e:
+        logger.warning(f"Immediate Supabase save for AI keys failed: {e}")
+
+    return "local"
 
 async def _test_api_key(provider_id: str, key: str) -> Dict[str, Any]:
     """اختبار مفتاح API"""
@@ -276,7 +304,7 @@ async def receive_ai_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             duplicate += 1
             
-    save_state(state, cfg)
+    save_target = _persist_ai_state_with_status(state, cfg)
     try:
         _sync_provider_runtime_state(provider_id, p_state["keys"])
     except Exception as e:
@@ -285,6 +313,12 @@ async def receive_ai_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"✅ تم حفظ {added} مفتاح جديد لمزود {AI_PROVIDERS[provider_id].name}."
     if duplicate > 0:
         msg += f"\n⚠️ تم تجاهل {duplicate} مفتاح موجود مسبقاً."
+    if save_target == "database_only":
+        msg += "\n💾 تم حفظ المفاتيح بنجاح في قاعدة البيانات."
+    elif save_target == "database_and_local":
+        msg += "\n💾 تم حفظ المفاتيح بنجاح في قاعدة البيانات وتم تحديث النسخة المحلية."
+    else:
+        msg += "\n💾 تم حفظ المفاتيح محلياً. تعذر تأكيد الحفظ في قاعدة البيانات حالياً."
         
     await update.message.reply_text(msg)
     
@@ -370,12 +404,17 @@ async def handle_key_removal(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if removed_key in state["ai_manager"][provider_id].get("blocked_keys", []):
             state["ai_manager"][provider_id]["blocked_keys"].remove(removed_key)
             
-        save_state(state, cfg)
+        save_target = _persist_ai_state_with_status(state, cfg)
         try:
             _sync_provider_runtime_state(provider_id, state["ai_manager"][provider_id].get("keys", []))
         except Exception as e:
             logger.warning(f"AI provider state sync failed for {provider_id}: {e}")
-        await query.message.reply_text(f"✅ تم حذف المفتاح بنجاح.")
+        status_suffix = (
+            "\n💾 تم تحديث قاعدة البيانات بنجاح."
+            if save_target in {"database_only", "database_and_local"}
+            else "\n💾 تم تحديث الحفظ المحلي فقط حالياً."
+        )
+        await query.message.reply_text(f"✅ تم حذف المفتاح بنجاح.{status_suffix}")
         
     return await list_keys_for_removal(update, context)
 

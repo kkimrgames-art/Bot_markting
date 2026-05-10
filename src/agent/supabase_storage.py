@@ -100,6 +100,7 @@ def save_bot_state(state: Dict[str, Any]) -> bool:
             "agent",
             "publishing_lock",
             "ai",
+            "ai_manager",
             "enhance",
 
             # البيانات غير المهمة تم استبعادها (تُحفظ محلياً فقط):
@@ -240,7 +241,7 @@ def load_bot_state() -> Dict[str, Any]:
                 # تحويل JSONB إلى dict
                 for key in ["channels", "enabled_channels", "quality", "pip", "schedule",
                            "conditions", "proxy", "awaiting", "last_output", "agent",
-                           "publishing_lock", "enhance", "ai", "downloader", "scheduler",
+                           "publishing_lock", "enhance", "ai", "ai_manager", "downloader", "scheduler",
                            "telegram_notifications", "facecam_missing_notified"]:
                     if key in state and isinstance(state[key], str):
                         try:
