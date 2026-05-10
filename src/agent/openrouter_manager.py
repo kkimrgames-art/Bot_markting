@@ -34,8 +34,8 @@ class OpenRouterManager:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state = self._load_state()
         
-        # Load keys from environment
-        self.api_keys = self._parse_keys_from_env()
+        # Load keys from environment or persisted bot state
+        self.api_keys = self._load_configured_keys()
         
         # Initialize/Sync keys in state
         self._initialize_keys()
@@ -50,12 +50,50 @@ class OpenRouterManager:
             single = os.getenv("OPENROUTER_API_KEY")
             return [single] if single else []
         
+        return self._split_and_dedupe_keys(raw)
+
+    def _split_and_dedupe_keys(self, raw: str) -> List[str]:
         parts = []
+        seen = set()
         for token in raw.replace("\n", ",").replace("\r", ",").split(","):
             t = token.strip()
-            if t:
+            if t and t not in seen:
                 parts.append(t)
+                seen.add(t)
         return parts
+
+    def _load_ai_manager_keys(self) -> List[str]:
+        try:
+            from ..bot.persistence import load_state
+            from .config import load_config
+
+            state = load_state(load_config())
+            ai_manager = state.get("ai_manager") if isinstance(state, dict) else {}
+            provider_state = ai_manager.get("openrouter") if isinstance(ai_manager, dict) else {}
+            raw_keys = (provider_state.get("active_keys") or provider_state.get("keys") or []) if isinstance(provider_state, dict) else []
+            if isinstance(raw_keys, list):
+                return self._split_and_dedupe_keys("\n".join(str(k or "").strip() for k in raw_keys))
+        except Exception:
+            pass
+        return []
+
+    def _load_configured_keys(self) -> List[str]:
+        env_keys = self._parse_keys_from_env()
+        if env_keys:
+            logger.info(f"✅ Loaded {len(env_keys)} OpenRouter key(s) from environment")
+            return env_keys
+
+        persisted_keys = self._split_and_dedupe_keys("\n".join((self.state.get("keys") or {}).keys()))
+        if persisted_keys:
+            logger.info(f"✅ Loaded {len(persisted_keys)} OpenRouter key(s) from persisted state")
+            return persisted_keys
+
+        ai_manager_keys = self._load_ai_manager_keys()
+        if ai_manager_keys:
+            logger.info(f"✅ Loaded {len(ai_manager_keys)} OpenRouter key(s) from bot state")
+            return ai_manager_keys
+
+        return []
 
     def _is_disallowed_model(self, model_id: Optional[str]) -> bool:
         mid = (model_id or "").strip().lower()

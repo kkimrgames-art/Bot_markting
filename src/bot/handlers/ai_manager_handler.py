@@ -85,6 +85,64 @@ def _load_ai_state():
     
     return state, cfg
 
+
+def _dedupe_keys(keys: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for key in keys or []:
+        cleaned = str(key or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        out.append(cleaned)
+        seen.add(cleaned)
+    return out
+
+
+def _sync_provider_runtime_state(provider_id: str, keys: List[str]) -> None:
+    keys = _dedupe_keys(keys)
+
+    def _default_key_state(existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        existing = dict(existing or {})
+        return {
+            "is_blocked": bool(existing.get("is_blocked", False)),
+            "block_until": existing.get("block_until"),
+            "consecutive_errors": int(existing.get("consecutive_errors", 0) or 0),
+            "last_check": existing.get("last_check"),
+            "usage_limit_reached": bool(existing.get("usage_limit_reached", False)),
+        }
+
+    if provider_id == "openrouter":
+        from ...agent.openrouter_manager import get_openrouter_manager
+        manager = get_openrouter_manager()
+        existing = manager.state.get("keys", {}) if isinstance(manager.state.get("keys"), dict) else {}
+        manager.api_keys = list(keys)
+        manager.state["keys"] = {key: _default_key_state(existing.get(key)) for key in keys}
+        manager._save_state()
+        return
+
+    if provider_id == "groq":
+        from ...agent.groq_manager import get_groq_manager
+        manager = get_groq_manager()
+        existing = manager.state.get("keys", {}) if isinstance(manager.state.get("keys"), dict) else {}
+        manager.api_keys = list(keys)
+        manager.state["keys"] = {key: _default_key_state(existing.get(key)) for key in keys}
+        manager._save_state()
+        return
+
+    if provider_id == "clarifai":
+        from ...agent.clarifai_manager import get_clarifai_manager
+        manager = get_clarifai_manager()
+        existing = manager.state.get("keys", {}) if isinstance(manager.state.get("keys"), dict) else {}
+        manager.api_keys = list(keys)
+        manager.state["keys"] = {key: _default_key_state(existing.get(key)) for key in keys}
+        manager._save_state()
+        return
+
+    if provider_id == "mistral":
+        from ...agent.supabase_storage import save_api_keys
+        save_api_keys("mistral", {"keys": {key: {"active": True} for key in keys}})
+        return
+
 async def _test_api_key(provider_id: str, key: str) -> Dict[str, Any]:
     """اختبار مفتاح API"""
     provider = AI_PROVIDERS[provider_id]
@@ -219,6 +277,10 @@ async def receive_ai_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
             duplicate += 1
             
     save_state(state, cfg)
+    try:
+        _sync_provider_runtime_state(provider_id, p_state["keys"])
+    except Exception as e:
+        logger.warning(f"AI provider state sync failed for {provider_id}: {e}")
     
     msg = f"✅ تم حفظ {added} مفتاح جديد لمزود {AI_PROVIDERS[provider_id].name}."
     if duplicate > 0:
@@ -226,18 +288,6 @@ async def receive_ai_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(msg)
     
-    # مزامنة مع Supabase إذا توفرت
-    try:
-        from ...agent.supabase_storage import save_groq_state, save_mistral_state, save_clarifai_state
-        if provider_id == "groq":
-             save_groq_state({"keys": {k: {"is_active": True} for k in p_state["keys"]}})
-        elif provider_id == "mistral":
-             save_mistral_state({"keys": {k: {"active": True} for k in p_state["keys"]}})
-        elif provider_id == "clarifai":
-             save_clarifai_state({"keys": {k: {} for k in p_state["keys"]}})
-    except:
-        pass
-
     return await show_ai_menu(update, context)
 
 async def test_provider_connection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,6 +371,10 @@ async def handle_key_removal(update: Update, context: ContextTypes.DEFAULT_TYPE)
             state["ai_manager"][provider_id]["blocked_keys"].remove(removed_key)
             
         save_state(state, cfg)
+        try:
+            _sync_provider_runtime_state(provider_id, state["ai_manager"][provider_id].get("keys", []))
+        except Exception as e:
+            logger.warning(f"AI provider state sync failed for {provider_id}: {e}")
         await query.message.reply_text(f"✅ تم حذف المفتاح بنجاح.")
         
     return await list_keys_for_removal(update, context)

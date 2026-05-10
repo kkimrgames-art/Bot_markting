@@ -133,12 +133,39 @@ class GeminiKeyManager:
         ).strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
+    def _load_ai_manager_keys(self) -> List[str]:
+        try:
+            from ..bot.persistence import load_state
+            from .config import load_config
+
+            state = load_state(load_config())
+            ai_manager = state.get("ai_manager") if isinstance(state, dict) else {}
+            provider_state = ai_manager.get("gemini") if isinstance(ai_manager, dict) else {}
+            raw_keys = (provider_state.get("active_keys") or provider_state.get("keys") or []) if isinstance(provider_state, dict) else []
+            if isinstance(raw_keys, list):
+                return self._split_and_dedupe_keys("\n".join(str(k or "").strip() for k in raw_keys))
+        except Exception:
+            pass
+        return []
+
     def _load_configured_keys(self) -> List[str]:
         env_keys = self._parse_keys_from_env()
         if env_keys:
             self.key_source = "environment"
             logger.info(f"✅ Loaded {len(env_keys)} Gemini key(s) from environment")
             return env_keys
+
+        persisted_keys = self._split_and_dedupe_keys("\n".join((self.state.get("keys") or {}).keys()))
+        if persisted_keys:
+            self.key_source = "persisted_state"
+            logger.info(f"✅ Loaded {len(persisted_keys)} Gemini key(s) from persisted state")
+            return persisted_keys
+
+        ai_manager_keys = self._load_ai_manager_keys()
+        if ai_manager_keys:
+            self.key_source = "bot_state"
+            logger.info(f"✅ Loaded {len(ai_manager_keys)} Gemini key(s) from bot state")
+            return ai_manager_keys
 
         if self._allow_embedded_keys():
             embedded = self._split_and_dedupe_keys(",".join(self.API_KEYS))

@@ -446,6 +446,7 @@ def delete_channel_config(channel_id: str) -> bool:
 def save_gemini_keys_state(keys_state: Dict[str, Any]) -> bool:
     """حفظ حالة مفاتيح Gemini"""
     keys = keys_state.get("keys", {})
+    current_keys = {str(key).strip() for key in keys.keys() if str(key).strip()}
     
     for key, state in keys.items():
         data = {
@@ -463,6 +464,15 @@ def save_gemini_keys_state(keys_state: Dict[str, Any]) -> bool:
             "last_error_time": state.get("last_error_time")
         }
         supabase_upsert("api_keys_gemini", data, "key")
+
+    try:
+        existing_rows = supabase_select("api_keys_gemini") or []
+        for row in existing_rows:
+            existing_key = str((row or {}).get("key") or "").strip()
+            if existing_key and existing_key not in current_keys:
+                supabase_delete("api_keys_gemini", "key", existing_key)
+    except Exception:
+        pass
     
     return True
 
@@ -490,10 +500,20 @@ def save_openrouter_state(state: Dict[str, Any]) -> bool:
     keys = state.get("keys", {})
     models = state.get("models", [])
     dynamic_models = state.get("dynamic_models", [])
+    current_keys = {str(key).strip() for key in keys.keys() if str(key).strip()}
     
     # حفظ المفاتيح
     for key, key_state in keys.items():
         supabase_upsert("api_keys_openrouter", {"key": key, **key_state}, "key")
+
+    try:
+        existing_rows = supabase_select("api_keys_openrouter") or []
+        for row in existing_rows:
+            existing_key = str((row or {}).get("key") or "").strip()
+            if existing_key and existing_key not in current_keys:
+                supabase_delete("api_keys_openrouter", "key", existing_key)
+    except Exception:
+        pass
     
     # حفظ النماذج
     for model in set(models):
@@ -551,9 +571,19 @@ def save_groq_state(state: Dict[str, Any]) -> bool:
     """حفظ حالة Groq"""
     keys = state.get("keys", {})
     models = state.get("models", [])
+    current_keys = {str(key).strip() for key in keys.keys() if str(key).strip()}
     
     for key, key_state in keys.items():
         supabase_upsert("api_keys_groq", {"key": key, **key_state}, "key")
+
+    try:
+        existing_rows = supabase_select("api_keys_groq") or []
+        for row in existing_rows:
+            existing_key = str((row or {}).get("key") or "").strip()
+            if existing_key and existing_key not in current_keys:
+                supabase_delete("api_keys_groq", "key", existing_key)
+    except Exception:
+        pass
     
     for model in set(models):
         supabase_upsert("groq_models", {"model_name": model}, "model_name", on_conflict="model_name")

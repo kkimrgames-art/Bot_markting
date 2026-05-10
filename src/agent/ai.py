@@ -930,11 +930,54 @@ def _store_cached_platform_metadata(cfg: Config, platform: str, channel_key: str
         pass
 
 
+def _split_and_dedupe_api_keys(raw: str) -> List[str]:
+    keys: List[str] = []
+    seen = set()
+    for token in (raw or "").replace("\n", ",").replace("\r", ",").split(","):
+        key = token.strip()
+        if not key or key in seen:
+            continue
+        keys.append(key)
+        seen.add(key)
+    return keys
+
+
+def _load_mistral_api_keys(cfg: Config) -> List[str]:
+    env_keys = _split_and_dedupe_api_keys(
+        (os.getenv("MISTRAL_API_KEYS") or "") + "," + (cfg.MISTRAL_API_KEY or "")
+    )
+    if env_keys:
+        return env_keys
+
+    try:
+        from .supabase_storage import load_mistral_state
+
+        state_keys = load_mistral_state().get("keys", {})
+        if isinstance(state_keys, dict):
+            remote_keys = _split_and_dedupe_api_keys("\n".join(state_keys.keys()))
+            if remote_keys:
+                return remote_keys
+    except Exception:
+        pass
+
+    try:
+        st = load_state(cfg)
+        ai_manager = st.get("ai_manager") if isinstance(st, dict) else {}
+        provider_state = ai_manager.get("mistral") if isinstance(ai_manager, dict) else {}
+        raw_keys = (provider_state.get("active_keys") or provider_state.get("keys") or []) if isinstance(provider_state, dict) else []
+        if isinstance(raw_keys, list):
+            return _split_and_dedupe_api_keys("\n".join(str(k or "").strip() for k in raw_keys))
+    except Exception:
+        pass
+
+    return []
+
+
 def _mistral_endpoint(cfg: Config) -> Optional[str]:
     # Deprecated in favor of OpenRouterManager, but kept for legacy config reference if needed
     if cfg.MISTRAL_PROXY_URL:
         return cfg.MISTRAL_PROXY_URL.rstrip("/") + "/v1/chat/completions"
-    if cfg.MISTRAL_API_KEY:
+    if _load_mistral_api_keys(cfg):
         return "https://api.mistral.ai/v1/chat/completions"
     return None
 
@@ -988,6 +1031,7 @@ def _call_mistral_chat(cfg: Config, prompt: str, system_prompt: Optional[str] = 
         if _is_ai_backed_off(cfg):
             return None, 0, None, "backoff"
 
+        mistral_api_keys = _load_mistral_api_keys(cfg)
         endpoint = _mistral_endpoint(cfg)
         if not endpoint:
             return None, 0, None, "no_key"
@@ -1014,8 +1058,8 @@ def _call_mistral_chat(cfg: Config, prompt: str, system_prompt: Optional[str] = 
         headers = {
             "Content-Type": "application/json",
         }
-        if cfg.MISTRAL_API_KEY:
-            headers["Authorization"] = f"Bearer {cfg.MISTRAL_API_KEY}"
+        if mistral_api_keys:
+            headers["Authorization"] = f"Bearer {mistral_api_keys[0]}"
 
         payload = {
             "model": model,
@@ -1264,7 +1308,7 @@ def _generate_content_with_failover(cfg: Config, prompt: str) -> Optional[str]:
     def _has_mistral_keys():
         if (os.getenv("DISABLE_MISTRAL") or "").strip().lower() in {"1", "true", "yes", "on"}:
             return False
-        return bool(cfg.MISTRAL_API_KEY or cfg.MISTRAL_PROXY_URL)
+        return bool(_load_mistral_api_keys(cfg) or cfg.MISTRAL_PROXY_URL)
 
     def _try_mistral():
         if not _has_mistral_keys():

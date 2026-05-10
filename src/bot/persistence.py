@@ -146,6 +146,7 @@ def _critical_subset(state: Dict[str, Any]) -> Dict[str, Any]:
         "publishing_inflight",
         "raw_review",
         "ai",
+        "ai_manager",
         "enhance",
 
         # بيانات FaceCam (مهمة)
@@ -320,6 +321,8 @@ def _ensure_state_fields(state: Dict[str, Any], cfg: Config) -> None:
     state["raw_review"] = raw_review
     if "ai" not in state:
         state["ai"] = {"backoff_until": None, "provider_order": "smart"}
+    if "ai_manager" not in state or not isinstance(state.get("ai_manager"), dict):
+        state["ai_manager"] = {}
     
     # تحرير القفل إذا انتهت صلاحيته
     try:
