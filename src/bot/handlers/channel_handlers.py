@@ -721,7 +721,8 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✂️ القص", callback_data=f"edit_trim:{channel_id}")
         ],
         [
-            InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}")
+            InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}"),
+            InlineKeyboardButton("🏷️ بدائل العنوان", callback_data=f"edit_fallback_titles:{channel_id}")
         ]
     ]
 

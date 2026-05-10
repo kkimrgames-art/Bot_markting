@@ -147,6 +147,22 @@ def build_application(token: str):
 
     application.add_handler(CallbackQueryHandler(edit_handlers.edit_minecraft_overlay, pattern="^edit_minecraft_overlay:"))
     application.add_handler(CallbackQueryHandler(edit_handlers.toggle_overlay_text, pattern="^toggle_overlay_text:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_custom_description, pattern="^edit_custom_desc:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_custom_description_mode, pattern="^edit_custom_desc_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.set_custom_description_mode, pattern="^set_custom_desc_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.delete_custom_description, pattern="^delete_custom_desc:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_description_sections, pattern="^edit_desc_sections:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_description_sections_mode, pattern="^edit_desc_sections_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.set_description_sections_mode, pattern="^set_desc_sections_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.delete_description_sections, pattern="^delete_desc_sections:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_fallback_titles, pattern="^edit_fallback_titles:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_fallback_titles_mode, pattern="^edit_fallback_titles_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.set_fallback_titles_mode, pattern="^set_fallback_titles_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.delete_fallback_titles, pattern="^delete_fallback_titles:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_fallback_descriptions, pattern="^edit_fallback_descs:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.edit_fallback_descriptions_mode, pattern="^edit_fallback_descs_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.set_fallback_descriptions_mode, pattern="^set_fallback_descs_mode:"))
+    application.add_handler(CallbackQueryHandler(edit_handlers.delete_fallback_descriptions, pattern="^delete_fallback_descs:"))
 
     overlay_text_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_handlers.set_overlay_text_start, pattern="^set_overlay_text_start:")],
@@ -186,6 +202,32 @@ def build_application(token: str):
         per_message=False
     )
     application.add_handler(custom_desc_conv)
+
+    fallback_titles_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_handlers.set_fallback_titles_start, pattern="^set_fallback_titles_start:")],
+        states={
+            edit_handlers.FALLBACK_TITLES_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_handlers.set_fallback_titles_receive)
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(auto_mod_handlers.auto_mod_menu, pattern="^main_menu$")],
+        allow_reentry=True,
+        per_message=False
+    )
+    application.add_handler(fallback_titles_conv)
+
+    fallback_descs_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_handlers.set_fallback_descriptions_start, pattern="^set_fallback_descs_start:")],
+        states={
+            edit_handlers.FALLBACK_DESCRIPTIONS_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_handlers.set_fallback_descriptions_receive)
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(auto_mod_handlers.auto_mod_menu, pattern="^main_menu$")],
+        allow_reentry=True,
+        per_message=False
+    )
+    application.add_handler(fallback_descs_conv)
 
     desc_sections_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_handlers.set_description_sections_start, pattern="^set_desc_sections_start:")],

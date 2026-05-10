@@ -360,6 +360,18 @@ def save_channel_config(channel: Dict[str, Any]) -> bool:
         data["intro_videos"] = json.dumps(data["intro_videos"])
     if "outro_videos" in data and isinstance(data["outro_videos"], list):
         data["outro_videos"] = json.dumps(data["outro_videos"])
+    if "fallback_titles" in data and isinstance(data["fallback_titles"], list):
+        data["fallback_titles"] = json.dumps(data["fallback_titles"])
+    if "fallback_descriptions" in data and isinstance(data["fallback_descriptions"], list):
+        data["fallback_descriptions"] = json.dumps(data["fallback_descriptions"])
+    if "description_sections" in data and isinstance(data["description_sections"], list):
+        data["description_sections"] = json.dumps(data["description_sections"])
+    if "source_fallback_titles" in data and isinstance(data["source_fallback_titles"], list):
+        data["source_fallback_titles"] = json.dumps(data["source_fallback_titles"])
+    if "source_fallback_descriptions" in data and isinstance(data["source_fallback_descriptions"], list):
+        data["source_fallback_descriptions"] = json.dumps(data["source_fallback_descriptions"])
+    if "source_description_sections" in data and isinstance(data["source_description_sections"], list):
+        data["source_description_sections"] = json.dumps(data["source_description_sections"])
     
     # Supabase schema doesn't have custom_overlay_texts, so drop it before upsert
     data.pop("custom_overlay_texts", None)
@@ -384,7 +396,10 @@ def load_channel_config(channel_id: str) -> Optional[Dict[str, Any]]:
     
     if result:
         # تحويل JSON strings إلى dict/list
-        for key in ["scheduling_settings", "intro_videos", "outro_videos"]:
+        for key in ["scheduling_settings", "intro_videos", "outro_videos",
+                     "fallback_titles", "fallback_descriptions", "description_sections",
+                     "source_fallback_titles", "source_fallback_descriptions",
+                     "source_description_sections", "custom_overlay_texts"]:
             if key in result and isinstance(result[key], str):
                 try:
                     result[key] = json.loads(result[key])

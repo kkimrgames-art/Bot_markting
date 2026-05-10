@@ -958,13 +958,64 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     if desc_mode not in {"fixed", "random"}:
         desc_mode = "fixed"
     placement = str(desc_raw.get("placement") or "append").strip().lower()
-    if placement not in {"append", "prepend"}:
+    if placement not in {"append", "prepend", "template"}:
         placement = "append"
     normalized["extra_description"] = {
         "enabled": bool(desc_raw.get("enabled", False)) and bool(desc_texts),
         "texts": desc_texts,
         "selection_mode": desc_mode,
         "placement": placement,
+    }
+    sections_raw = settings.get("description_sections")
+    sections_mode = str(settings.get("sections_mode") or "append").strip().lower()
+    if sections_mode not in {"append", "prepend", "template"}:
+        sections_mode = "append"
+    normalized_sections: List[Dict[str, str]] = []
+    if isinstance(sections_raw, list):
+        for item in sections_raw:
+            if not isinstance(item, dict):
+                continue
+            section_title = str(item.get("title") or "").strip()
+            section_content = str(item.get("content") or "").strip()
+            if not section_title and not section_content:
+                continue
+            normalized_sections.append({"title": section_title, "content": section_content})
+    normalized["description_sections"] = {
+        "enabled": bool(normalized_sections),
+        "sections": normalized_sections,
+        "mode": sections_mode,
+    }
+    title_fallback_raw = None
+    for key in ("fallback_title", "title_fallback", "fallback_titles"):
+        if isinstance(settings.get(key), dict):
+            title_fallback_raw = settings.get(key)
+            break
+    if title_fallback_raw is None:
+        title_fallback_raw = {}
+    title_fallback_texts = _split_configured_texts(title_fallback_raw.get("texts"))
+    title_fallback_mode = str(title_fallback_raw.get("selection_mode") or "fixed").strip().lower()
+    if title_fallback_mode not in {"fixed", "random"}:
+        title_fallback_mode = "fixed"
+    normalized["fallback_title"] = {
+        "enabled": bool(title_fallback_raw.get("enabled", False)) and bool(title_fallback_texts),
+        "texts": title_fallback_texts,
+        "selection_mode": title_fallback_mode,
+    }
+    desc_fallback_raw = None
+    for key in ("fallback_description", "description_fallback", "fallback_descriptions"):
+        if isinstance(settings.get(key), dict):
+            desc_fallback_raw = settings.get(key)
+            break
+    if desc_fallback_raw is None:
+        desc_fallback_raw = {}
+    desc_fallback_texts = _split_configured_texts(desc_fallback_raw.get("texts"), allow_blocks=True)
+    desc_fallback_mode = str(desc_fallback_raw.get("selection_mode") or "fixed").strip().lower()
+    if desc_fallback_mode not in {"fixed", "random"}:
+        desc_fallback_mode = "fixed"
+    normalized["fallback_description"] = {
+        "enabled": bool(desc_fallback_raw.get("enabled", False)) and bool(desc_fallback_texts),
+        "texts": desc_fallback_texts,
+        "selection_mode": desc_fallback_mode,
     }
     tail_trim_raw = settings.get("tail_trim")
     if isinstance(tail_trim_raw, dict):
@@ -1050,6 +1101,63 @@ def _choose_configured_text(texts: List[str], selection_mode: str = "fixed") -> 
     if selection_mode == "random" and len(clean) > 1:
         return random.choice(clean)
     return clean[0]
+
+
+def _coerce_source_text_config(texts: Any, *, selection_mode: Any = "fixed", allow_blocks: bool = False) -> Dict[str, Any]:
+    normalized_texts = _split_configured_texts(texts, allow_blocks=allow_blocks)
+    mode = str(selection_mode or "fixed").strip().lower()
+    if mode not in {"fixed", "random"}:
+        mode = "fixed"
+    return {
+        "enabled": bool(normalized_texts),
+        "texts": normalized_texts,
+        "selection_mode": mode,
+    }
+
+
+def _merge_channel_publish_metadata_settings(raw_source_settings: Any, channel_extra: Any) -> Dict[str, Any]:
+    merged = parse_source_settings(raw_source_settings)
+    extra = dict(channel_extra or {}) if isinstance(channel_extra, dict) else {}
+
+    custom_desc = str(extra.get("custom_description") or "").strip()
+    if custom_desc:
+        desc_mode = str(extra.get("custom_description_mode") or "append").strip().lower()
+        if desc_mode not in {"append", "prepend", "template"}:
+            desc_mode = "append"
+        existing_extra_desc = merged.get("extra_description") if isinstance(merged.get("extra_description"), dict) else {}
+        if not existing_extra_desc:
+            merged["extra_description"] = {
+                "enabled": True,
+                "texts": [custom_desc],
+                "selection_mode": "fixed",
+                "placement": desc_mode,
+            }
+
+    sections = extra.get("description_sections")
+    if isinstance(sections, list) and sections:
+        existing_sections = merged.get("description_sections")
+        if not existing_sections:
+            merged["description_sections"] = sections
+        if not merged.get("sections_mode"):
+            merged["sections_mode"] = str(extra.get("sections_mode") or "append").strip().lower() or "append"
+
+    fallback_title_cfg = _coerce_source_text_config(
+        extra.get("fallback_title_texts"),
+        selection_mode=extra.get("fallback_title_mode"),
+        allow_blocks=False,
+    )
+    if fallback_title_cfg.get("enabled") and not isinstance(merged.get("fallback_title"), dict):
+        merged["fallback_title"] = dict(fallback_title_cfg)
+
+    fallback_desc_cfg = _coerce_source_text_config(
+        extra.get("fallback_description_texts"),
+        selection_mode=extra.get("fallback_description_mode"),
+        allow_blocks=True,
+    )
+    if fallback_desc_cfg.get("enabled") and not isinstance(merged.get("fallback_description"), dict):
+        merged["fallback_description"] = dict(fallback_desc_cfg)
+
+    return normalize_source_settings(merged)
 
 
 def pick_source_overlay_config(raw_settings: Any) -> Optional[Dict[str, Any]]:
@@ -1251,9 +1359,18 @@ def merge_source_extra_description(base_description: str, raw_settings: Any) -> 
         return (base_description or "").strip()
 
     original = (base_description or "").strip()
+    placement = str(extra_cfg.get("placement") or "append").strip().lower()
     if not original:
+        if placement == "template":
+            if "{ai}" in selected_text:
+                return selected_text.replace("{ai}", "").strip()
+            return selected_text
         return selected_text
-    if extra_cfg.get("placement") == "prepend":
+    if placement == "template":
+        if "{ai}" in selected_text:
+            return selected_text.replace("{ai}", original).strip()
+        return f"{selected_text}\n\n{original}".strip()
+    if placement == "prepend":
         return f"{selected_text}\n\n{original}"
     return f"{original}\n\n{selected_text}"
 
@@ -1263,6 +1380,106 @@ def _get_source_extra_description_text(raw_settings: Any) -> str:
     if not extra_cfg.get("enabled"):
         return ""
     return _choose_configured_text(extra_cfg.get("texts") or [], extra_cfg.get("selection_mode", "fixed")).strip()
+
+
+def _render_description_sections_text(raw_settings: Any) -> str:
+    sections_cfg = normalize_source_settings(raw_settings).get("description_sections") or {}
+    if not sections_cfg.get("enabled"):
+        return ""
+    sections = sections_cfg.get("sections") or []
+    if not isinstance(sections, list):
+        return ""
+    parts: List[str] = []
+    for item in sections:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if title and content:
+            parts.append(f"{title}\n{content}")
+        elif title:
+            parts.append(title)
+        elif content:
+            parts.append(content)
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+def merge_source_description_sections(base_description: str, raw_settings: Any) -> str:
+    sections_text = _render_description_sections_text(raw_settings)
+    if not sections_text:
+        return (base_description or "").strip()
+    sections_cfg = normalize_source_settings(raw_settings).get("description_sections") or {}
+    mode = str(sections_cfg.get("mode") or "append").strip().lower()
+    original = (base_description or "").strip()
+    if not original:
+        if mode == "template" and "{sections}" in sections_text:
+            return sections_text.replace("{sections}", "").strip()
+        return sections_text
+    if mode == "template":
+        if "{sections}" in original:
+            return original.replace("{sections}", sections_text).strip()
+        return f"{original}\n\n{sections_text}".strip()
+    if mode == "prepend":
+        return f"{sections_text}\n\n{original}".strip()
+    return f"{original}\n\n{sections_text}".strip()
+
+
+def _get_fallback_title_text(raw_settings: Any) -> str:
+    cfg = normalize_source_settings(raw_settings).get("fallback_title") or {}
+    if not cfg.get("enabled"):
+        return ""
+    return _choose_configured_text(cfg.get("texts") or [], cfg.get("selection_mode", "fixed")).strip()
+
+
+def _get_fallback_description_text(raw_settings: Any) -> str:
+    cfg = normalize_source_settings(raw_settings).get("fallback_description") or {}
+    if not cfg.get("enabled"):
+        return ""
+    return _choose_configured_text(cfg.get("texts") or [], cfg.get("selection_mode", "fixed")).strip()
+
+
+def _looks_like_generic_media_title(value: Any, source_context: Optional[Dict[str, Any]] = None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    base = os.path.splitext(os.path.basename(raw))[0].strip()
+    if not base:
+        return True
+    low = base.lower()
+    if len(base) < 5:
+        return True
+    if re.fullmatch(r"[a-f0-9]{8,}", low):
+        return True
+    generic_patterns = [
+        r"^(video|vid|clip|file|img|dsc|mvimg|pxl|reel|short|shorts|untitled|new video)[\s_\-]*\d*$",
+        r"^(whatsapp|telegram|screen(?:recording)?|recording|download|upload|edited)[\s_\-]*\d*$",
+        r"^\d{5,}$",
+        r"^[a-z]{0,4}[_\-]?\d{6,}$",
+    ]
+    if any(re.fullmatch(pattern, low) for pattern in generic_patterns):
+        return True
+    alpha_count = sum(1 for ch in base if ch.isalpha())
+    digit_count = sum(1 for ch in base if ch.isdigit())
+    if alpha_count <= 2 and digit_count >= 4:
+        return True
+    separators = sum(1 for ch in base if ch in {"_", "-", ".", " "})
+    if digit_count >= alpha_count and separators >= 2 and len(base) <= 24:
+        return True
+    ctx = source_context or {}
+    src_url = str(ctx.get("source_url") or ctx.get("url") or "").strip().lower()
+    if src_url.startswith("gdrive://") and (digit_count >= alpha_count or low.startswith(("video", "vid", "clip", "file"))):
+        return True
+    return False
+
+
+def _source_metadata_needs_configured_fallback(source_title: Any, source_description: Any, source_context: Optional[Dict[str, Any]] = None) -> bool:
+    clean_title = str(source_title or "").strip()
+    clean_desc = str(source_description or "").strip()
+    if not clean_desc:
+        return True
+    if _looks_like_generic_media_title(clean_title, source_context):
+        return True
+    return False
 
 
 def _looks_like_shorts_url(url: Any) -> bool:
@@ -1424,15 +1641,20 @@ def _build_upload_metadata(
             return ""
         return raw[:35]
 
-    merged_description = merge_source_extra_description(
-        ai_meta.get("description", source_description or ""),
-        source_settings,
-    )
-    extra_description_text = _get_source_extra_description_text(source_settings)
     source_context = ai_meta.get("source_context") if isinstance(ai_meta.get("source_context"), dict) else {}
+    weak_source_metadata = _source_metadata_needs_configured_fallback(source_title, source_description, source_context)
+    fallback_title_text = _get_fallback_title_text(source_settings)
+    fallback_description_text = _get_fallback_description_text(source_settings)
+    base_description = ai_meta.get("description", source_description or "")
+    if weak_source_metadata and fallback_description_text:
+        base_description = fallback_description_text
+    merged_description = merge_source_extra_description(base_description, source_settings)
+    merged_description = merge_source_description_sections(merged_description, source_settings)
+    extra_description_text = _get_source_extra_description_text(source_settings)
+    sections_description_text = _render_description_sections_text(source_settings)
     source_signals = extract_source_metadata_context(
         hint_title=source_title,
-        source_description=" ".join(part for part in [source_description, extra_description_text] if part),
+        source_description=" ".join(part for part in [source_description, extra_description_text, sections_description_text, fallback_description_text if weak_source_metadata else ""] if part),
         lang=target_lang,
         content_type=content_type,
         source_name=source_name,
@@ -1447,6 +1669,9 @@ def _build_upload_metadata(
         merged_description,
         source_description,
         extra_description_text,
+        sections_description_text,
+        fallback_title_text,
+        fallback_description_text if weak_source_metadata else "",
     ):
         hashtag_candidates.extend(_extract_hashtags_from_text(text))
 
@@ -1571,6 +1796,8 @@ def _build_upload_metadata(
             final_title = "#shorts" if (is_shorts and not strict_local_script) else "#video"
 
         description_plain = _strip_hashtags(merged_description)
+        if weak_source_metadata and fallback_description_text:
+            description_plain = _strip_hashtags(fallback_description_text)
         if len(description_plain) < 20:
             description_plain = _strip_hashtags(ai_meta.get("description", ""))
         if len(description_plain) < 20:
@@ -1586,7 +1813,9 @@ def _build_upload_metadata(
         final_description = final_description[:4900].rstrip()
     else:
         # عنوان قابل للقراءة + هاشتاغات
-        final_title = _strip_hashtags(ai_meta.get("title", ""))
+        final_title = _strip_hashtags(fallback_title_text) if (weak_source_metadata and fallback_title_text) else ""
+        if not final_title:
+            final_title = _strip_hashtags(ai_meta.get("title", ""))
         if not final_title:
             final_title = _strip_hashtags(source_title)
         if not final_title:
@@ -1596,6 +1825,8 @@ def _build_upload_metadata(
         final_title = final_title[:95].rstrip(" -|:,.،؛")
 
         description_plain = _strip_hashtags(merged_description)
+        if weak_source_metadata and fallback_description_text:
+            description_plain = _strip_hashtags(fallback_description_text)
         if len(description_plain) < 20:
             description_plain = _strip_hashtags(ai_meta.get("description", ""))
         if len(description_plain) < 20:
@@ -1625,6 +1856,8 @@ def _build_upload_metadata(
     seen_upload_tags = set()
     raw_upload_candidates: List[str] = []
     raw_upload_candidates.extend([str(x) for x in (ai_meta.get("tags") or [])])
+    if weak_source_metadata and fallback_title_text:
+        raw_upload_candidates.extend(re.findall(r"[0-9A-Za-z\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]{3,}", fallback_title_text))
     raw_upload_candidates.extend(_keywords_from_hashtags(description_tags, source_title or content_type, target_lang, limit=24))
     raw_upload_candidates.extend([str(x) for x in (source_signals.get("keywords") or [])])
 
@@ -8481,6 +8714,11 @@ class AutoModFetcher:
                 channel_id[:10],
             )
 
+            effective_source_settings = _merge_channel_publish_metadata_settings(
+                source_settings,
+                getattr(channel, "extra_data", {}) or {},
+            )
+
             # توليد بيانات الفيديو محلياً قبل النشر
             ai_meta = generate_ai_metadata(
                 cfg=cfg,
@@ -8503,11 +8741,11 @@ class AutoModFetcher:
                 target_lang=target_lang,
                 is_shorts=is_shorts,
                 source_description=source_description,
-                source_settings=source_settings,
+                source_settings=effective_source_settings,
             )
             
             # Use per-source privacy setting if configured, otherwise channel default
-            privacy = source_settings.get("privacy") or getattr(channel, "privacy", "unlisted") or "unlisted"
+            privacy = effective_source_settings.get("privacy") or getattr(channel, "privacy", "unlisted") or "unlisted"
 
             loop = asyncio.get_running_loop()
             import functools

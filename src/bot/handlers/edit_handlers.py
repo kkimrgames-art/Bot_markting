@@ -27,6 +27,8 @@ OVERLAY_TEXT_INPUT = "OVERLAY_TEXT_INPUT"
 OVERLAY_SIZE_INPUT = "OVERLAY_SIZE_INPUT"
 CUSTOM_DESC_INPUT = "CUSTOM_DESC_INPUT"
 DESCRIPTION_SECTIONS_INPUT = "DESCRIPTION_SECTIONS_INPUT"
+FALLBACK_TITLES_INPUT = "FALLBACK_TITLES_INPUT"
+FALLBACK_DESCRIPTIONS_INPUT = "FALLBACK_DESCRIPTIONS_INPUT"
 FACECAM_SCALE_INPUT = "FACECAM_SCALE_INPUT"
 FACECAM_X_INPUT = "FACECAM_X_INPUT"
 FACECAM_Y_INPUT = "FACECAM_Y_INPUT"
@@ -61,6 +63,33 @@ def _clean_text_for_telegram(text: str) -> str:
     text = re.sub(r'[ \t]+', ' ', text)
     
     return text.strip()
+
+
+def _split_multiline_texts(value: str, *, allow_blocks: bool = False) -> List[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    if allow_blocks:
+        parts: List[str] = []
+        current: List[str] = []
+        for line in raw.splitlines():
+            if line.strip() == "---":
+                block = "\n".join(current).strip()
+                if block:
+                    parts.append(block)
+                current = []
+                continue
+            current.append(line.rstrip())
+        block = "\n".join(current).strip()
+        if block:
+            parts.append(block)
+        if parts:
+            return parts
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _fallback_mode_label(mode: str) -> str:
+    return {"fixed": "ثابت", "random": "عشوائي"}.get((mode or "").strip().lower(), mode or "fixed")
 
 
 # ==================== تعديل الإعدادات ====================
@@ -493,6 +522,10 @@ async def edit_custom_description(update: Update, context: ContextTypes.DEFAULT_
     extra = getattr(channel, "extra_data", {}) or {}
     custom_desc = (extra.get("custom_description") or "").strip()
     mode = (extra.get("custom_description_mode") or "append").strip().lower()
+    fallback_titles = extra.get("fallback_title_texts") or []
+    fallback_title_mode = (extra.get("fallback_title_mode") or "fixed").strip().lower()
+    fallback_descriptions = extra.get("fallback_description_texts") or []
+    fallback_description_mode = (extra.get("fallback_description_mode") or "fixed").strip().lower()
 
     mode_label = {"append": "إلحاق بعد وصف AI", "prepend": "قبل وصف AI", "template": "قالب {ai}"}.get(mode, mode)
 
@@ -500,7 +533,9 @@ async def edit_custom_description(update: Update, context: ContextTypes.DEFAULT_
         "📄 <b>إعدادات وصف الفيديو</b>\n\n"
         f"✅ وصف مخصص: <b>{'موجود' if custom_desc else 'غير محدد'}</b>\n"
         f"🧩 الدمج: <b>{mode_label}</b>\n\n"
-        "يمكنك حفظ وصف طويل لكل قناة، وسيتم دمجه تلقائياً مع وصف الذكاء الاصطناعي عند النشر."
+        f"🏷️ عناوين بديلة: <b>{len(fallback_titles) if isinstance(fallback_titles, list) else 0}</b> | النمط: <b>{_fallback_mode_label(fallback_title_mode)}</b>\n"
+        f"📝 أوصاف بديلة: <b>{len(fallback_descriptions) if isinstance(fallback_descriptions, list) else 0}</b> | النمط: <b>{_fallback_mode_label(fallback_description_mode)}</b>\n\n"
+        "يمكنك حفظ وصف مخصص دائم، وكذلك عناوين وأوصاف بديلة ثابتة أو عشوائية تُستخدم تلقائياً عندما تكون بيانات المصدر ضعيفة مثل بعض فيديوهات Google Drive."
     )
 
     keyboard = [
@@ -511,6 +546,10 @@ async def edit_custom_description(update: Update, context: ContextTypes.DEFAULT_
         [InlineKeyboardButton("🗑️ حذف الوصف", callback_data=f"delete_custom_desc:{channel_id}")],
         [
             InlineKeyboardButton("📄 إدارة أقسام الوصف", callback_data=f"edit_desc_sections:{channel_id}")
+        ],
+        [
+            InlineKeyboardButton("🏷️ العناوين البديلة", callback_data=f"edit_fallback_titles:{channel_id}"),
+            InlineKeyboardButton("📝 الأوصاف البديلة", callback_data=f"edit_fallback_descs:{channel_id}"),
         ],
         [InlineKeyboardButton("🔙 رجوع", callback_data=f"view_channel:{channel_id}")],
     ]
@@ -559,6 +598,269 @@ async def set_custom_description_receive(update: Update, context: ContextTypes.D
     manager.update_channel(channel_id, extra_data=extra)
     await update.message.reply_text("✅ تم حفظ الوصف المخصص")
     return ConversationHandler.END
+
+
+async def edit_custom_description_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    kb = [
+        [
+            InlineKeyboardButton("إلحاق بعد وصف AI", callback_data=f"set_custom_desc_mode:append:{channel_id}"),
+            InlineKeyboardButton("قبل وصف AI", callback_data=f"set_custom_desc_mode:prepend:{channel_id}"),
+        ],
+        [InlineKeyboardButton("قالب {ai}", callback_data=f"set_custom_desc_mode:template:{channel_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_custom_desc:{channel_id}")],
+    ]
+    await query.edit_message_text("اختر طريقة دمج الوصف المخصص:", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def set_custom_description_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(':')
+    mode = parts[1]
+    channel_id = parts[2]
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.answer("❌ القناة غير موجودة", show_alert=True)
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra["custom_description_mode"] = mode
+    manager.update_channel(channel_id, extra_data=extra)
+    await edit_custom_description(update, context)
+
+
+async def edit_fallback_titles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.edit_message_text("❌ القناة غير موجودة")
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    titles = extra.get("fallback_title_texts") or []
+    mode = (extra.get("fallback_title_mode") or "fixed").strip().lower()
+    preview = "\n".join(f"{idx + 1}. {str(item)[:80]}" for idx, item in enumerate((titles or [])[:3])) or "لا توجد عناوين بديلة محفوظة."
+    text = (
+        "🏷️ <b>إعدادات العناوين البديلة</b>\n\n"
+        f"📦 العدد: <b>{len(titles) if isinstance(titles, list) else 0}</b>\n"
+        f"🎲 النمط: <b>{_fallback_mode_label(mode)}</b>\n\n"
+        "تُستخدم هذه العناوين تلقائياً عندما يكون عنوان المصدر ضعيفاً أو عاماً أو عندما لا يتوفر وصف يساعد على التوليد.\n\n"
+        f"<b>معاينة:</b>\n<code>{html.escape(preview)}</code>"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("✏️ تعيين العناوين", callback_data=f"set_fallback_titles_start:{channel_id}"),
+            InlineKeyboardButton("🎲 تغيير النمط", callback_data=f"edit_fallback_titles_mode:{channel_id}"),
+        ],
+        [InlineKeyboardButton("🗑️ حذف العناوين", callback_data=f"delete_fallback_titles:{channel_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_custom_desc:{channel_id}")],
+    ]
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def set_fallback_titles_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    context.user_data["channel_id"] = channel_id
+    await query.edit_message_text(
+        text=(
+            "🏷️ <b>إرسال العناوين البديلة</b>\n\n"
+            "أرسل عنواناً واحداً في كل سطر.\n"
+            "سيستخدم البوت هذه العناوين عند غياب metadata مفيدة مثل بعض ملفات Google Drive."
+        ),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_fallback_titles:{channel_id}")]]),
+        parse_mode='HTML'
+    )
+    return FALLBACK_TITLES_INPUT
+
+
+async def set_fallback_titles_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = context.user_data.get("channel_id")
+    if not channel_id or not update.message:
+        return ConversationHandler.END
+    titles = _split_multiline_texts(update.message.text or "")
+    if not titles:
+        await update.message.reply_text("❌ أرسل عنواناً واحداً على الأقل، كل عنوان في سطر مستقل.")
+        return FALLBACK_TITLES_INPUT
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await update.message.reply_text("❌ القناة غير موجودة")
+        return ConversationHandler.END
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra["fallback_title_texts"] = titles
+    if not (extra.get("fallback_title_mode") or "").strip():
+        extra["fallback_title_mode"] = "fixed"
+    manager.update_channel(channel_id, extra_data=extra)
+    await update.message.reply_text("✅ تم حفظ العناوين البديلة")
+    return ConversationHandler.END
+
+
+async def edit_fallback_titles_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    kb = [
+        [
+            InlineKeyboardButton("ثابت", callback_data=f"set_fallback_titles_mode:fixed:{channel_id}"),
+            InlineKeyboardButton("عشوائي", callback_data=f"set_fallback_titles_mode:random:{channel_id}"),
+        ],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_fallback_titles:{channel_id}")],
+    ]
+    await query.edit_message_text("اختر طريقة استخدام العناوين البديلة:", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def set_fallback_titles_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, mode, channel_id = query.data.split(':', 2)
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.answer("❌ القناة غير موجودة", show_alert=True)
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra["fallback_title_mode"] = mode
+    manager.update_channel(channel_id, extra_data=extra)
+    await edit_fallback_titles(update, context)
+
+
+async def delete_fallback_titles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.answer("❌ القناة غير موجودة", show_alert=True)
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra.pop("fallback_title_texts", None)
+    extra.pop("fallback_title_mode", None)
+    manager.update_channel(channel_id, extra_data=extra)
+    await edit_fallback_titles(update, context)
+
+
+async def edit_fallback_descriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.edit_message_text("❌ القناة غير موجودة")
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    descriptions = extra.get("fallback_description_texts") or []
+    mode = (extra.get("fallback_description_mode") or "fixed").strip().lower()
+    preview = "\n---\n".join(str(item)[:160] for item in (descriptions or [])[:2]) or "لا توجد أوصاف بديلة محفوظة."
+    text = (
+        "📝 <b>إعدادات الأوصاف البديلة</b>\n\n"
+        f"📦 العدد: <b>{len(descriptions) if isinstance(descriptions, list) else 0}</b>\n"
+        f"🎲 النمط: <b>{_fallback_mode_label(mode)}</b>\n\n"
+        "تُستخدم هذه الأوصاف تلقائياً عندما تكون بيانات المصدر ضعيفة أو مفقودة.\n"
+        "يمكنك إرسال أكثر من وصف، وسيفصل بينها السطر <code>---</code>.\n\n"
+        f"<b>معاينة:</b>\n<code>{html.escape(preview)}</code>"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("✏️ تعيين الأوصاف", callback_data=f"set_fallback_descs_start:{channel_id}"),
+            InlineKeyboardButton("🎲 تغيير النمط", callback_data=f"edit_fallback_descs_mode:{channel_id}"),
+        ],
+        [InlineKeyboardButton("🗑️ حذف الأوصاف", callback_data=f"delete_fallback_descs:{channel_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_custom_desc:{channel_id}")],
+    ]
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def set_fallback_descriptions_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    context.user_data["channel_id"] = channel_id
+    await query.edit_message_text(
+        text=(
+            "📝 <b>إرسال الأوصاف البديلة</b>\n\n"
+            "أرسل وصفاً واحداً أو عدة أوصاف.\n"
+            "لفصل الأوصاف عن بعضها استخدم سطراً يحتوي فقط على <code>---</code>."
+        ),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_fallback_descs:{channel_id}")]]),
+        parse_mode='HTML'
+    )
+    return FALLBACK_DESCRIPTIONS_INPUT
+
+
+async def set_fallback_descriptions_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    channel_id = context.user_data.get("channel_id")
+    if not channel_id or not update.message:
+        return ConversationHandler.END
+    descriptions = _split_multiline_texts(update.message.text or "", allow_blocks=True)
+    if not descriptions:
+        await update.message.reply_text("❌ أرسل وصفاً واحداً على الأقل.")
+        return FALLBACK_DESCRIPTIONS_INPUT
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await update.message.reply_text("❌ القناة غير موجودة")
+        return ConversationHandler.END
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra["fallback_description_texts"] = descriptions
+    if not (extra.get("fallback_description_mode") or "").strip():
+        extra["fallback_description_mode"] = "fixed"
+    manager.update_channel(channel_id, extra_data=extra)
+    await update.message.reply_text("✅ تم حفظ الأوصاف البديلة")
+    return ConversationHandler.END
+
+
+async def edit_fallback_descriptions_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    kb = [
+        [
+            InlineKeyboardButton("ثابت", callback_data=f"set_fallback_descs_mode:fixed:{channel_id}"),
+            InlineKeyboardButton("عشوائي", callback_data=f"set_fallback_descs_mode:random:{channel_id}"),
+        ],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"edit_fallback_descs:{channel_id}")],
+    ]
+    await query.edit_message_text("اختر طريقة استخدام الأوصاف البديلة:", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def set_fallback_descriptions_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, mode, channel_id = query.data.split(':', 2)
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.answer("❌ القناة غير موجودة", show_alert=True)
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra["fallback_description_mode"] = mode
+    manager.update_channel(channel_id, extra_data=extra)
+    await edit_fallback_descriptions(update, context)
+
+
+async def delete_fallback_descriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    channel_id = query.data.split(':')[1]
+    manager = ChannelManager()
+    channel = manager.get_channel(channel_id)
+    if not channel:
+        await query.answer("❌ القناة غير موجودة", show_alert=True)
+        return
+    extra = getattr(channel, "extra_data", {}) or {}
+    extra.pop("fallback_description_texts", None)
+    extra.pop("fallback_description_mode", None)
+    manager.update_channel(channel_id, extra_data=extra)
+    await edit_fallback_descriptions(update, context)
 
 
 async def edit_description_sections(update: Update, context: ContextTypes.DEFAULT_TYPE):
