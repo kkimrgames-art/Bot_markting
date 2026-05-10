@@ -1,6 +1,6 @@
-"""
-معالجات نظام الجلب التلقائي للمودات - واجهة تيليجرام
-نظام إدارة المصادر والجدولة والحالة عبر بوت تيليجرام
+﻿"""
+ظ…ط¹ط§ظ„ط¬ط§طھ ظ†ط¸ط§ظ… ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ ظ„ظ„ظ…ظˆط¯ط§طھ - ظˆط§ط¬ظ‡ط© طھظٹظ„ظٹط¬ط±ط§ظ…
+ظ†ط¸ط§ظ… ط¥ط¯ط§ط±ط© ط§ظ„ظ…طµط§ط¯ط± ظˆط§ظ„ط¬ط¯ظˆظ„ط© ظˆط§ظ„ط­ط§ظ„ط© ط¹ط¨ط± ط¨ظˆطھ طھظٹظ„ظٹط¬ط±ط§ظ…
 """
 import os
 import html
@@ -10,6 +10,7 @@ import os
 import re
 import time
 import json
+import shutil
 from typing import Optional
 import uuid
 from io import BytesIO
@@ -55,7 +56,7 @@ async def _open_api_keys_menu_from_auto_mod(update: Update, context: ContextType
 
 logger = logging.getLogger(__name__)
 
-# ==================== حالات المحادثة ====================
+# ==================== ط­ط§ظ„ط§طھ ط§ظ„ظ…ط­ط§ط¯ط«ط© ====================
 (
     AM_MENU,
     AM_SOURCES,
@@ -121,19 +122,19 @@ def _am_parse_datetime_utc(value: Any) -> Optional[datetime]:
 def _am_format_remaining(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
     if total_seconds <= 0:
-        return "الآن"
+        return "ط§ظ„ط¢ظ†"
     days, rem = divmod(total_seconds, 86400)
     hours, rem = divmod(rem, 3600)
     minutes, _ = divmod(rem, 60)
     if days > 0:
         if hours > 0:
-            return f"{days}ي {hours}س"
-        return f"{days}ي"
+            return f"{days}ظٹ {hours}ط³"
+        return f"{days}ظٹ"
     if hours > 0:
         if minutes > 0:
-            return f"{hours}س {minutes}د"
-        return f"{hours}س"
-    return f"{minutes}د"
+            return f"{hours}ط³ {minutes}ط¯"
+        return f"{hours}ط³"
+    return f"{minutes}ط¯"
 
 
 def _get_db() -> AutoModDB:
@@ -146,10 +147,15 @@ TAIL_TRIM_OPTIONS = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
 VIDEO_EFFECT_DURATION_OPTIONS = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
 FACECAM_ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv"}
 FACECAM_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+OVERLAY_IMAGE_EXTENSIONS = set(FACECAM_IMAGE_EXTENSIONS)
 try:
     FACECAM_UPLOAD_FILTER = filters.VIDEO | filters.Document.VIDEO | filters.PHOTO | filters.Document.IMAGE
 except Exception:
     FACECAM_UPLOAD_FILTER = filters.VIDEO | filters.Document.ALL | filters.PHOTO
+try:
+    OVERLAY_IMAGE_UPLOAD_FILTER = filters.PHOTO | filters.Document.IMAGE
+except Exception:
+    OVERLAY_IMAGE_UPLOAD_FILTER = filters.PHOTO | filters.Document.ALL
 
 
 def _seconds_label(value: Any) -> str:
@@ -161,22 +167,22 @@ def _seconds_label(value: Any) -> str:
 
 def _position_label(position: str) -> str:
     return {
-        "top": "أعلى",
-        "center": "المنتصف",
-        "bottom": "أسفل",
-    }.get((position or "top").strip().lower(), "أعلى")
+        "top": "ط£ط¹ظ„ظ‰",
+        "center": "ط§ظ„ظ…ظ†طھطµظپ",
+        "bottom": "ط£ط³ظپظ„",
+    }.get((position or "top").strip().lower(), "ط£ط¹ظ„ظ‰")
 
 
 def _timing_label(timing: str) -> str:
     return {
-        "start": "البداية",
-        "end": "النهاية",
-        "full": "كامل الفيديو",
-    }.get((timing or "full").strip().lower(), "كامل الفيديو")
+        "start": "ط§ظ„ط¨ط¯ط§ظٹط©",
+        "end": "ط§ظ„ظ†ظ‡ط§ظٹط©",
+        "full": "ظƒط§ظ…ظ„ ط§ظ„ظپظٹط¯ظٹظˆ",
+    }.get((timing or "full").strip().lower(), "ظƒط§ظ…ظ„ ط§ظ„ظپظٹط¯ظٹظˆ")
 
 
 def _mode_label(mode: str) -> str:
-    return "عشوائي" if (mode or "fixed").strip().lower() == "random" else "ثابت"
+    return "ط¹ط´ظˆط§ط¦ظٹ" if (mode or "fixed").strip().lower() == "random" else "ط«ط§ط¨طھ"
 
 
 def _fetch_sources(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -207,7 +213,7 @@ def _fetch_sources(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _fetch_sources_status(settings: Dict[str, Any]) -> str:
     items = _fetch_sources(settings)
     if not items:
-        return "افتراضي (رابط واحد)"
+        return "ط§ظپطھط±ط§ط¶ظٹ (ط±ط§ط¨ط· ظˆط§ط­ط¯)"
     enabled = sum(1 for x in items if bool((x or {}).get("enabled", True)))
     return f"{enabled}/{len(items)}"
 
@@ -223,7 +229,7 @@ def _fetch_sources_for_ui(src: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     return [{
         "url": legacy_url,
-        "name": "الرابط الافتراضي",
+        "name": "ط§ظ„ط±ط§ط¨ط· ط§ظ„ط§ظپطھط±ط§ط¶ظٹ",
         "platform": str((src or {}).get("platform") or "").strip().lower() or None,
         "enabled": True,
     }]
@@ -232,13 +238,13 @@ def _fetch_sources_for_ui(src: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _fetch_sources_status_for_ui(src: Dict[str, Any]) -> str:
     items = _fetch_sources_for_ui(src)
     if not items:
-        return "افتراضي (رابط واحد)"
+        return "ط§ظپطھط±ط§ط¶ظٹ (ط±ط§ط¨ط· ظˆط§ط­ط¯)"
     enabled = sum(1 for x in items if bool((x or {}).get("enabled", True)))
     return f"{enabled}/{len(items)}"
 
 
 def _placement_label(placement: str) -> str:
-    return "قبل الوصف" if (placement or "append").strip().lower() == "prepend" else "بعد الوصف"
+    return "ظ‚ط¨ظ„ ط§ظ„ظˆطµظپ" if (placement or "append").strip().lower() == "prepend" else "ط¨ط¹ط¯ ط§ظ„ظˆطµظپ"
 
 
 def _split_overlay_texts(raw_text: str) -> List[str]:
@@ -313,25 +319,25 @@ def _resolved_facecam_config(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def _facecam_position_label(position: str) -> str:
     return {
-        "top_center": "أعلى الفيديو",
-        "bottom_center": "أسفل الفيديو",
-        "top_right": "أعلى اليمين",
-        "top_left": "أعلى اليسار",
-        "bottom_right": "أسفل اليمين",
-        "bottom_left": "أسفل اليسار",
-        "center": "وسط الفيديو",
-    }.get((position or "top_center").strip().lower(), "أعلى الفيديو")
+        "top_center": "ط£ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ",
+        "bottom_center": "ط£ط³ظپظ„ ط§ظ„ظپظٹط¯ظٹظˆ",
+        "top_right": "ط£ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†",
+        "top_left": "ط£ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±",
+        "bottom_right": "ط£ط³ظپظ„ ط§ظ„ظٹظ…ظٹظ†",
+        "bottom_left": "ط£ط³ظپظ„ ط§ظ„ظٹط³ط§ط±",
+        "center": "ظˆط³ط· ط§ظ„ظپظٹط¯ظٹظˆ",
+    }.get((position or "top_center").strip().lower(), "ط£ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ")
 
 
 def _facecam_layout_label(settings: Dict[str, Any]) -> str:
     resolved = _resolved_facecam_config(settings)
     return {
-        "top_center": "دائري أعلى الفيديو",
-        "bottom_center": "دائري أسفل الفيديو",
-        "small_circle_top_left": "دائرة صغيرة أعلى اليسار",
-        "small_circle_top_right": "دائرة صغيرة أعلى اليمين",
-        "small_circle_bottom_right": "دائرة صغيرة أسفل اليمين",
-        "small_circle_bottom_left": "دائرة صغيرة أسفل اليسار",
+        "top_center": "ط¯ط§ط¦ط±ظٹ ط£ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ",
+        "bottom_center": "ط¯ط§ط¦ط±ظٹ ط£ط³ظپظ„ ط§ظ„ظپظٹط¯ظٹظˆ",
+        "small_circle_top_left": "ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±",
+        "small_circle_top_right": "ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†",
+        "small_circle_bottom_right": "ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط³ظپظ„ ط§ظ„ظٹظ…ظٹظ†",
+        "small_circle_bottom_left": "ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط³ظپظ„ ط§ظ„ظٹط³ط§ط±",
     }.get(resolved.get("layout"), _facecam_position_label(resolved.get("position")))
 
 
@@ -352,15 +358,15 @@ def _facecam_status(settings: Dict[str, Any]) -> str:
     clips = _facecam_clips(settings)
     enabled_count = sum(1 for clip in clips if clip.get("enabled"))
     if not facecam.get("enabled"):
-        return "❌ معطل"
-    return f"✅ {_facecam_layout_label(settings)} / {enabled_count} مقطع"
+        return "â‌Œ ظ…ط¹ط·ظ„"
+    return f"âœ… {_facecam_layout_label(settings)} / {enabled_count} ظ…ظ‚ط·ط¹"
 
 
 def _truncate_facecam_clip_name(name: str, limit: int = 26) -> str:
     clean = str(name or "facecam").strip()
     if len(clean) <= limit:
         return clean
-    return clean[: limit - 1] + "…"
+    return clean[: limit - 1] + "â€¦"
 
 
 def _facecam_details(settings: Dict[str, Any]) -> str:
@@ -369,18 +375,18 @@ def _facecam_details(settings: Dict[str, Any]) -> str:
     clips = _facecam_clips(settings)
     enabled_count = sum(1 for clip in clips if clip.get("enabled"))
     lines = [
-        f"الحالة: {'✅ مفعل' if facecam.get('enabled') else '❌ معطل'}",
-        f"الوضعية: <code>{html.escape(_facecam_layout_label(settings))}</code>",
-        f"الموضع: <code>{html.escape(_facecam_position_label(resolved.get('position')))}</code>",
-        f"الشكل: <code>{html.escape(str(resolved.get('shape') or 'circle'))}</code>",
-        f"الحجم: <code>{resolved.get('scale', 0.28)}</code>",
-        f"المقاطع: <code>{enabled_count}/{len(clips)}</code> مفعّل",
+        f"ط§ظ„ط­ط§ظ„ط©: {'âœ… ظ…ظپط¹ظ„' if facecam.get('enabled') else 'â‌Œ ظ…ط¹ط·ظ„'}",
+        f"ط§ظ„ظˆط¶ط¹ظٹط©: <code>{html.escape(_facecam_layout_label(settings))}</code>",
+        f"ط§ظ„ظ…ظˆط¶ط¹: <code>{html.escape(_facecam_position_label(resolved.get('position')))}</code>",
+        f"ط§ظ„ط´ظƒظ„: <code>{html.escape(str(resolved.get('shape') or 'circle'))}</code>",
+        f"ط§ظ„ط­ط¬ظ…: <code>{resolved.get('scale', 0.28)}</code>",
+        f"ط§ظ„ظ…ظ‚ط§ط·ط¹: <code>{enabled_count}/{len(clips)}</code> ظ…ظپط¹ظ‘ظ„",
     ]
     for idx, clip in enumerate(clips[:5], start=1):
-        status = "✅" if clip.get("enabled") else "⏸"
+        status = "âœ…" if clip.get("enabled") else "âڈ¸"
         lines.append(f"{idx}. {status} <code>{html.escape(_truncate_facecam_clip_name(clip.get('name')))}</code>")
     if len(clips) > 5:
-        lines.append(f"… وباقي <code>{len(clips) - 5}</code> مقاطع")
+        lines.append(f"â€¦ ظˆط¨ط§ظ‚ظٹ <code>{len(clips) - 5}</code> ظ…ظ‚ط§ط·ط¹")
     return "\n".join(lines)
 
 
@@ -390,11 +396,36 @@ def _facecam_storage_paths(source_id: str, clip_id: str, extension: str) -> tupl
     return rel_path, abs_path
 
 
+def _overlay_image_storage_paths(source_id: str, image_id: str, extension: str) -> tuple[str, str]:
+    rel_path = os.path.join(".data", "source_overlays", source_id, f"{image_id}{extension}").replace("\\", "/")
+    abs_path = _project_local_path(*rel_path.split("/"))
+    return rel_path, abs_path
+
+
 def _facecam_document_is_image(document: Any) -> bool:
     mime_type = str(getattr(document, "mime_type", "") or "").strip().lower()
     file_name = str(getattr(document, "file_name", "") or "")
     extension = os.path.splitext(file_name)[1].lower()
     return mime_type.startswith("image/") or extension in FACECAM_IMAGE_EXTENSIONS
+
+
+def _overlay_document_is_image(document: Any) -> bool:
+    mime_type = str(getattr(document, "mime_type", "") or "").strip().lower()
+    file_name = str(getattr(document, "file_name", "") or "")
+    extension = os.path.splitext(file_name)[1].lower()
+    return mime_type.startswith("image/") or extension in OVERLAY_IMAGE_EXTENSIONS
+
+
+def _delete_overlay_image_file(raw_path: str) -> None:
+    raw_path = str(raw_path or "").strip()
+    if not raw_path:
+        return
+    abs_path = _project_local_path(*raw_path.replace("\\", "/").split("/")) if not os.path.isabs(raw_path) else raw_path
+    try:
+        if os.path.isfile(abs_path):
+            os.remove(abs_path)
+    except Exception:
+        pass
 
 
 def _delete_facecam_clip_file(clip: Dict[str, Any]) -> None:
@@ -418,7 +449,10 @@ def _delete_facecam_clip_file(clip: Dict[str, Any]) -> None:
 def _cleanup_source_facecam_storage(source: Optional[Dict[str, Any]]) -> None:
     source = source or {}
     source_id = str(source.get("id") or "").strip()
-    facecam_cfg = normalize_source_settings(source.get("settings")).get("facecam") or {}
+    normalized_settings = normalize_source_settings(source.get("settings"))
+    facecam_cfg = normalized_settings.get("facecam") or {}
+    overlay_cfg = normalized_settings.get("shorts_overlay") or {}
+    overlay_image_path = str(overlay_cfg.get("image_path") or "").strip()
     for clip in list(facecam_cfg.get("clips") or []):
         clip_id = str(clip.get("id") or "").strip()
         if clip_id:
@@ -440,6 +474,8 @@ def _cleanup_source_facecam_storage(source: Optional[Dict[str, Any]]) -> None:
             shutil.rmtree(source_dir, ignore_errors=True)
     except Exception:
         pass
+    if overlay_image_path:
+        _delete_overlay_image_file(overlay_image_path)
 
 
 def _set_draft_facecam_settings(context: ContextTypes.DEFAULT_TYPE, facecam_update: Dict[str, Any]) -> Dict[str, Any]:
@@ -451,7 +487,7 @@ def _set_draft_facecam_settings(context: ContextTypes.DEFAULT_TYPE, facecam_upda
 async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_TYPE, source_id: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     message = update.message
     if not message:
-        return None, "❌ لم أستلم رسالة صالحة للرفع."
+        return None, "â‌Œ ظ„ظ… ط£ط³طھظ„ظ… ط±ط³ط§ظ„ط© طµط§ظ„ط­ط© ظ„ظ„ط±ظپط¹."
 
     telegram_file = None
     file_name = "facecam.mp4"
@@ -467,7 +503,7 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
         file_name = telegram_file.file_name or file_name
         treat_as_image = _facecam_document_is_image(telegram_file)
     else:
-        return None, "❌ أرسل فيديو أو صورة صالحة."
+        return None, "â‌Œ ط£ط±ط³ظ„ ظپظٹط¯ظٹظˆ ط£ظˆ طµظˆط±ط© طµط§ظ„ط­ط©."
 
     if message.video:
         file_name = getattr(message.video, "file_name", None) or file_name
@@ -480,20 +516,20 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
 
     file_size = int(getattr(telegram_file, "file_size", 0) or 0)
     if (not cfg or not getattr(cfg, "LOCAL_BOT_API_URL", None)) and file_size > 20 * 1024 * 1024:
-        return None, "❌ الملف كبير جداً لرفع البوت الحالي. اختر ملفاً أصغر من 20MB."
+        return None, "â‌Œ ط§ظ„ظ…ظ„ظپ ظƒط¨ظٹط± ط¬ط¯ط§ظ‹ ظ„ط±ظپط¹ ط§ظ„ط¨ظˆطھ ط§ظ„ط­ط§ظ„ظٹ. ط§ط®طھط± ظ…ظ„ظپط§ظ‹ ط£طµط؛ط± ظ…ظ† 20MB."
 
     clip_id = str(uuid.uuid4())
     extension = os.path.splitext(file_name)[1].lower()
     if treat_as_image:
         extension = extension or ".jpg"
         if extension not in FACECAM_IMAGE_EXTENSIONS:
-            return None, "❌ صيغة الصورة غير مدعومة. استخدم jpg أو jpeg أو png أو webp أو bmp."
+            return None, "â‌Œ طµظٹط؛ط© ط§ظ„طµظˆط±ط© ط؛ظٹط± ظ…ط¯ط¹ظˆظ…ط©. ط§ط³طھط®ط¯ظ… jpg ط£ظˆ jpeg ط£ظˆ png ط£ظˆ webp ط£ظˆ bmp."
         temp_rel_path, temp_abs_path = _facecam_storage_paths(source_id, f"{clip_id}_src", extension)
         rel_path, abs_path = _facecam_storage_paths(source_id, clip_id, ".mp4")
     else:
         extension = extension or ".mp4"
         if extension not in FACECAM_ALLOWED_EXTENSIONS:
-            return None, "❌ صيغة غير مدعومة. استخدم mp4 أو mov أو webm أو mkv، أو أرسل صورة مدعومة."
+            return None, "â‌Œ طµظٹط؛ط© ط؛ظٹط± ظ…ط¯ط¹ظˆظ…ط©. ط§ط³طھط®ط¯ظ… mp4 ط£ظˆ mov ط£ظˆ webm ط£ظˆ mkvطŒ ط£ظˆ ط£ط±ط³ظ„ طµظˆط±ط© ظ…ط¯ط¹ظˆظ…ط©."
         temp_rel_path, temp_abs_path = _facecam_storage_paths(source_id, clip_id, extension)
         rel_path, abs_path = temp_rel_path, temp_abs_path
 
@@ -503,7 +539,7 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
         tg_file = await context.bot.get_file(telegram_file.file_id)
         await tg_file.download_to_drive(temp_abs_path)
     except Exception as exc:
-        return None, f"❌ فشل حفظ المقطع: {exc}"
+        return None, f"â‌Œ ظپط´ظ„ ط­ظپط¸ ط§ظ„ظ…ظ‚ط·ط¹: {exc}"
 
     if treat_as_image:
         if not convert_still_image_to_loop_video(temp_abs_path, abs_path):
@@ -512,7 +548,7 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
                     os.remove(temp_abs_path)
             except Exception:
                 pass
-            return None, "❌ تعذر تحويل الصورة إلى فيديو متوافق مع Facecam."
+            return None, "â‌Œ طھط¹ط°ط± طھط­ظˆظٹظ„ ط§ظ„طµظˆط±ط© ط¥ظ„ظ‰ ظپظٹط¯ظٹظˆ ظ…طھظˆط§ظپظ‚ ظ…ط¹ Facecam."
         try:
             if os.path.isfile(temp_abs_path):
                 os.remove(temp_abs_path)
@@ -534,54 +570,93 @@ async def _download_facecam_clip(update: Update, context: ContextTypes.DEFAULT_T
     }, None
 
 
+async def _download_overlay_image(update: Update, context: ContextTypes.DEFAULT_TYPE, source_id: str) -> tuple[Optional[str], Optional[str]]:
+    message = update.message
+    if not message:
+        return None, "❌ لم أستلم رسالة صالحة للرفع."
+
+    telegram_file = None
+    file_name = "overlay.png"
+    if message.photo:
+        telegram_file = message.photo[-1]
+        file_name = "overlay.jpg"
+    elif message.document and _overlay_document_is_image(message.document):
+        telegram_file = message.document
+        file_name = telegram_file.file_name or file_name
+    else:
+        return None, "❌ أرسل صورة فقط (JPG/PNG/WEBP/BMP)."
+
+    extension = os.path.splitext(file_name)[1].lower() or ".png"
+    if extension not in OVERLAY_IMAGE_EXTENSIONS:
+        return None, "❌ صيغة الصورة غير مدعومة. استخدم jpg أو jpeg أو png أو webp أو bmp."
+
+    image_id = str(uuid.uuid4())
+    rel_path, abs_path = _overlay_image_storage_paths(source_id, image_id, extension)
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    try:
+        tg_file = await context.bot.get_file(telegram_file.file_id)
+        await tg_file.download_to_drive(abs_path)
+    except Exception as exc:
+        return None, f"❌ فشل حفظ الصورة: {exc}"
+
+    return rel_path, None
+
+
 def _short_overlay_status(settings: Dict[str, Any]) -> str:
     overlay = (settings or {}).get("shorts_overlay") or {}
     texts = overlay.get("texts") or []
     if not texts:
-        return "❌ بلا نصوص"
+        return "â‌Œ ط¨ظ„ط§ ظ†طµظˆطµ"
     if not overlay.get("enabled"):
-        return f"⏸ {len(texts)} نص"
-    return f"✅ {len(texts)} نص / {_mode_label(overlay.get('selection_mode'))}"
+        return f"âڈ¸ {len(texts)} ظ†طµ"
+    return f"âœ… {len(texts)} ظ†طµ / {_mode_label(overlay.get('selection_mode'))}"
 
 
 def _short_desc_status(settings: Dict[str, Any]) -> str:
     desc = (settings or {}).get("extra_description") or {}
     texts = desc.get("texts") or []
     if not texts:
-        return "❌ بلا نصوص"
+        return "â‌Œ ط¨ظ„ط§ ظ†طµظˆطµ"
     if not desc.get("enabled"):
-        return f"⏸ {len(texts)} نص"
-    return f"✅ {len(texts)} نص / {_mode_label(desc.get('selection_mode'))}"
+        return f"âڈ¸ {len(texts)} ظ†طµ"
+    return f"âœ… {len(texts)} ظ†طµ / {_mode_label(desc.get('selection_mode'))}"
 
 
 def _overlay_details(settings: Dict[str, Any]) -> str:
     overlay = (settings or {}).get("shorts_overlay") or {}
     texts = overlay.get("texts") or []
+    image_path = str(overlay.get("image_path") or "").strip()
+    if image_path:
+        abs_image_path = _project_local_path(*image_path.replace("\\", "/").split("/")) if not os.path.isabs(image_path) else image_path
+        image_status = "✅ مرفوعة" if os.path.isfile(abs_image_path) else "⚠️ المسار غير متاح"
+    else:
+        image_status = "❌ بدون صورة"
     return (
-        f"الحالة: {'✅ مفعل' if overlay.get('enabled') else '❌ معطل'}\n"
-        f"عدد النصوص: <code>{len(texts)}</code>\n"
-        f"الاختيار: <code>{html.escape(_mode_label(overlay.get('selection_mode')))}</code>\n"
-        f"التوقيت: <code>{html.escape(_timing_label(overlay.get('timing')))}</code>\n"
-        f"المدة: <code>{overlay.get('duration', 2.0)}</code> ثانية\n"
-        f"الموضع: <code>{html.escape(_position_label(overlay.get('screen_position')))}</code>\n"
-        f"أنيميشن الظهور: <code>{html.escape(_overlay_animation_status(settings, 'intro'))}</code>\n"
-        f"أنيميشن الاختفاء: <code>{html.escape(_overlay_animation_status(settings, 'outro'))}</code>"
+        f"ط§ظ„ط­ط§ظ„ط©: {'âœ… ظ…ظپط¹ظ„' if overlay.get('enabled') else 'â‌Œ ظ…ط¹ط·ظ„'}\n"
+        f"ط¹ط¯ط¯ ط§ظ„ظ†طµظˆطµ: <code>{len(texts)}</code>\n"
+        f"الصورة: <code>{html.escape(image_status)}</code>\n"
+        f"ط§ظ„ط§ط®طھظٹط§ط±: <code>{html.escape(_mode_label(overlay.get('selection_mode')))}</code>\n"
+        f"ط§ظ„طھظˆظ‚ظٹطھ: <code>{html.escape(_timing_label(overlay.get('timing')))}</code>\n"
+        f"ط§ظ„ظ…ط¯ط©: <code>{overlay.get('duration', 2.0)}</code> ط«ط§ظ†ظٹط©\n"
+        f"ط§ظ„ظ…ظˆط¶ط¹: <code>{html.escape(_position_label(overlay.get('screen_position')))}</code>\n"
+        f"ط£ظ†ظٹظ…ظٹط´ظ† ط§ظ„ط¸ظ‡ظˆط±: <code>{html.escape(_overlay_animation_status(settings, 'intro'))}</code>\n"
+        f"ط£ظ†ظٹظ…ظٹط´ظ† ط§ظ„ط§ط®طھظپط§ط،: <code>{html.escape(_overlay_animation_status(settings, 'outro'))}</code>"
     )
-
 
 def _description_details(settings: Dict[str, Any]) -> str:
     desc = (settings or {}).get("extra_description") or {}
     texts = desc.get("texts") or []
     return (
-        f"الحالة: {'✅ مفعل' if desc.get('enabled') else '❌ معطل'}\n"
-        f"عدد النصوص: <code>{len(texts)}</code>\n"
-        f"الاختيار: <code>{html.escape(_mode_label(desc.get('selection_mode')))}</code>\n"
-        f"الموضع داخل الوصف: <code>{html.escape(_placement_label(desc.get('placement')))}</code>"
+        f"ط§ظ„ط­ط§ظ„ط©: {'âœ… ظ…ظپط¹ظ„' if desc.get('enabled') else 'â‌Œ ظ…ط¹ط·ظ„'}\n"
+        f"ط¹ط¯ط¯ ط§ظ„ظ†طµظˆطµ: <code>{len(texts)}</code>\n"
+        f"ط§ظ„ط§ط®طھظٹط§ط±: <code>{html.escape(_mode_label(desc.get('selection_mode')))}</code>\n"
+        f"ط§ظ„ظ…ظˆط¶ط¹ ط¯ط§ط®ظ„ ط§ظ„ظˆطµظپ: <code>{html.escape(_placement_label(desc.get('placement')))}</code>"
     )
 
 
 def _raw_review_status(settings: Dict[str, Any]) -> str:
-    return "✅ مراجعة خام أولاً" if (settings or {}).get("require_raw_review") else "❌ مباشر"
+    return "âœ… ظ…ط±ط§ط¬ط¹ط© ط®ط§ظ… ط£ظˆظ„ط§ظ‹" if (settings or {}).get("require_raw_review") else "â‌Œ ظ…ط¨ط§ط´ط±"
 
 
 def _tail_trim_status(settings: Dict[str, Any]) -> str:
@@ -592,20 +667,20 @@ def _tail_trim_status(settings: Dict[str, Any]) -> str:
     except Exception:
         seconds = 0.0
     if trim_cfg.get("enabled") and seconds > 0:
-        return f"✅ {_seconds_label(seconds)} ثانية من النهاية"
-    return "❌ بدون قص"
+        return f"âœ… {_seconds_label(seconds)} ط«ط§ظ†ظٹط© ظ…ظ† ط§ظ„ظ†ظ‡ط§ظٹط©"
+    return "â‌Œ ط¨ط¯ظˆظ† ظ‚طµ"
 
 
 def _video_effect_target_label(target: str) -> str:
-    return "البداية" if (target or "intro").strip().lower() == "intro" else "النهاية"
+    return "ط§ظ„ط¨ط¯ط§ظٹط©" if (target or "intro").strip().lower() == "intro" else "ط§ظ„ظ†ظ‡ط§ظٹط©"
 
 
 def _video_effect_type_label(effect_type: str) -> str:
     return {
-        "blur": "Blur عادي",
+        "blur": "Blur ط¹ط§ط¯ظٹ",
         "black_blur": "Black Blur",
-        "none": "بدون تأثير",
-    }.get((effect_type or "none").strip().lower(), "بدون تأثير")
+        "none": "ط¨ط¯ظˆظ† طھط£ط«ظٹط±",
+    }.get((effect_type or "none").strip().lower(), "ط¨ط¯ظˆظ† طھط£ط«ظٹط±")
 
 
 def _build_video_effect_config(effect_type: str, duration: float = 0.0) -> Dict[str, Any]:
@@ -623,15 +698,15 @@ def _build_video_effect_config(effect_type: str, duration: float = 0.0) -> Dict[
 
 
 def _overlay_animation_target_label(target: str) -> str:
-    return "الظهور" if (target or "intro").strip().lower() == "intro" else "الاختفاء"
+    return "ط§ظ„ط¸ظ‡ظˆط±" if (target or "intro").strip().lower() == "intro" else "ط§ظ„ط§ط®طھظپط§ط،"
 
 
 def _overlay_animation_type_label(animation_type: str) -> str:
     return {
         "fade": "Fade",
         "blur": "Blur",
-        "none": "بدون أنيميشن",
-    }.get((animation_type or "none").strip().lower(), "بدون أنيميشن")
+        "none": "ط¨ط¯ظˆظ† ط£ظ†ظٹظ…ظٹط´ظ†",
+    }.get((animation_type or "none").strip().lower(), "ط¨ط¯ظˆظ† ط£ظ†ظٹظ…ظٹط´ظ†")
 
 
 def _build_overlay_animation_config(animation_type: str, duration: float = 0.0) -> Dict[str, Any]:
@@ -658,8 +733,8 @@ def _overlay_animation_status(settings: Dict[str, Any], target: str) -> str:
     except Exception:
         duration = 0.0
     if anim_cfg.get("enabled") and anim_type in {"fade", "blur"} and duration > 0:
-        return f"✅ {_overlay_animation_type_label(anim_type)} / {_seconds_label(duration)}ث"
-    return "❌ بدون أنيميشن"
+        return f"âœ… {_overlay_animation_type_label(anim_type)} / {_seconds_label(duration)}ط«"
+    return "â‌Œ ط¨ط¯ظˆظ† ط£ظ†ظٹظ…ظٹط´ظ†"
 
 
 def _video_effect_status(settings: Dict[str, Any], target: str) -> str:
@@ -672,30 +747,30 @@ def _video_effect_status(settings: Dict[str, Any], target: str) -> str:
     except Exception:
         duration = 0.0
     if effect_cfg.get("enabled") and effect_type in {"blur", "black_blur"} and duration > 0:
-        return f"✅ {_video_effect_type_label(effect_type)} / {_seconds_label(duration)}ث"
-    return "❌ بدون تأثير"
+        return f"âœ… {_video_effect_type_label(effect_type)} / {_seconds_label(duration)}ط«"
+    return "â‌Œ ط¨ط¯ظˆظ† طھط£ط«ظٹط±"
 
 
 def _source_privacy_status(settings: Dict[str, Any]) -> str:
     privacy = str((settings or {}).get("privacy") or "").strip().lower()
     if privacy == "public":
-        return "🌍 علني"
+        return "ًںŒچ ط¹ظ„ظ†ظٹ"
     if privacy == "private":
-        return "🔒 خاص"
+        return "ًں”’ ط®ط§طµ"
     if privacy == "unlisted":
-        return "🔗 غير مدرج"
-    return "⚙️ حسب القناة"
+        return "ًں”— ط؛ظٹط± ظ…ط¯ط±ط¬"
+    return "âڑ™ï¸ڈ ط­ط³ط¨ ط§ظ„ظ‚ظ†ط§ط©"
 
 
 def _source_shorts_only_status(settings: Dict[str, Any]) -> str:
     if "shorts_only" not in (settings or {}):
-        return "⚙️ حسب الكشف التلقائي"
-    return "✅ شورتس فقط" if bool((settings or {}).get("shorts_only")) else "❌ كلا النوعين"
+        return "âڑ™ï¸ڈ ط­ط³ط¨ ط§ظ„ظƒط´ظپ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ"
+    return "âœ… ط´ظˆط±طھط³ ظپظ‚ط·" if bool((settings or {}).get("shorts_only")) else "â‌Œ ظƒظ„ط§ ط§ظ„ظ†ظˆط¹ظٹظ†"
 
 def _source_hflip_status(settings: Dict[str, Any]) -> str:
     if "hflip" not in (settings or {}):
-        return "⚙️ حسب الإعدادات العامة"
-    return "✅ مفعل" if bool((settings or {}).get("hflip")) else "❌ معطل"
+        return "âڑ™ï¸ڈ ط­ط³ط¨ ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ط¹ط§ظ…ط©"
+    return "âœ… ظ…ظپط¹ظ„" if bool((settings or {}).get("hflip")) else "â‌Œ ظ…ط¹ط·ظ„"
 
 
 def _set_draft_source_hflip(context: ContextTypes.DEFAULT_TYPE, value: Optional[bool]) -> Dict[str, Any]:
@@ -713,11 +788,11 @@ def _set_draft_source_hflip(context: ContextTypes.DEFAULT_TYPE, value: Optional[
 
 async def _ask_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "📝 <b>أدخل اسمًا مختصرًا للمصدر:</b>\n\n"
-        "مثال: <code>WoodyyCraft</code> أو <code>قناة المودات</code>\n\n"
-        "أو أرسل <code>auto</code> لاستخراج الاسم تلقائيًا من الرابط."
+        "ًں“‌ <b>ط£ط¯ط®ظ„ ط§ط³ظ…ظ‹ط§ ظ…ط®طھطµط±ظ‹ط§ ظ„ظ„ظ…طµط¯ط±:</b>\n\n"
+        "ظ…ط«ط§ظ„: <code>WoodyyCraft</code> ط£ظˆ <code>ظ‚ظ†ط§ط© ط§ظ„ظ…ظˆط¯ط§طھ</code>\n\n"
+        "ط£ظˆ ط£ط±ط³ظ„ <code>auto</code> ظ„ط§ط³طھط®ط±ط§ط¬ ط§ظ„ط§ط³ظ… طھظ„ظ‚ط§ط¦ظٹظ‹ط§ ظ…ظ† ط§ظ„ط±ط§ط¨ط·."
     )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
     query = update.callback_query
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -728,21 +803,21 @@ async def _ask_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _ask_source_tail_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "✂️ <b>قص ثابت من نهاية الفيديو</b> <i>(اختياري)</i>\n\n"
-        "سيتم تطبيق هذا القص مباشرة بعد تنزيل الفيديو وقبل أي معالجة أخرى مثل التحويل أو النصوص أو الفيس كام.\n\n"
-        "اختر مقدار القص من <b>نهاية</b> كل فيديو لهذا المصدر:"
+        "âœ‚ï¸ڈ <b>ظ‚طµ ط«ط§ط¨طھ ظ…ظ† ظ†ظ‡ط§ظٹط© ط§ظ„ظپظٹط¯ظٹظˆ</b> <i>(ط§ط®طھظٹط§ط±ظٹ)</i>\n\n"
+        "ط³ظٹطھظ… طھط·ط¨ظٹظ‚ ظ‡ط°ط§ ط§ظ„ظ‚طµ ظ…ط¨ط§ط´ط±ط© ط¨ط¹ط¯ طھظ†ط²ظٹظ„ ط§ظ„ظپظٹط¯ظٹظˆ ظˆظ‚ط¨ظ„ ط£ظٹ ظ…ط¹ط§ظ„ط¬ط© ط£ط®ط±ظ‰ ظ…ط«ظ„ ط§ظ„طھط­ظˆظٹظ„ ط£ظˆ ط§ظ„ظ†طµظˆطµ ط£ظˆ ط§ظ„ظپظٹط³ ظƒط§ظ….\n\n"
+        "ط§ط®طھط± ظ…ظ‚ط¯ط§ط± ط§ظ„ظ‚طµ ظ…ظ† <b>ظ†ظ‡ط§ظٹط©</b> ظƒظ„ ظپظٹط¯ظٹظˆ ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±:"
     )
     keyboard: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for idx, seconds in enumerate(TAIL_TRIM_OPTIONS, start=1):
-        row.append(InlineKeyboardButton(f"{_seconds_label(seconds)} ثانية", callback_data=f"am_src_trim:{seconds}"))
+        row.append(InlineKeyboardButton(f"{_seconds_label(seconds)} ط«ط§ظ†ظٹط©", callback_data=f"am_src_trim:{seconds}"))
         if idx % 2 == 0:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("⬜ بدون قص", callback_data="am_src_trim:off")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
+    keyboard.append([InlineKeyboardButton("â¬œ ط¨ط¯ظˆظ† ظ‚طµ", callback_data="am_src_trim:off")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")])
 
     query = update.callback_query
     if query:
@@ -757,15 +832,15 @@ async def _ask_source_video_effect_kind(update: Update, context: ContextTypes.DE
     target_label = _video_effect_target_label(target)
     status = _video_effect_status(settings, target)
     text = (
-        f"✨ <b>تأثير {target_label} الفيديو</b> <i>(اختياري)</i>\n\n"
-        f"الحالة الحالية: <code>{html.escape(status)}</code>\n\n"
-        f"اختر نوع التأثير المتحرك الذي سيُطبَّق في <b>{target_label}</b> هذا المصدر."
+        f"âœ¨ <b>طھط£ط«ظٹط± {target_label} ط§ظ„ظپظٹط¯ظٹظˆ</b> <i>(ط§ط®طھظٹط§ط±ظٹ)</i>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(status)}</code>\n\n"
+        f"ط§ط®طھط± ظ†ظˆط¹ ط§ظ„طھط£ط«ظٹط± ط§ظ„ظ…طھط­ط±ظƒ ط§ظ„ط°ظٹ ط³ظٹظڈط·ط¨ظ‘ظژظ‚ ظپظٹ <b>{target_label}</b> ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±."
     )
     keyboard = [
-        [InlineKeyboardButton("⬜ بدون تأثير", callback_data=f"am_src_fx_kind:{target}:none")],
-        [InlineKeyboardButton("🌫 Blur عادي", callback_data=f"am_src_fx_kind:{target}:blur")],
-        [InlineKeyboardButton("⬛ Black Blur", callback_data=f"am_src_fx_kind:{target}:black_blur")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("â¬œ ط¨ط¯ظˆظ† طھط£ط«ظٹط±", callback_data=f"am_src_fx_kind:{target}:none")],
+        [InlineKeyboardButton("ًںŒ« Blur ط¹ط§ط¯ظٹ", callback_data=f"am_src_fx_kind:{target}:blur")],
+        [InlineKeyboardButton("â¬› Black Blur", callback_data=f"am_src_fx_kind:{target}:black_blur")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     query = update.callback_query
     if query:
@@ -779,12 +854,12 @@ async def _ask_source_video_effect_duration(update: Update, context: ContextType
     target_label = _video_effect_target_label(target)
     type_label = _video_effect_type_label(effect_type)
     text = (
-        f"⏱ <b>مدة تأثير {target_label}</b>\n\n"
-        f"النوع المختار: <code>{html.escape(type_label)}</code>\n\n"
-        "اختر المدة المناسبة لهذا التأثير:"
+        f"âڈ± <b>ظ…ط¯ط© طھط£ط«ظٹط± {target_label}</b>\n\n"
+        f"ط§ظ„ظ†ظˆط¹ ط§ظ„ظ…ط®طھط§ط±: <code>{html.escape(type_label)}</code>\n\n"
+        "ط§ط®طھط± ط§ظ„ظ…ط¯ط© ط§ظ„ظ…ظ†ط§ط³ط¨ط© ظ„ظ‡ط°ط§ ط§ظ„طھط£ط«ظٹط±:"
     )
-    keyboard = [[InlineKeyboardButton(f"{_seconds_label(val)} ثانية", callback_data=f"am_src_fx_dur:{target}:{effect_type}:{val}")] for val in VIDEO_EFFECT_DURATION_OPTIONS]
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"am_src_fx_menu:{target}")])
+    keyboard = [[InlineKeyboardButton(f"{_seconds_label(val)} ط«ط§ظ†ظٹط©", callback_data=f"am_src_fx_dur:{target}:{effect_type}:{val}")] for val in VIDEO_EFFECT_DURATION_OPTIONS]
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data=f"am_src_fx_menu:{target}")])
     query = update.callback_query
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -837,13 +912,13 @@ async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYP
     client_secrets = _find_client_secrets_file(cfg)
     if not client_secrets:
         await query.edit_message_text(
-            "❌ ملف client_secret.json غير موجود. أضف/ارفع ملف المصادقة أولاً (نفس الملف المستخدم ليوتيوب).",
+            "â‌Œ ظ…ظ„ظپ client_secret.json ط؛ظٹط± ظ…ظˆط¬ظˆط¯. ط£ط¶ظپ/ط§ط±ظپط¹ ظ…ظ„ظپ ط§ظ„ظ…طµط§ط¯ظ‚ط© ط£ظˆظ„ط§ظ‹ (ظ†ظپط³ ط§ظ„ظ…ظ„ظپ ط§ظ„ظ…ط³طھط®ط¯ظ… ظ„ظٹظˆطھظٹظˆط¨).",
             parse_mode="HTML",
         )
         return AM_CONFIG
 
     try:
-        await query.edit_message_text("⏳ جاري تحضير رابط مصادقة Google Drive...", parse_mode="HTML")
+        await query.edit_message_text("âڈ³ ط¬ط§ط±ظٹ طھط­ط¶ظٹط± ط±ط§ط¨ط· ظ…طµط§ط¯ظ‚ط© Google Drive...", parse_mode="HTML")
         auth_url, server, flow = await asyncio.to_thread(
             start_auth_flow_scopes,
             client_secrets,
@@ -855,15 +930,15 @@ async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYP
         redirect_uri = getattr(flow, "redirect_uri", None) or f"http://localhost:{server.port}/oauth2/callback"
 
         text = (
-            "☁️ <b>ربط Google Drive</b>\n\n"
-            f"<a href=\"{auth_url}\">🔗 اضغط هنا للمصادقة</a>\n\n"
-            "⚠️ إذا ظهر لك خطأ <b>redirect_uri_mismatch</b> أضف هذا الرابط بالضبط في Google Cloud Console:\n"
+            "âکپï¸ڈ <b>ط±ط¨ط· Google Drive</b>\n\n"
+            f"<a href=\"{auth_url}\">ًں”— ط§ط¶ط؛ط· ظ‡ظ†ط§ ظ„ظ„ظ…طµط§ط¯ظ‚ط©</a>\n\n"
+            "âڑ ï¸ڈ ط¥ط°ط§ ط¸ظ‡ط± ظ„ظƒ ط®ط·ط£ <b>redirect_uri_mismatch</b> ط£ط¶ظپ ظ‡ط°ط§ ط§ظ„ط±ط§ط¨ط· ط¨ط§ظ„ط¶ط¨ط· ظپظٹ Google Cloud Console:\n"
             f"<code>{html.escape(redirect_uri)}</code>\n\n"
-            "📌 بعد المصادقة سيتم الحفظ تلقائياً."
+            "ًں“Œ ط¨ط¹ط¯ ط§ظ„ظ…طµط§ط¯ظ‚ط© ط³ظٹطھظ… ط§ظ„ط­ظپط¸ طھظ„ظ‚ط§ط¦ظٹط§ظ‹."
         )
         keyboard = [
-            [InlineKeyboardButton("✅ تم - لدي رابط التحويل", callback_data="am_gdrive_have_url")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_config")],
+            [InlineKeyboardButton("âœ… طھظ… - ظ„ط¯ظٹ ط±ط§ط¨ط· ط§ظ„طھط­ظˆظٹظ„", callback_data="am_gdrive_have_url")],
+            [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_config")],
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML", disable_web_page_preview=True)
 
@@ -873,7 +948,7 @@ async def gdrive_connect_start(update: Update, context: ContextTypes.DEFAULT_TYP
         return AM_CONFIG
     except Exception as e:
         logger.error(f"Google Drive auth start failed: {e}")
-        await query.edit_message_text(f"❌ خطأ: <code>{html.escape(str(e)[:200])}</code>", parse_mode="HTML")
+        await query.edit_message_text(f"â‌Œ ط®ط·ط£: <code>{html.escape(str(e)[:200])}</code>", parse_mode="HTML")
         return AM_CONFIG
 
 
@@ -885,7 +960,7 @@ async def gdrive_wait_for_auth_code(update: Update, context: ContextTypes.DEFAUL
         response_uri = await asyncio.to_thread(server.wait_for_response, timeout=300)
         if response_uri and server.error:
             chat_id = update.effective_chat.id
-            await context.bot.send_message(chat_id, f"❌ فشلت مصادقة Google Drive: {server.error}")
+            await context.bot.send_message(chat_id, f"â‌Œ ظپط´ظ„طھ ظ…طµط§ط¯ظ‚ط© Google Drive: {server.error}")
             return
         if response_uri:
             await gdrive_process_auth_result(update, context, response_uri)
@@ -897,10 +972,10 @@ async def gdrive_receive_auth_url(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await _safe_answer(query)
     text = (
-        "🔗 <b>أرسل رابط التحويل النهائي</b>\n\n"
-        "بعد إكمال المصادقة في المتصفح، انسخ رابط الصفحة النهائية (الذي يحتوي على <code>code=</code>) وأرسله هنا."
+        "ًں”— <b>ط£ط±ط³ظ„ ط±ط§ط¨ط· ط§ظ„طھط­ظˆظٹظ„ ط§ظ„ظ†ظ‡ط§ط¦ظٹ</b>\n\n"
+        "ط¨ط¹ط¯ ط¥ظƒظ…ط§ظ„ ط§ظ„ظ…طµط§ط¯ظ‚ط© ظپظٹ ط§ظ„ظ…طھطµظپط­طŒ ط§ظ†ط³ط® ط±ط§ط¨ط· ط§ظ„طµظپط­ط© ط§ظ„ظ†ظ‡ط§ط¦ظٹط© (ط§ظ„ط°ظٹ ظٹط­طھظˆظٹ ط¹ظ„ظ‰ <code>code=</code>) ظˆط£ط±ط³ظ„ظ‡ ظ‡ظ†ط§."
     )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_config")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_config")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     context.user_data["am_gdrive_awaiting_url"] = True
     return AM_SOURCE_TEXT_INPUT
@@ -911,7 +986,7 @@ async def gdrive_receive_auth_url_text(update: Update, context: ContextTypes.DEF
         return AM_SOURCE_TEXT_INPUT
     url = (update.message.text or "").strip()
     if "code=" not in url and len(url) < 20:
-        await update.message.reply_text("⚠️ الرابط/الكود يبدو غير صالح. أرسل رابط التحويل الكامل.")
+        await update.message.reply_text("âڑ ï¸ڈ ط§ظ„ط±ط§ط¨ط·/ط§ظ„ظƒظˆط¯ ظٹط¨ط¯ظˆ ط؛ظٹط± طµط§ظ„ط­. ط£ط±ط³ظ„ ط±ط§ط¨ط· ط§ظ„طھط­ظˆظٹظ„ ط§ظ„ظƒط§ظ…ظ„.")
         return AM_SOURCE_TEXT_INPUT
     context.user_data.pop("am_gdrive_awaiting_url", None)
     await gdrive_process_auth_result(update, context, url)
@@ -934,7 +1009,7 @@ async def gdrive_process_auth_result(update: Update, context: ContextTypes.DEFAU
 
         if not token_payload:
             chat_id = update.effective_chat.id
-            await context.bot.send_message(chat_id, "❌ فشل استخراج توكن Google Drive.")
+            await context.bot.send_message(chat_id, "â‌Œ ظپط´ظ„ ط§ط³طھط®ط±ط§ط¬ طھظˆظƒظ† Google Drive.")
             return
 
         db = _get_db()
@@ -946,18 +1021,18 @@ async def gdrive_process_auth_result(update: Update, context: ContextTypes.DEFAU
         db.save_config(config)
 
         chat_id = update.effective_chat.id
-        await context.bot.send_message(chat_id, "✅ تم ربط Google Drive بنجاح! يمكنك الآن إضافة مصادر Drive.")
+        await context.bot.send_message(chat_id, "âœ… طھظ… ط±ط¨ط· Google Drive ط¨ظ†ط¬ط§ط­! ظٹظ…ظƒظ†ظƒ ط§ظ„ط¢ظ† ط¥ط¶ط§ظپط© ظ…طµط§ط¯ط± Drive.")
     except Exception as e:
         logger.error(f"Google Drive auth processing failed: {e}")
         chat_id = update.effective_chat.id
-        await context.bot.send_message(chat_id, f"❌ فشل ربط Google Drive: {e}")
+        await context.bot.send_message(chat_id, f"â‌Œ ظپط´ظ„ ط±ط¨ط· Google Drive: {e}")
     return
 
 
-# ==================== القائمة الرئيسية ====================
+# ==================== ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط±ط¦ظٹط³ظٹط© ====================
 
 async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """القائمة الرئيسية لنظام الجلب التلقائي"""
+    """ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط±ط¦ظٹط³ظٹط© ظ„ظ†ط¸ط§ظ… ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -966,38 +1041,38 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = await asyncio.to_thread(db.get_config)
     stats = await asyncio.to_thread(db.get_stats)
 
-    enabled = "✅ مفعل" if config.get("auto_fetch_enabled") else "❌ معطل"
+    enabled = "âœ… ظ…ظپط¹ظ„" if config.get("auto_fetch_enabled") else "â‌Œ ظ…ط¹ط·ظ„"
     content_type = config.get("default_content_type", "minecraft_mods")
 
     text = (
-        "🤖 <b>نظام الجلب التلقائي للمودات</b>\n\n"
-        f"📊 الحالة: {enabled}\n"
-        f"🆔 النسخة: <code>{get_instance_id()[:20]}</code>\n"
-        f"📦 نوع المحتوى: <code>{html.escape(content_type)}</code>\n\n"
-        f"📈 <b>الإحصائيات:</b>\n"
-        f"• القنوات: {stats.get('total_channels', 0)}\n"
-        f"• المصادر: {stats.get('total_sources', 0)}\n"
-        f"• الجداول: {stats.get('total_schedules', 0)}\n"
-        f"• المنشور: {stats.get('published', 0)}\n"
-        f"• الفاشل: {stats.get('failed', 0)}\n"
+        "ًں¤– <b>ظ†ط¸ط§ظ… ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ ظ„ظ„ظ…ظˆط¯ط§طھ</b>\n\n"
+        f"ًں“ٹ ط§ظ„ط­ط§ظ„ط©: {enabled}\n"
+        f"ًں†” ط§ظ„ظ†ط³ط®ط©: <code>{get_instance_id()[:20]}</code>\n"
+        f"ًں“¦ ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰: <code>{html.escape(content_type)}</code>\n\n"
+        f"ًں“ˆ <b>ط§ظ„ط¥ط­طµط§ط¦ظٹط§طھ:</b>\n"
+        f"â€¢ ط§ظ„ظ‚ظ†ظˆط§طھ: {stats.get('total_channels', 0)}\n"
+        f"â€¢ ط§ظ„ظ…طµط§ط¯ط±: {stats.get('total_sources', 0)}\n"
+        f"â€¢ ط§ظ„ط¬ط¯ط§ظˆظ„: {stats.get('total_schedules', 0)}\n"
+        f"â€¢ ط§ظ„ظ…ظ†ط´ظˆط±: {stats.get('published', 0)}\n"
+        f"â€¢ ط§ظ„ظپط§ط´ظ„: {stats.get('failed', 0)}\n"
     )
 
-    toggle_text = "⏸ إيقاف" if config.get("auto_fetch_enabled") else "▶️ تشغيل"
+    toggle_text = "âڈ¸ ط¥ظٹظ‚ط§ظپ" if config.get("auto_fetch_enabled") else "â–¶ï¸ڈ طھط´ط؛ظٹظ„"
 
     keyboard = [
-        [InlineKeyboardButton("📋 القنوات", callback_data="list_channels:0"),
-         InlineKeyboardButton("📡 إدارة المصادر", callback_data="am_sources")],
-        [InlineKeyboardButton("⏰ الجدولة", callback_data="am_schedule"),
-         InlineKeyboardButton("📊 الحالة", callback_data="am_status")],
-        [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
-         InlineKeyboardButton("🎬 فيديوهات الفيس كام", callback_data="am_fc_viewer")],
-        [InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config")],
-        [InlineKeyboardButton("🤖 الذكاء الاصطناعي", callback_data="ai_main_menu"),
-         InlineKeyboardButton("🔑 مفاتيح API", callback_data="api_keys_menu")],
+        [InlineKeyboardButton("ًں“‹ ط§ظ„ظ‚ظ†ظˆط§طھ", callback_data="list_channels:0"),
+         InlineKeyboardButton("ًں“، ط¥ط¯ط§ط±ط© ط§ظ„ظ…طµط§ط¯ط±", callback_data="am_sources")],
+        [InlineKeyboardButton("âڈ° ط§ظ„ط¬ط¯ظˆظ„ط©", callback_data="am_schedule"),
+         InlineKeyboardButton("ًں“ٹ ط§ظ„ط­ط§ظ„ط©", callback_data="am_status")],
+        [InlineKeyboardButton("ًں“¦ ط­ط§ظˆظٹط§طھ ط§ظ„ظپظٹط¯ظٹظˆ", callback_data="am_view_containers"),
+         InlineKeyboardButton("ًںژ¬ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…", callback_data="am_fc_viewer")],
+        [InlineKeyboardButton("âڑ™ï¸ڈ ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ", callback_data="am_config")],
+        [InlineKeyboardButton("ًں¤– ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ", callback_data="ai_main_menu"),
+         InlineKeyboardButton("ًں”‘ ظ…ظپط§طھظٹط­ API", callback_data="api_keys_menu")],
         [InlineKeyboardButton(toggle_text, callback_data="am_toggle"),
-         InlineKeyboardButton("🚀 تشغيل الآن", callback_data="am_run_now"),
-         InlineKeyboardButton("🧪 اختبار", callback_data="am_test_render")],
-        [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")],
+         InlineKeyboardButton("ًںڑ€ طھط´ط؛ظٹظ„ ط§ظ„ط¢ظ†", callback_data="am_run_now"),
+         InlineKeyboardButton("ًں§ھ ط§ط®طھط¨ط§ط±", callback_data="am_test_render")],
+        [InlineKeyboardButton("ًں”™ ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط±ط¦ظٹط³ظٹط©", callback_data="main_menu")],
     ]
 
     if query:
@@ -1011,10 +1086,10 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AM_MENU
 
 
-# ==================== تشغيل/إيقاف ====================
+# ==================== طھط´ط؛ظٹظ„/ط¥ظٹظ‚ط§ظپ ====================
 
 async def toggle_auto_fetch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تبديل حالة التشغيل"""
+    """طھط¨ط¯ظٹظ„ ط­ط§ظ„ط© ط§ظ„طھط´ط؛ظٹظ„"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -1024,20 +1099,20 @@ async def toggle_auto_fetch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config["auto_fetch_enabled"] = new_state
     await asyncio.to_thread(db.save_config, config)
 
-    status = "✅ تم تفعيل" if new_state else "⏸ تم إيقاف"
-    await query.answer(f"{status} الجلب التلقائي")
+    status = "âœ… طھظ… طھظپط¹ظٹظ„" if new_state else "âڈ¸ طھظ… ط¥ظٹظ‚ط§ظپ"
+    await query.answer(f"{status} ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ")
 
     return await auto_mod_menu(update, context)
 
 
-# ==================== تشغيل دورة فورية ====================
+# ==================== طھط´ط؛ظٹظ„ ط¯ظˆط±ط© ظپظˆط±ظٹط© ====================
 
 async def run_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تشغيل دورة جلب فورية"""
+    """طھط´ط؛ظٹظ„ ط¯ظˆط±ط© ط¬ظ„ط¨ ظپظˆط±ظٹط©"""
     query = update.callback_query
     await _safe_answer(query)
 
-    text = "⏳ <b>جاري تشغيل دورة جلب...</b>\n\nقد يستغرق هذا بضع دقائق."
+    text = "âڈ³ <b>ط¬ط§ط±ظٹ طھط´ط؛ظٹظ„ ط¯ظˆط±ط© ط¬ظ„ط¨...</b>\n\nظ‚ط¯ ظٹط³طھط؛ط±ظ‚ ظ‡ط°ط§ ط¨ط¶ط¹ ط¯ظ‚ط§ط¦ظ‚."
     await query.edit_message_text(text, parse_mode="HTML")
 
     try:
@@ -1053,44 +1128,44 @@ async def run_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_raw_review = results.get("waiting_raw_review", 0)
 
         result_text = (
-            "✅ <b>انتهت دورة الجلب</b>\n\n"
-            f"📊 النتائج:\n"
-            f"• تمت المعالجة: {results.get('processed', 0)}\n"
-            f"• تم النشر: {results.get('published', 0)}\n"
-            f"• فشل: {results.get('failed', 0)}\n"
-            f"• بانتظار مراجعة خام: {waiting_raw_review}\n"
-            f"• تم التخطي: {results.get('skipped', 0)}\n"
+            "âœ… <b>ط§ظ†طھظ‡طھ ط¯ظˆط±ط© ط§ظ„ط¬ظ„ط¨</b>\n\n"
+            f"ًں“ٹ ط§ظ„ظ†طھط§ط¦ط¬:\n"
+            f"â€¢ طھظ…طھ ط§ظ„ظ…ط¹ط§ظ„ط¬ط©: {results.get('processed', 0)}\n"
+            f"â€¢ طھظ… ط§ظ„ظ†ط´ط±: {results.get('published', 0)}\n"
+            f"â€¢ ظپط´ظ„: {results.get('failed', 0)}\n"
+            f"â€¢ ط¨ط§ظ†طھط¸ط§ط± ظ…ط±ط§ط¬ط¹ط© ط®ط§ظ…: {waiting_raw_review}\n"
+            f"â€¢ طھظ… ط§ظ„طھط®ط·ظٹ: {results.get('skipped', 0)}\n"
         )
 
         if results.get("status") == "disabled":
-            result_text = "⚠️ الجلب التلقائي معطل. قم بتفعيله أولاً."
+            result_text = "âڑ ï¸ڈ ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ ظ…ط¹ط·ظ„. ظ‚ظ… ط¨طھظپط¹ظٹظ„ظ‡ ط£ظˆظ„ط§ظ‹."
         elif results.get("status") == "no_schedules":
-            result_text = "⚠️ لا توجد جداول نشر نشطة. أضف جدول نشر أولاً."
+            result_text = "âڑ ï¸ڈ ظ„ط§ طھظˆط¬ط¯ ط¬ط¯ط§ظˆظ„ ظ†ط´ط± ظ†ط´ط·ط©. ط£ط¶ظپ ط¬ط¯ظˆظ„ ظ†ط´ط± ط£ظˆظ„ط§ظ‹."
         elif results.get("status") == "busy":
-            result_text = "⏳ توجد دورة جلب أخرى قيد التشغيل بالفعل، لذلك تم تجاهل التشغيل اليدوي لمنع التكرار."
+            result_text = "âڈ³ طھظˆط¬ط¯ ط¯ظˆط±ط© ط¬ظ„ط¨ ط£ط®ط±ظ‰ ظ‚ظٹط¯ ط§ظ„طھط´ط؛ظٹظ„ ط¨ط§ظ„ظپط¹ظ„طŒ ظ„ط°ظ„ظƒ طھظ… طھط¬ط§ظ‡ظ„ ط§ظ„طھط´ط؛ظٹظ„ ط§ظ„ظٹط¯ظˆظٹ ظ„ظ…ظ†ط¹ ط§ظ„طھظƒط±ط§ط±."
         elif results.get("status") == "waiting_raw_review":
             result_text = (
-                "⏸ <b>تم إيقاف الدورة بانتظار مراجعة خام</b>\n\n"
-                f"📊 النتائج الحالية:\n"
-                f"• تمت المعالجة: {results.get('processed', 0)}\n"
-                f"• تم النشر: {results.get('published', 0)}\n"
-                f"• فشل: {results.get('failed', 0)}\n"
-                f"• بانتظار مراجعة خام: {waiting_raw_review or 1}\n"
-                f"• تم التخطي: {results.get('skipped', 0)}\n\n"
-                "لن يتم جلب فيديو جديد من هذا المسار حتى يصدر قرارك على المراجعة الحالية."
+                "âڈ¸ <b>طھظ… ط¥ظٹظ‚ط§ظپ ط§ظ„ط¯ظˆط±ط© ط¨ط§ظ†طھط¸ط§ط± ظ…ط±ط§ط¬ط¹ط© ط®ط§ظ…</b>\n\n"
+                f"ًں“ٹ ط§ظ„ظ†طھط§ط¦ط¬ ط§ظ„ط­ط§ظ„ظٹط©:\n"
+                f"â€¢ طھظ…طھ ط§ظ„ظ…ط¹ط§ظ„ط¬ط©: {results.get('processed', 0)}\n"
+                f"â€¢ طھظ… ط§ظ„ظ†ط´ط±: {results.get('published', 0)}\n"
+                f"â€¢ ظپط´ظ„: {results.get('failed', 0)}\n"
+                f"â€¢ ط¨ط§ظ†طھط¸ط§ط± ظ…ط±ط§ط¬ط¹ط© ط®ط§ظ…: {waiting_raw_review or 1}\n"
+                f"â€¢ طھظ… ط§ظ„طھط®ط·ظٹ: {results.get('skipped', 0)}\n\n"
+                "ظ„ظ† ظٹطھظ… ط¬ظ„ط¨ ظپظٹط¯ظٹظˆ ط¬ط¯ظٹط¯ ظ…ظ† ظ‡ط°ط§ ط§ظ„ظ…ط³ط§ط± ط­طھظ‰ ظٹطµط¯ط± ظ‚ط±ط§ط±ظƒ ط¹ظ„ظ‰ ط§ظ„ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط­ط§ظ„ظٹط©."
             )
 
     except Exception as e:
-        result_text = f"❌ حدث خطأ: <code>{html.escape(str(e)[:200])}</code>"
+        result_text = f"â‌Œ ط­ط¯ط« ط®ط·ط£: <code>{html.escape(str(e)[:200])}</code>"
 
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")]]
     await query.message.reply_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
     return AM_MENU
 
 
 async def test_render_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة المصادر لاختيار مصدر لتوليد فيديو اختبار."""
+    """ط¹ط±ط¶ ظ‚ط§ط¦ظ…ط© ط§ظ„ظ…طµط§ط¯ط± ظ„ط§ط®طھظٹط§ط± ظ…طµط¯ط± ظ„طھظˆظ„ظٹط¯ ظپظٹط¯ظٹظˆ ط§ط®طھط¨ط§ط±."""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -1098,15 +1173,15 @@ async def test_render_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = await asyncio.to_thread(db.get_sources)
 
     if not sources:
-        text = "⚠️ لا توجد مصادر متاحة حاليًا لتوليد فيديو اختبار. أضف مصدرًا أولاً."
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+        text = "âڑ ï¸ڈ ظ„ط§ طھظˆط¬ط¯ ظ…طµط§ط¯ط± ظ…طھط§ط­ط© ط­ط§ظ„ظٹظ‹ط§ ظ„طھظˆظ„ظٹط¯ ظپظٹط¯ظٹظˆ ط§ط®طھط¨ط§ط±. ط£ط¶ظپ ظ…طµط¯ط±ظ‹ط§ ط£ظˆظ„ط§ظ‹."
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_MENU
 
     text = (
-        "🧪 <b>اختبار وتطوير</b>\n\n"
-        "اختر مصدرًا لتوليد فيديو نهائي تجريبي باستخدام نفس خط المعالجة الحقيقي،\n"
-        "لكن <b>بدون نشره على YouTube</b> وبدون تعديل أي حالة نشر رسمية."
+        "ًں§ھ <b>ط§ط®طھط¨ط§ط± ظˆطھط·ظˆظٹط±</b>\n\n"
+        "ط§ط®طھط± ظ…طµط¯ط±ظ‹ط§ ظ„طھظˆظ„ظٹط¯ ظپظٹط¯ظٹظˆ ظ†ظ‡ط§ط¦ظٹ طھط¬ط±ظٹط¨ظٹ ط¨ط§ط³طھط®ط¯ط§ظ… ظ†ظپط³ ط®ط· ط§ظ„ظ…ط¹ط§ظ„ط¬ط© ط§ظ„ط­ظ‚ظٹظ‚ظٹطŒ\n"
+        "ظ„ظƒظ† <b>ط¨ط¯ظˆظ† ظ†ط´ط±ظ‡ ط¹ظ„ظ‰ YouTube</b> ظˆط¨ط¯ظˆظ† طھط¹ط¯ظٹظ„ ط£ظٹ ط­ط§ظ„ط© ظ†ط´ط± ط±ط³ظ…ظٹط©."
     )
 
     keyboard = []
@@ -1114,25 +1189,25 @@ async def test_render_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         src_id = str(src.get("id") or "")
         if not src_id:
             continue
-        status = "⏸" if not src.get("enabled", True) else "✅"
-        src_name = (src.get("source_name") or "مصدر").strip()[:32]
+        status = "âڈ¸" if not src.get("enabled", True) else "âœ…"
+        src_name = (src.get("source_name") or "ظ…طµط¯ط±").strip()[:32]
         keyboard.append([
             InlineKeyboardButton(f"{status} {src_name}", callback_data=f"am_test_render_src:{src_id}")
         ])
 
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_MENU
 
 
 async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنفيذ فيديو اختبار لمصدر محدد وإرساله داخل تيليجرام."""
+    """طھظ†ظپظٹط° ظپظٹط¯ظٹظˆ ط§ط®طھط¨ط§ط± ظ„ظ…طµط¯ط± ظ…ط­ط¯ط¯ ظˆط¥ط±ط³ط§ظ„ظ‡ ط¯ط§ط®ظ„ طھظٹظ„ظٹط¬ط±ط§ظ…."""
     query = update.callback_query
     await _safe_answer(query)
     source_id = query.data.split(":", 1)[1]
 
     await query.edit_message_text(
-        "⏳ <b>جاري إنشاء فيديو اختبار...</b>\n\nسيتم استخدام خط المعالجة الحقيقي بدون نشر رسمي.",
+        "âڈ³ <b>ط¬ط§ط±ظٹ ط¥ظ†ط´ط§ط، ظپظٹط¯ظٹظˆ ط§ط®طھط¨ط§ط±...</b>\n\nط³ظٹطھظ… ط§ط³طھط®ط¯ط§ظ… ط®ط· ط§ظ„ظ…ط¹ط§ظ„ط¬ط© ط§ظ„ط­ظ‚ظٹظ‚ظٹ ط¨ط¯ظˆظ† ظ†ط´ط± ط±ط³ظ…ظٹ.",
         parse_mode="HTML",
     )
 
@@ -1150,15 +1225,15 @@ async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
         preview_path = str(results.get("preview_video_path") or "")
 
         if results.get("status") == "no_target_source":
-            result_text = "⚠️ لم يتم العثور على المصدر المطلوب لتنفيذ فيديو الاختبار."
+            result_text = "âڑ ï¸ڈ ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ظ…طµط¯ط± ط§ظ„ظ…ط·ظ„ظˆط¨ ظ„طھظ†ظپظٹط° ظپظٹط¯ظٹظˆ ط§ظ„ط§ط®طھط¨ط§ط±."
         elif results.get("status") == "busy":
-            result_text = "⏳ توجد دورة معالجة أخرى تعمل الآن، لذا تم تأجيل فيديو الاختبار لمنع التداخل."
+            result_text = "âڈ³ طھظˆط¬ط¯ ط¯ظˆط±ط© ظ…ط¹ط§ظ„ط¬ط© ط£ط®ط±ظ‰ طھط¹ظ…ظ„ ط§ظ„ط¢ظ†طŒ ظ„ط°ط§ طھظ… طھط£ط¬ظٹظ„ ظپظٹط¯ظٹظˆ ط§ظ„ط§ط®طھط¨ط§ط± ظ„ظ…ظ†ط¹ ط§ظ„طھط¯ط§ط®ظ„."
         elif preview_path and os.path.exists(preview_path):
             caption = (
-                "🧪 <b>فيديو الاختبار جاهز</b>\n"
-                f"📺 المصدر: <code>{html.escape(str(results.get('preview_source_name') or 'مصدر'))}</code>\n"
-                f"🎬 الفيديو: <code>{html.escape(str(results.get('preview_video_title') or 'بدون عنوان')[:80])}</code>\n"
-                "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
+                "ًں§ھ <b>ظپظٹط¯ظٹظˆ ط§ظ„ط§ط®طھط¨ط§ط± ط¬ط§ظ‡ط²</b>\n"
+                f"ًں“؛ ط§ظ„ظ…طµط¯ط±: <code>{html.escape(str(results.get('preview_source_name') or 'ظ…طµط¯ط±'))}</code>\n"
+                f"ًںژ¬ ط§ظ„ظپظٹط¯ظٹظˆ: <code>{html.escape(str(results.get('preview_video_title') or 'ط¨ط¯ظˆظ† ط¹ظ†ظˆط§ظ†')[:80])}</code>\n"
+                "ًںڑ« ظ„ظ… ظٹطھظ… ط§ظ„ظ†ط´ط± ط¹ظ„ظ‰ YouTube ظˆظ„ظ… ظٹطھظ… طھط¹ط¯ظٹظ„ ط§ظ„ط­ط§ظ„ط© ط§ظ„ط±ط³ظ…ظٹط©."
             )
             try:
                 with open(preview_path, "rb") as video_file:
@@ -1176,42 +1251,42 @@ async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     telegram_video.close()
                 result_text = (
-                    "✅ <b>تم إنشاء فيديو الاختبار وإرساله هنا في تيليجرام.</b>\n\n"
-                    "لم يتم رفع الفيديو إلى YouTube، ولم يتم تحديث حالة النشر أو الجدولة أو الأتمتة الرسمية."
+                    "âœ… <b>طھظ… ط¥ظ†ط´ط§ط، ظپظٹط¯ظٹظˆ ط§ظ„ط§ط®طھط¨ط§ط± ظˆط¥ط±ط³ط§ظ„ظ‡ ظ‡ظ†ط§ ظپظٹ طھظٹظ„ظٹط¬ط±ط§ظ….</b>\n\n"
+                    "ظ„ظ… ظٹطھظ… ط±ظپط¹ ط§ظ„ظپظٹط¯ظٹظˆ ط¥ظ„ظ‰ YouTubeطŒ ظˆظ„ظ… ظٹطھظ… طھط­ط¯ظٹط« ط­ط§ظ„ط© ط§ظ„ظ†ط´ط± ط£ظˆ ط§ظ„ط¬ط¯ظˆظ„ط© ط£ظˆ ط§ظ„ط£طھظ…طھط© ط§ظ„ط±ط³ظ…ظٹط©."
                 )
             except Exception as send_e:
                 video_size_mb = os.path.getsize(preview_path) / (1024 * 1024)
                 if "413" in str(send_e) or "Entity Too Large" in str(send_e) or video_size_mb > 49.5:
                     result_text = (
-                        f"✅ <b>تم إنشاء فيديو الاختبار بنجاح.</b>\n\n"
-                        f"⚠️ <i>ملاحظة:</i> الفيديو كبير جداً ({video_size_mb:.1f} MB) لعرضه مباشرة في تيليجرام (الحد الأقصى للمعاينة 50 ميجابايت).\n\n"
-                        f"عملية المعالجة تعمل بشكل سليم وهذا لا يؤثر على الرفع الفعلي لليوتيوب.\n\n"
-                        "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
+                        f"âœ… <b>طھظ… ط¥ظ†ط´ط§ط، ظپظٹط¯ظٹظˆ ط§ظ„ط§ط®طھط¨ط§ط± ط¨ظ†ط¬ط§ط­.</b>\n\n"
+                        f"âڑ ï¸ڈ <i>ظ…ظ„ط§ط­ط¸ط©:</i> ط§ظ„ظپظٹط¯ظٹظˆ ظƒط¨ظٹط± ط¬ط¯ط§ظ‹ ({video_size_mb:.1f} MB) ظ„ط¹ط±ط¶ظ‡ ظ…ط¨ط§ط´ط±ط© ظپظٹ طھظٹظ„ظٹط¬ط±ط§ظ… (ط§ظ„ط­ط¯ ط§ظ„ط£ظ‚طµظ‰ ظ„ظ„ظ…ط¹ط§ظٹظ†ط© 50 ظ…ظٹط¬ط§ط¨ط§ظٹطھ).\n\n"
+                        f"ط¹ظ…ظ„ظٹط© ط§ظ„ظ…ط¹ط§ظ„ط¬ط© طھط¹ظ…ظ„ ط¨ط´ظƒظ„ ط³ظ„ظٹظ… ظˆظ‡ط°ط§ ظ„ط§ ظٹط¤ط«ط± ط¹ظ„ظ‰ ط§ظ„ط±ظپط¹ ط§ظ„ظپط¹ظ„ظٹ ظ„ظ„ظٹظˆطھظٹظˆط¨.\n\n"
+                        "ًںڑ« ظ„ظ… ظٹطھظ… ط§ظ„ظ†ط´ط± ط¹ظ„ظ‰ YouTube ظˆظ„ظ… ظٹطھظ… طھط¹ط¯ظٹظ„ ط§ظ„ط­ط§ظ„ط© ط§ظ„ط±ط³ظ…ظٹط©."
                     )
                 else:
                     raise send_e
         else:
             result_text = (
-                "⚠️ انتهى مسار الاختبار بدون ملف فيديو نهائي قابل للإرسال.\n"
-                "قد يكون السبب عدم العثور على فيديو جديد مناسب أو حدوث فشل أثناء المعالجة."
+                "âڑ ï¸ڈ ط§ظ†طھظ‡ظ‰ ظ…ط³ط§ط± ط§ظ„ط§ط®طھط¨ط§ط± ط¨ط¯ظˆظ† ظ…ظ„ظپ ظپظٹط¯ظٹظˆ ظ†ظ‡ط§ط¦ظٹ ظ‚ط§ط¨ظ„ ظ„ظ„ط¥ط±ط³ط§ظ„.\n"
+                "ظ‚ط¯ ظٹظƒظˆظ† ط§ظ„ط³ط¨ط¨ ط¹ط¯ظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ظپظٹط¯ظٹظˆ ط¬ط¯ظٹط¯ ظ…ظ†ط§ط³ط¨ ط£ظˆ ط­ط¯ظˆط« ظپط´ظ„ ط£ط«ظ†ط§ط، ط§ظ„ظ…ط¹ط§ظ„ط¬ط©."
             )
 
     except Exception as e:
-        result_text = f"❌ فشل فيديو الاختبار: <code>{html.escape(str(e)[:200])}</code>"
+        result_text = f"â‌Œ ظپط´ظ„ ظپظٹط¯ظٹظˆ ط§ظ„ط§ط®طھط¨ط§ط±: <code>{html.escape(str(e)[:200])}</code>"
     finally:
         if preview_path:
             AutoModFetcher._cleanup_file(preview_path)
 
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")]]
     await query.message.reply_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_MENU
 
 
-# ==================== وظيفة الخلفية (JobQueue) ====================
+# ==================== ظˆط¸ظٹظپط© ط§ظ„ط®ظ„ظپظٹط© (JobQueue) ====================
 
 async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    وظيفة مجدولة لتشغيل دورة جلب تلقائي في الخلفية
+    ظˆط¸ظٹظپط© ظ…ط¬ط¯ظˆظ„ط© ظ„طھط´ط؛ظٹظ„ ط¯ظˆط±ط© ط¬ظ„ط¨ طھظ„ظ‚ط§ط¦ظٹ ظپظٹ ط§ظ„ط®ظ„ظپظٹط©
     """
     from ...agent.config import load_config
     from ...agent.alert_system import get_alert_system
@@ -1220,7 +1295,7 @@ async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
     config = db.get_config()
 
     if not config.get("auto_fetch_enabled"):
-        logger.info("🔄 [AutoMod] Skipping cycle: Auto-fetch is disabled in settings.")
+        logger.info("ًں”„ [AutoMod] Skipping cycle: Auto-fetch is disabled in settings.")
         return
 
     admin_ids = cfg.TELEGRAM_ALLOWED_USER_IDS
@@ -1232,25 +1307,25 @@ async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
             admin_id = None
     
     if not admin_id:
-        logger.info("🧪 [AutoMod] Running in silent mode (no admin IDs configured).")
+        logger.info("ًں§ھ [AutoMod] Running in silent mode (no admin IDs configured).")
 
     try:
-        # منع التداخل إذا كانت هناك دورة جارية بالفعل
+        # ظ…ظ†ط¹ ط§ظ„طھط¯ط§ط®ظ„ ط¥ط°ط§ ظƒط§ظ†طھ ظ‡ظ†ط§ظƒ ط¯ظˆط±ط© ط¬ط§ط±ظٹط© ط¨ط§ظ„ظپط¹ظ„
         running_key = "auto_mod_cycle_running"
         if context.application.bot_data.get(running_key):
-            logger.warning("🔄 [AutoMod] Skipping cycle: Another cycle is still running (Render timeout/slow processing).")
+            logger.warning("ًں”„ [AutoMod] Skipping cycle: Another cycle is still running (Render timeout/slow processing).")
             if admin_id:
                 try:
                     await context.bot.send_message(
                         chat_id=admin_id,
-                        text="⚠️ <b>تخطي دورة جلب!</b>\n\nهناك دورة جلب لا تزال تعمل، سيتم تخطي الدورة الحالية لتخفيف الضغط على الخادم (طبيعي للسيرفرات المجانية).",
+                        text="âڑ ï¸ڈ <b>طھط®ط·ظٹ ط¯ظˆط±ط© ط¬ظ„ط¨!</b>\n\nظ‡ظ†ط§ظƒ ط¯ظˆط±ط© ط¬ظ„ط¨ ظ„ط§ طھط²ط§ظ„ طھط¹ظ…ظ„طŒ ط³ظٹطھظ… طھط®ط·ظٹ ط§ظ„ط¯ظˆط±ط© ط§ظ„ط­ط§ظ„ظٹط© ظ„طھط®ظپظٹظپ ط§ظ„ط¶ط؛ط· ط¹ظ„ظ‰ ط§ظ„ط®ط§ط¯ظ… (ط·ط¨ظٹط¹ظٹ ظ„ظ„ط³ظٹط±ظپط±ط§طھ ط§ظ„ظ…ط¬ط§ظ†ظٹط©).",
                         parse_mode="HTML"
                     )
                 except: pass
             return
             
         context.application.bot_data[running_key] = True
-        logger.info("🚀 [AutoMod] Starting automated fetching cycle...")
+        logger.info("ًںڑ€ [AutoMod] Starting automated fetching cycle...")
 
         async def notify(msg: str):
             if not admin_id:
@@ -1258,35 +1333,35 @@ async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"🤖 <b>تحديث الأتمتة:</b>\n\n{html.escape(msg)}",
+                    text=f"ًں¤– <b>طھط­ط¯ظٹط« ط§ظ„ط£طھظ…طھط©:</b>\n\n{html.escape(msg)}",
                     parse_mode="HTML"
                 )
             except Exception as e:
                 logger.debug(f"Failed to send background auto-mod notification: {e}")
 
-        # تشغيل الدورة (مع مهلة زمنية 5 دقائق لمنع التعليق)
+        # طھط´ط؛ظٹظ„ ط§ظ„ط¯ظˆط±ط© (ظ…ط¹ ظ…ظ‡ظ„ط© ط²ظ…ظ†ظٹط© 5 ط¯ظ‚ط§ط¦ظ‚ ظ„ظ…ظ†ط¹ ط§ظ„طھط¹ظ„ظٹظ‚)
         fetcher = AutoModFetcher()
         try:
             await asyncio.wait_for(fetcher.run_cycle(notify_func=notify), timeout=300)
-            logger.info("✅ [AutoMod] Cycle completed successfully.")
+            logger.info("âœ… [AutoMod] Cycle completed successfully.")
         except asyncio.TimeoutError:
-            logger.error("⏱️ [AutoMod] Cycle timed out after 5 minutes.")
+            logger.error("âڈ±ï¸ڈ [AutoMod] Cycle timed out after 5 minutes.")
             if admin_id:
                 try:
                     await context.bot.send_message(
                         chat_id=admin_id,
-                        text="⚠️ <b>انتهاء مهلة الأتمتة!</b>\n\nاستغرقت الدورة أكثر من 5 دقائق وتم إنهاؤها تلقائياً. قد يكون هذا بسبب حجم الفيديوهات أو بطء الشبكة.",
+                        text="âڑ ï¸ڈ <b>ط§ظ†طھظ‡ط§ط، ظ…ظ‡ظ„ط© ط§ظ„ط£طھظ…طھط©!</b>\n\nط§ط³طھط؛ط±ظ‚طھ ط§ظ„ط¯ظˆط±ط© ط£ظƒط«ط± ظ…ظ† 5 ط¯ظ‚ط§ط¦ظ‚ ظˆطھظ… ط¥ظ†ظ‡ط§ط¤ظ‡ط§ طھظ„ظ‚ط§ط¦ظٹط§ظ‹. ظ‚ط¯ ظٹظƒظˆظ† ظ‡ط°ط§ ط¨ط³ط¨ط¨ ط­ط¬ظ… ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ط£ظˆ ط¨ط·ط، ط§ظ„ط´ط¨ظƒط©.",
                         parse_mode="HTML"
                     )
                 except: pass
 
     except Exception as e:
-        logger.error(f"❌ [AutoMod] Error in background auto-mod job: {e}")
+        logger.error(f"â‌Œ [AutoMod] Error in background auto-mod job: {e}")
         if admin_id:
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"❌ <b>خطأ في الأتمتة:</b>\n<code>{html.escape(str(e)[:200])}</code>",
+                    text=f"â‌Œ <b>ط®ط·ط£ ظپظٹ ط§ظ„ط£طھظ…طھط©:</b>\n<code>{html.escape(str(e)[:200])}</code>",
                     parse_mode="HTML"
                 )
             except: pass
@@ -1294,10 +1369,10 @@ async def run_auto_mod_job(context: ContextTypes.DEFAULT_TYPE):
         context.application.bot_data[running_key] = False
 
 
-# ==================== إدارة المصادر ====================
+# ==================== ط¥ط¯ط§ط±ط© ط§ظ„ظ…طµط§ط¯ط± ====================
 
 async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة مصادر الجلب"""
+    """ط¹ط±ط¶ ظ‚ط§ط¦ظ…ط© ظ…طµط§ط¯ط± ط§ظ„ط¬ظ„ط¨"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -1307,16 +1382,16 @@ async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not sources:
         text = (
-            "📡 <b>مصادر الجلب</b>\n\n"
-            "لا توجد مصادر مضافة بعد.\n\n"
-            "اضغط <b>إضافة مصدر</b> لإضافة قناة يوتيوب كمصدر."
+            "ًں“، <b>ظ…طµط§ط¯ط± ط§ظ„ط¬ظ„ط¨</b>\n\n"
+            "ظ„ط§ طھظˆط¬ط¯ ظ…طµط§ط¯ط± ظ…ط¶ط§ظپط© ط¨ط¹ط¯.\n\n"
+            "ط§ط¶ط؛ط· <b>ط¥ط¶ط§ظپط© ظ…طµط¯ط±</b> ظ„ط¥ط¶ط§ظپط© ظ‚ظ†ط§ط© ظٹظˆطھظٹظˆط¨ ظƒظ…طµط¯ط±."
         )
     else:
-        text = "📡 <b>مصادر الجلب</b>\n\n"
+        text = "ًں“، <b>ظ…طµط§ط¯ط± ط§ظ„ط¬ظ„ط¨</b>\n\n"
         for i, src in enumerate(sources, 1):
-            status = "✅" if src.get("enabled") else "❌"
+            status = "âœ…" if src.get("enabled") else "â‌Œ"
             settings = _source_settings(src)
-            source_name = html.escape(src.get('source_name', 'مصدر'))
+            source_name = html.escape(src.get('source_name', 'ظ…طµط¯ط±'))
             content_type = html.escape(src.get('content_type', 'minecraft_mods'))
             source_url = html.escape(src.get('source_url', '')[:50])
             channel_id_short = html.escape(src.get('channel_id', '')[:15])
@@ -1326,31 +1401,31 @@ async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             outro_effect_status = html.escape(_video_effect_status(settings, "outro"))
             text += (
                 f"{i}. {status} <b>{source_name}</b>\n"
-                f"   📦 <code>{content_type}</code>\n"
-                f"   🔗 <code>{source_url}</code>\n"
-                f"   📺 القناة: <code>{channel_id_short}...</code>\n"
-                f"   🎬 Facecam: <code>{facecam_status}</code>\n"
-                f"   📝 النص: <code>{overlay_status}</code>\n"
-                f"   ✨ البداية: <code>{intro_effect_status}</code>\n"
-                f"   🏁 النهاية: <code>{outro_effect_status}</code>\n\n"
+                f"   ًں“¦ <code>{content_type}</code>\n"
+                f"   ًں”— <code>{source_url}</code>\n"
+                f"   ًں“؛ ط§ظ„ظ‚ظ†ط§ط©: <code>{channel_id_short}...</code>\n"
+                f"   ًںژ¬ Facecam: <code>{facecam_status}</code>\n"
+                f"   ًں“‌ ط§ظ„ظ†طµ: <code>{overlay_status}</code>\n"
+                f"   âœ¨ ط§ظ„ط¨ط¯ط§ظٹط©: <code>{intro_effect_status}</code>\n"
+                f"   ًںڈپ ط§ظ„ظ†ظ‡ط§ظٹط©: <code>{outro_effect_status}</code>\n\n"
             )
 
     keyboard = [
-        [InlineKeyboardButton("➕ إضافة مصدر", callback_data="am_add_source")],
+        [InlineKeyboardButton("â‍• ط¥ط¶ط§ظپط© ظ…طµط¯ط±", callback_data="am_add_source")],
     ]
 
-    # أزرار حذف/تبديل/تعديل لكل مصدر
+    # ط£ط²ط±ط§ط± ط­ط°ظپ/طھط¨ط¯ظٹظ„/طھط¹ط¯ظٹظ„ ظ„ظƒظ„ ظ…طµط¯ط±
     for i, src in enumerate(sources[:8]):
         src_id = src.get("id", "")
         enabled = src.get("enabled", True)
-        toggle = "⏸" if enabled else "▶️"
+        toggle = "âڈ¸" if enabled else "â–¶ï¸ڈ"
         keyboard.append([
             InlineKeyboardButton(f"{toggle} {src.get('source_name', '')[:15]}", callback_data=f"am_toggle_src:{src_id}"),
-            InlineKeyboardButton("✏️", callback_data=f"am_edit_src:{src_id}"),
-            InlineKeyboardButton("🗑", callback_data=f"am_del_src:{src_id}"),
+            InlineKeyboardButton("âœڈï¸ڈ", callback_data=f"am_edit_src:{src_id}"),
+            InlineKeyboardButton("ًں—‘", callback_data=f"am_del_src:{src_id}"),
         ])
 
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")])
 
     if query:
         try:
@@ -1364,25 +1439,25 @@ async def sources_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def edit_shorts_only_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تبديل setting shorts_only"""
+    """طھط¨ط¯ظٹظ„ setting shorts_only"""
     query = update.callback_query
     await _safe_answer(query)
     src = await _get_edit_source(context)
     if not src:
-        await query.answer("❌ خطأ: لم يتم العثور على المصدر", show_alert=True)
+        await query.answer("â‌Œ ط®ط·ط£: ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ظ…طµط¯ط±", show_alert=True)
         return await sources_menu(update, context)
 
     db = _get_db()
     settings = _source_settings(src)
     new_value = not bool(settings.get("shorts_only"))
     await asyncio.to_thread(db.update_source_settings, src.get("id"), {"shorts_only": new_value})
-    await query.answer("✅ تم التبديل")
+    await query.answer("âœ… طھظ… ط§ظ„طھط¨ط¯ظٹظ„")
 
     return await _show_edit_source_menu(update, context)
 
 
 async def toggle_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تبديل حالة مصدر"""
+    """طھط¨ط¯ظٹظ„ ط­ط§ظ„ط© ظ…طµط¯ط±"""
     query = update.callback_query
     await _safe_answer(query)
     src_id = query.data.split(":", 1)[1]
@@ -1392,13 +1467,13 @@ async def toggle_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     src = next((s for s in sources if s.get("id") == src_id), None)
     if src:
         await asyncio.to_thread(db.toggle_source, src_id, not src.get("enabled", True))
-        await query.answer("✅ تم التبديل")
+        await query.answer("âœ… طھظ… ط§ظ„طھط¨ط¯ظٹظ„")
 
     return await sources_menu(update, context)
 
 
 async def delete_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف مصدر"""
+    """ط­ط°ظپ ظ…طµط¯ط±"""
     query = update.callback_query
     await _safe_answer(query)
     src_id = query.data.split(":", 1)[1]
@@ -1408,17 +1483,17 @@ async def delete_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success = await asyncio.to_thread(db.remove_source, src_id)
     if success:
         await asyncio.to_thread(_cleanup_source_facecam_storage, source or {"id": src_id})
-        await query.answer("🗑 تم الحذف")
+        await query.answer("ًں—‘ طھظ… ط§ظ„ط­ط°ظپ")
     else:
-        await query.answer("❌ تعذر حذف المصدر")
+        await query.answer("â‌Œ طھط¹ط°ط± ط­ط°ظپ ط§ظ„ظ…طµط¯ط±")
 
     return await sources_menu(update, context)
 
 
-# ==================== تعديل قناة مصدر ====================
+# ==================== طھط¹ط¯ظٹظ„ ظ‚ظ†ط§ط© ظ…طµط¯ط± ====================
 
 async def edit_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء تعديل مصدر - اختيار نوع التعديل"""
+    """ط¨ط¯ط، طھط¹ط¯ظٹظ„ ظ…طµط¯ط± - ط§ط®طھظٹط§ط± ظ†ظˆط¹ ط§ظ„طھط¹ط¯ظٹظ„"""
     query = update.callback_query
     await _safe_answer(query)
     src_id = query.data.split(":", 1)[1]
@@ -1443,20 +1518,20 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     src = await _get_edit_source(context)
     if not src:
         if query:
-            await query.answer("❌ خطأ: لم يتم العثور على المصدر", show_alert=True)
+            await query.answer("â‌Œ ط®ط·ط£: ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ظ…طµط¯ط±", show_alert=True)
         return await sources_menu(update, context)
 
-    src_name = src.get("source_name", "مصدر")
+    src_name = src.get("source_name", "ظ…طµط¯ط±")
     platform = src.get("platform", "youtube")
     platform_map = {
-        "youtube_long": "طويلة فقط (عادية)",
-        "youtube_shorts": "شورتس فقط",
-        "youtube_any": "أي نوع",
-        "youtube": "يوتيوب (افتراضي)",
-        "facebook_long": "فيسبوك طويلة",
-        "facebook_reels": "فيسبوك ريلز",
-        "facebook_any": "فيسبوك أي نوع",
-        "container": "حاوية داخلية",
+        "youtube_long": "ط·ظˆظٹظ„ط© ظپظ‚ط· (ط¹ط§ط¯ظٹط©)",
+        "youtube_shorts": "ط´ظˆط±طھط³ ظپظ‚ط·",
+        "youtube_any": "ط£ظٹ ظ†ظˆط¹",
+        "youtube": "ظٹظˆطھظٹظˆط¨ (ط§ظپطھط±ط§ط¶ظٹ)",
+        "facebook_long": "ظپظٹط³ط¨ظˆظƒ ط·ظˆظٹظ„ط©",
+        "facebook_reels": "ظپظٹط³ط¨ظˆظƒ ط±ظٹظ„ط²",
+        "facebook_any": "ظپظٹط³ط¨ظˆظƒ ط£ظٹ ظ†ظˆط¹",
+        "container": "ط­ط§ظˆظٹط© ط¯ط§ط®ظ„ظٹط©",
     }
     dur_label = platform_map.get(platform, platform)
 
@@ -1474,37 +1549,37 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     fetch_sources_status = _fetch_sources_status_for_ui(src)
 
     text = (
-        f"✏️ <b>تعديل المصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
-        f"نوع الفيديوهات: <code>{html.escape(dur_label)}</code>\n"
-        f"📥 قنوات الجلب: <code>{html.escape(fetch_sources_status)}</code>\n"
-        f"🔒 خصوصية النشر: <code>{html.escape(privacy_status)}</code>\n"
-        f"🎬 فيس كام: <code>{html.escape(fc_label)}</code>\n"
-        f"📝 نص داخل الشورتس: <code>{html.escape(overlay_status)}</code>\n"
-        f"📄 نص إضافي في الوصف: <code>{html.escape(desc_status)}</code>\n"
-        f"↔️ قلب الفيديو: <code>{html.escape(hflip_status)}</code>\n"
-        f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
-        f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
-        f"🏁 تأثير النهاية: <code>{html.escape(outro_effect_status)}</code>\n"
-        f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>\n"
-        f"📹 شورتس فقط: <code>{html.escape(shorts_only_status)}</code>\n\n"
-        "ماذا تود تعديله؟"
+        f"âœڈï¸ڈ <b>طھط¹ط¯ظٹظ„ ط§ظ„ظ…طµط¯ط±:</b> <code>{html.escape(src_name)}</code>\n\n"
+        f"ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ: <code>{html.escape(dur_label)}</code>\n"
+        f"ًں“¥ ظ‚ظ†ظˆط§طھ ط§ظ„ط¬ظ„ط¨: <code>{html.escape(fetch_sources_status)}</code>\n"
+        f"ًں”’ ط®طµظˆطµظٹط© ط§ظ„ظ†ط´ط±: <code>{html.escape(privacy_status)}</code>\n"
+        f"ًںژ¬ ظپظٹط³ ظƒط§ظ…: <code>{html.escape(fc_label)}</code>\n"
+        f"ًں“‌ ظ†طµ ط¯ط§ط®ظ„ ط§ظ„ط´ظˆط±طھط³: <code>{html.escape(overlay_status)}</code>\n"
+        f"ًں“„ ظ†طµ ط¥ط¶ط§ظپظٹ ظپظٹ ط§ظ„ظˆطµظپ: <code>{html.escape(desc_status)}</code>\n"
+        f"â†”ï¸ڈ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ: <code>{html.escape(hflip_status)}</code>\n"
+        f"âœ‚ï¸ڈ ظ‚طµ ط§ظ„ظ†ظ‡ط§ظٹط©: <code>{html.escape(tail_trim_status)}</code>\n"
+        f"âœ¨ طھط£ط«ظٹط± ط§ظ„ط¨ط¯ط§ظٹط©: <code>{html.escape(intro_effect_status)}</code>\n"
+        f"ًںڈپ طھط£ط«ظٹط± ط§ظ„ظ†ظ‡ط§ظٹط©: <code>{html.escape(outro_effect_status)}</code>\n"
+        f"ًں§ھ ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط®ط§ظ…: <code>{html.escape(raw_review_status)}</code>\n"
+        f"ًں“¹ ط´ظˆط±طھط³ ظپظ‚ط·: <code>{html.escape(shorts_only_status)}</code>\n\n"
+        "ظ…ط§ط°ط§ طھظˆط¯ طھط¹ط¯ظٹظ„ظ‡طں"
     )
 
     keyboard = [
-        [InlineKeyboardButton("📺 تغيير القناة المستهدفة", callback_data="am_edit_ch_start")],
-        [InlineKeyboardButton(f"📥 قنوات الجلب: {fetch_sources_status}", callback_data="am_edit_fetch_menu")],
-        [InlineKeyboardButton("⏳ تغيير نوع الفيديوهات (المدة)", callback_data="am_edit_dur_start")],
-        [InlineKeyboardButton(f"🔒 خصوصية النشر: {privacy_status}", callback_data="am_edit_priv_menu")],
-        [InlineKeyboardButton(f"🎬 فيس كام: {fc_label}", callback_data="am_edit_fc_start")],
-        [InlineKeyboardButton(f"📝 إدارة نص الشورتس: {overlay_status}", callback_data="am_edit_ov_menu")],
-        [InlineKeyboardButton(f"📄 إدارة نص الوصف: {desc_status}", callback_data="am_edit_desc_menu")],
-        [InlineKeyboardButton(f"↔️ قلب الفيديو: {hflip_status}", callback_data="am_edit_hflip_menu")],
-        [InlineKeyboardButton(f"✂️ قص النهاية: {tail_trim_status}", callback_data="am_edit_trim_menu")],
-        [InlineKeyboardButton(f"✨ تأثير البداية: {intro_effect_status}", callback_data="am_edit_fx_menu:intro")],
-        [InlineKeyboardButton(f"🏁 تأثير النهاية: {outro_effect_status}", callback_data="am_edit_fx_menu:outro")],
-        [InlineKeyboardButton(f"🧪 مراجعة الخام: {raw_review_status}", callback_data="am_edit_raw_toggle")],
-        [InlineKeyboardButton(f"📹 شورتس فقط: {shorts_only_status}", callback_data="am_edit_shorts_only_toggle")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("ًں“؛ طھط؛ظٹظٹط± ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط³طھظ‡ط¯ظپط©", callback_data="am_edit_ch_start")],
+        [InlineKeyboardButton(f"ًں“¥ ظ‚ظ†ظˆط§طھ ط§ظ„ط¬ظ„ط¨: {fetch_sources_status}", callback_data="am_edit_fetch_menu")],
+        [InlineKeyboardButton("âڈ³ طھط؛ظٹظٹط± ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ (ط§ظ„ظ…ط¯ط©)", callback_data="am_edit_dur_start")],
+        [InlineKeyboardButton(f"ًں”’ ط®طµظˆطµظٹط© ط§ظ„ظ†ط´ط±: {privacy_status}", callback_data="am_edit_priv_menu")],
+        [InlineKeyboardButton(f"ًںژ¬ ظپظٹط³ ظƒط§ظ…: {fc_label}", callback_data="am_edit_fc_start")],
+        [InlineKeyboardButton(f"ًں“‌ ط¥ط¯ط§ط±ط© ظ†طµ ط§ظ„ط´ظˆط±طھط³: {overlay_status}", callback_data="am_edit_ov_menu")],
+        [InlineKeyboardButton(f"ًں“„ ط¥ط¯ط§ط±ط© ظ†طµ ط§ظ„ظˆطµظپ: {desc_status}", callback_data="am_edit_desc_menu")],
+        [InlineKeyboardButton(f"â†”ï¸ڈ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ: {hflip_status}", callback_data="am_edit_hflip_menu")],
+        [InlineKeyboardButton(f"âœ‚ï¸ڈ ظ‚طµ ط§ظ„ظ†ظ‡ط§ظٹط©: {tail_trim_status}", callback_data="am_edit_trim_menu")],
+        [InlineKeyboardButton(f"âœ¨ طھط£ط«ظٹط± ط§ظ„ط¨ط¯ط§ظٹط©: {intro_effect_status}", callback_data="am_edit_fx_menu:intro")],
+        [InlineKeyboardButton(f"ًںڈپ طھط£ط«ظٹط± ط§ظ„ظ†ظ‡ط§ظٹط©: {outro_effect_status}", callback_data="am_edit_fx_menu:outro")],
+        [InlineKeyboardButton(f"ًں§ھ ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط®ط§ظ…: {raw_review_status}", callback_data="am_edit_raw_toggle")],
+        [InlineKeyboardButton(f"ًں“¹ ط´ظˆط±طھط³ ظپظ‚ط·: {shorts_only_status}", callback_data="am_edit_shorts_only_toggle")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
 
     if query:
@@ -1529,31 +1604,31 @@ async def edit_source_fetch_sources_menu(update: Update, context: ContextTypes.D
         return await sources_menu(update, context)
 
     items = _fetch_sources_for_ui(src)
-    src_name = src.get("source_name", "مصدر")
+    src_name = src.get("source_name", "ظ…طµط¯ط±")
 
-    text = f"📥 <b>قنوات الجلب</b>\nللمصدر: <code>{html.escape(src_name)}</code>\n\n"
+    text = f"ًں“¥ <b>ظ‚ظ†ظˆط§طھ ط§ظ„ط¬ظ„ط¨</b>\nظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src_name)}</code>\n\n"
     if not items:
-        text += "الحالة: <code>افتراضي (رابط واحد)</code>\n\n"
+        text += "ط§ظ„ط­ط§ظ„ط©: <code>ط§ظپطھط±ط§ط¶ظٹ (ط±ط§ط¨ط· ظˆط§ط­ط¯)</code>\n\n"
     else:
         enabled_count = sum(1 for x in items if bool((x or {}).get("enabled", True)))
-        text += f"الحالة: <code>{enabled_count}/{len(items)} فعّالة</code>\n\n"
+        text += f"ط§ظ„ط­ط§ظ„ط©: <code>{enabled_count}/{len(items)} ظپط¹ظ‘ط§ظ„ط©</code>\n\n"
         for i, it in enumerate(items, start=1):
             url = str((it or {}).get("url") or "").strip()
-            name = str((it or {}).get("name") or f"قناة {i}").strip() or f"قناة {i}"
+            name = str((it or {}).get("name") or f"ظ‚ظ†ط§ط© {i}").strip() or f"ظ‚ظ†ط§ط© {i}"
             en = bool((it or {}).get("enabled", True))
-            icon = "✅" if en else "❌"
+            icon = "âœ…" if en else "â‌Œ"
             text += f"{i}. {icon} <code>{html.escape(name)}</code>\n<code>{html.escape(url[:140])}</code>\n\n"
 
     keyboard: List[List[InlineKeyboardButton]] = []
     for idx, it in enumerate(items):
         en = bool((it or {}).get("enabled", True))
-        toggle_label = "✅ تفعيل" if not en else "⏸ تعطيل"
+        toggle_label = "âœ… طھظپط¹ظٹظ„" if not en else "âڈ¸ طھط¹ط·ظٹظ„"
         keyboard.append([
             InlineKeyboardButton(toggle_label, callback_data=f"am_edit_fetch_toggle:{idx}"),
-            InlineKeyboardButton("🗑 حذف", callback_data=f"am_edit_fetch_del:{idx}"),
+            InlineKeyboardButton("ًں—‘ ط­ط°ظپ", callback_data=f"am_edit_fetch_del:{idx}"),
         ])
-    keyboard.append([InlineKeyboardButton("➕ إضافة قناة جلب", callback_data="am_edit_fetch_add")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
+    keyboard.append([InlineKeyboardButton("â‍• ط¥ط¶ط§ظپط© ظ‚ظ†ط§ط© ط¬ظ„ط¨", callback_data="am_edit_fetch_add")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")])
 
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1572,10 +1647,10 @@ async def edit_source_fetch_add_prompt(update: Update, context: ContextTypes.DEF
 
     context.user_data["am_text_input_mode"] = "edit_fetch_add"
     text = (
-        "➕ <b>إضافة قناة جلب</b>\n\n"
-        "أرسل رابط واحد فقط (قناة / قائمة تشغيل / رابط فيديو).\n"
-        "يجب أن يبدأ بـ <code>http</code>.\n\n"
-        "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+        "â‍• <b>ط¥ط¶ط§ظپط© ظ‚ظ†ط§ط© ط¬ظ„ط¨</b>\n\n"
+        "ط£ط±ط³ظ„ ط±ط§ط¨ط· ظˆط§ط­ط¯ ظپظ‚ط· (ظ‚ظ†ط§ط© / ظ‚ط§ط¦ظ…ط© طھط´ط؛ظٹظ„ / ط±ط§ط¨ط· ظپظٹط¯ظٹظˆ).\n"
+        "ظٹط¬ط¨ ط£ظ† ظٹط¨ط¯ط£ ط¨ظ€ <code>http</code>.\n\n"
+        "ًں”™ ظ„ظ„ط±ط¬ظˆط¹: ط§ط¶ط؛ط· ط±ط¬ظˆط¹ ظ…ظ† ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط³ط§ط¨ظ‚ط©."
     )
     if query:
         await query.edit_message_text(text, parse_mode="HTML")
@@ -1607,7 +1682,7 @@ async def edit_source_fetch_toggle(update: Update, context: ContextTypes.DEFAULT
 
     success = await _update_edit_source_settings(context, {"fetch_sources": items})
     if query:
-        await query.answer("✅ تم التحديث" if success else "❌ تعذر التحديث", show_alert=not success)
+        await query.answer("âœ… طھظ… ط§ظ„طھط­ط¯ظٹط«" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=not success)
     return await edit_source_fetch_sources_menu(update, context)
 
 
@@ -1631,7 +1706,7 @@ async def edit_source_fetch_delete(update: Update, context: ContextTypes.DEFAULT
     items.pop(idx)
     success = await _update_edit_source_settings(context, {"fetch_sources": items})
     if query:
-        await query.answer("🗑 تم الحذف" if success else "❌ تعذر الحذف", show_alert=not success)
+        await query.answer("ًں—‘ طھظ… ط§ظ„ط­ط°ظپ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„ط­ط°ظپ", show_alert=not success)
     return await edit_source_fetch_sources_menu(update, context)
 
 
@@ -1644,22 +1719,22 @@ async def _show_tail_trim_editor(update: Update, context: ContextTypes.DEFAULT_T
     settings = _source_settings(src)
     trim_status = _tail_trim_status(settings)
     text = (
-        f"✂️ <b>إدارة قص نهاية الفيديو</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
-        f"الحالة الحالية: <code>{html.escape(trim_status)}</code>\n\n"
-        "سيتم تطبيق هذا القص مباشرة بعد تنزيل كل فيديو من هذا المصدر، وقبل أي معالجة أخرى."
+        f"âœ‚ï¸ڈ <b>ط¥ط¯ط§ط±ط© ظ‚طµ ظ†ظ‡ط§ظٹط© ط§ظ„ظپظٹط¯ظٹظˆ</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(trim_status)}</code>\n\n"
+        "ط³ظٹطھظ… طھط·ط¨ظٹظ‚ ظ‡ط°ط§ ط§ظ„ظ‚طµ ظ…ط¨ط§ط´ط±ط© ط¨ط¹ط¯ طھظ†ط²ظٹظ„ ظƒظ„ ظپظٹط¯ظٹظˆ ظ…ظ† ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±طŒ ظˆظ‚ط¨ظ„ ط£ظٹ ظ…ط¹ط§ظ„ط¬ط© ط£ط®ط±ظ‰."
     )
     keyboard: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
     for idx, seconds in enumerate(TAIL_TRIM_OPTIONS, start=1):
-        row.append(InlineKeyboardButton(f"{_seconds_label(seconds)} ثانية", callback_data=f"am_edit_trim:{seconds}"))
+        row.append(InlineKeyboardButton(f"{_seconds_label(seconds)} ط«ط§ظ†ظٹط©", callback_data=f"am_edit_trim:{seconds}"))
         if idx % 2 == 0:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("⬜ بدون قص", callback_data="am_edit_trim:off")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
+    keyboard.append([InlineKeyboardButton("â¬œ ط¨ط¯ظˆظ† ظ‚طµ", callback_data="am_edit_trim:off")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")])
 
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1676,17 +1751,17 @@ async def _show_edit_source_privacy_menu(update: Update, context: ContextTypes.D
     settings = _source_settings(src)
     privacy_status = _source_privacy_status(settings)
     text = (
-        f"🔒 <b>خصوصية نشر الفيديوهات</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
-        f"الحالة الحالية: <code>{html.escape(privacy_status)}</code>\n\n"
-        "اختر الخصوصية التي ستُستخدم عند رفع الفيديوهات من هذا المصدر."
+        f"ًں”’ <b>ط®طµظˆطµظٹط© ظ†ط´ط± ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(privacy_status)}</code>\n\n"
+        "ط§ط®طھط± ط§ظ„ط®طµظˆطµظٹط© ط§ظ„طھظٹ ط³طھظڈط³طھط®ط¯ظ… ط¹ظ†ط¯ ط±ظپط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظ…ظ† ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±."
     )
     keyboard = [
-        [InlineKeyboardButton("🌍 علني (Public)", callback_data="am_edit_priv:public")],
-        [InlineKeyboardButton("🔗 غير مدرج (Unlisted)", callback_data="am_edit_priv:unlisted")],
-        [InlineKeyboardButton("🔒 خاص (Private)", callback_data="am_edit_priv:private")],
-        [InlineKeyboardButton("⚙️ حسب خصوصية القناة", callback_data="am_edit_priv:default")],
-        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+        [InlineKeyboardButton("ًںŒچ ط¹ظ„ظ†ظٹ (Public)", callback_data="am_edit_priv:public")],
+        [InlineKeyboardButton("ًں”— ط؛ظٹط± ظ…ط¯ط±ط¬ (Unlisted)", callback_data="am_edit_priv:unlisted")],
+        [InlineKeyboardButton("ًں”’ ط®ط§طµ (Private)", callback_data="am_edit_priv:private")],
+        [InlineKeyboardButton("âڑ™ï¸ڈ ط­ط³ط¨ ط®طµظˆطµظٹط© ط§ظ„ظ‚ظ†ط§ط©", callback_data="am_edit_priv:default")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")],
     ]
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1709,7 +1784,7 @@ async def edit_source_privacy_set(update: Update, context: ContextTypes.DEFAULT_
         return await _show_edit_source_privacy_menu(update, context)
     target_value = None if value == "default" else value
     success = await _update_edit_source_settings(context, {"privacy": target_value})
-    await query.answer("✅ تم تحديث الخصوصية" if success else "❌ تعذر تحديث الخصوصية", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„ط®طµظˆطµظٹط©" if success else "â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ط§ظ„ط®طµظˆطµظٹط©", show_alert=True)
     return await _show_edit_source_menu(update, context)
 
 
@@ -1721,16 +1796,16 @@ async def _show_edit_source_hflip_menu(update: Update, context: ContextTypes.DEF
     settings = _source_settings(src)
     hflip_status = _source_hflip_status(settings)
     text = (
-        f"↔️ <b>إعداد قلب الفيديو أفقيًا (Mirror)</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
-        f"الحالة الحالية: <code>{html.escape(hflip_status)}</code>\n\n"
-        "اختر طريقة تطبيق القلب لهذا المصدر."
+        f"â†”ï¸ڈ <b>ط¥ط¹ط¯ط§ط¯ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ ط£ظپظ‚ظٹظ‹ط§ (Mirror)</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(hflip_status)}</code>\n\n"
+        "ط§ط®طھط± ط·ط±ظٹظ‚ط© طھط·ط¨ظٹظ‚ ط§ظ„ظ‚ظ„ط¨ ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل للمصدر", callback_data="am_edit_hflip:on")],
-        [InlineKeyboardButton("❌ تعطيل للمصدر", callback_data="am_edit_hflip:off")],
-        [InlineKeyboardButton("⚙️ حسب الإعدادات العامة", callback_data="am_edit_hflip:default")],
-        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_hflip:on")],
+        [InlineKeyboardButton("â‌Œ طھط¹ط·ظٹظ„ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_hflip:off")],
+        [InlineKeyboardButton("âڑ™ï¸ڈ ط­ط³ط¨ ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ط¹ط§ظ…ط©", callback_data="am_edit_hflip:default")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")],
     ]
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1757,7 +1832,7 @@ async def edit_source_hflip_set(update: Update, context: ContextTypes.DEFAULT_TY
         success = await _update_edit_source_settings(context, {"hflip": None})
     else:
         return await _show_edit_source_hflip_menu(update, context)
-    await query.answer("✅ تم تحديث إعداد قلب الفيديو" if success else "❌ تعذر تحديث إعداد قلب الفيديو", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط¥ط¹ط¯ط§ط¯ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ" if success else "â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ط¥ط¹ط¯ط§ط¯ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ", show_alert=True)
     return await _show_edit_source_menu(update, context)
 
 
@@ -1772,16 +1847,16 @@ async def _show_video_effect_editor(update: Update, context: ContextTypes.DEFAUL
     target_label = _video_effect_target_label(target_key)
     status = _video_effect_status(settings, target_key)
     text = (
-        f"✨ <b>إدارة تأثير {target_label} الفيديو</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
-        f"الحالة الحالية: <code>{html.escape(status)}</code>\n\n"
-        f"اختر نوع التأثير المتحرك الذي سيُطبَّق عند <b>{target_label}</b> الفيديو لهذا المصدر."
+        f"âœ¨ <b>ط¥ط¯ط§ط±ط© طھط£ط«ظٹط± {target_label} ط§ظ„ظپظٹط¯ظٹظˆ</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(status)}</code>\n\n"
+        f"ط§ط®طھط± ظ†ظˆط¹ ط§ظ„طھط£ط«ظٹط± ط§ظ„ظ…طھط­ط±ظƒ ط§ظ„ط°ظٹ ط³ظٹظڈط·ط¨ظ‘ظژظ‚ ط¹ظ†ط¯ <b>{target_label}</b> ط§ظ„ظپظٹط¯ظٹظˆ ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±."
     )
     keyboard = [
-        [InlineKeyboardButton("⬜ بدون تأثير", callback_data=f"am_edit_fx_kind:{target_key}:none")],
-        [InlineKeyboardButton("🌫 Blur عادي", callback_data=f"am_edit_fx_kind:{target_key}:blur")],
-        [InlineKeyboardButton("⬛ Black Blur", callback_data=f"am_edit_fx_kind:{target_key}:black_blur")],
-        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+        [InlineKeyboardButton("â¬œ ط¨ط¯ظˆظ† طھط£ط«ظٹط±", callback_data=f"am_edit_fx_kind:{target_key}:none")],
+        [InlineKeyboardButton("ًںŒ« Blur ط¹ط§ط¯ظٹ", callback_data=f"am_edit_fx_kind:{target_key}:blur")],
+        [InlineKeyboardButton("â¬› Black Blur", callback_data=f"am_edit_fx_kind:{target_key}:black_blur")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")],
     ]
 
     if query:
@@ -1801,13 +1876,13 @@ async def _show_video_effect_duration_editor(update: Update, context: ContextTyp
     target_label = _video_effect_target_label(target_key)
     type_label = _video_effect_type_label(effect_type)
     text = (
-        f"⏱ <b>مدة تأثير {target_label}</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
-        f"النوع المختار: <code>{html.escape(type_label)}</code>\n\n"
-        "اختر المدة المطلوبة:"
+        f"âڈ± <b>ظ…ط¯ط© طھط£ط«ظٹط± {target_label}</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
+        f"ط§ظ„ظ†ظˆط¹ ط§ظ„ظ…ط®طھط§ط±: <code>{html.escape(type_label)}</code>\n\n"
+        "ط§ط®طھط± ط§ظ„ظ…ط¯ط© ط§ظ„ظ…ط·ظ„ظˆط¨ط©:"
     )
-    keyboard = [[InlineKeyboardButton(f"{_seconds_label(val)} ثانية", callback_data=f"am_edit_fx_dur:{target_key}:{effect_type}:{val}")] for val in VIDEO_EFFECT_DURATION_OPTIONS]
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"am_edit_fx_menu:{target_key}")])
+    keyboard = [[InlineKeyboardButton(f"{_seconds_label(val)} ط«ط§ظ†ظٹط©", callback_data=f"am_edit_fx_dur:{target_key}:{effect_type}:{val}")] for val in VIDEO_EFFECT_DURATION_OPTIONS]
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data=f"am_edit_fx_menu:{target_key}")])
 
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1840,7 +1915,7 @@ async def edit_source_video_effect_kind(update: Update, context: ContextTypes.DE
 
     if effect_type == "none":
         success = await _update_edit_source_settings(context, {"video_effects": {target: _build_video_effect_config("none")}})
-        await query.answer("✅ تم تعطيل التأثير" if success else "❌ تعذر تحديث التأثير", show_alert=True)
+        await query.answer("âœ… طھظ… طھط¹ط·ظٹظ„ ط§ظ„طھط£ط«ظٹط±" if success else "â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ط§ظ„طھط£ط«ظٹط±", show_alert=True)
         return await _show_edit_source_menu(update, context)
 
     return await _show_video_effect_duration_editor(update, context, target, effect_type)
@@ -1857,11 +1932,11 @@ async def edit_source_video_effect_duration(update: Update, context: ContextType
     try:
         duration = float(raw_duration)
     except Exception:
-        await query.answer("❌ مدة التأثير غير صالحة", show_alert=True)
+        await query.answer("â‌Œ ظ…ط¯ط© ط§ظ„طھط£ط«ظٹط± ط؛ظٹط± طµط§ظ„ط­ط©", show_alert=True)
         return await _show_video_effect_duration_editor(update, context, target, effect_type)
 
     success = await _update_edit_source_settings(context, {"video_effects": {target: _build_video_effect_config(effect_type, duration)}})
-    await query.answer("✅ تم تحديث التأثير" if success else "❌ تعذر تحديث التأثير", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„طھط£ط«ظٹط±" if success else "â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ط§ظ„طھط£ط«ظٹط±", show_alert=True)
     return await _show_edit_source_menu(update, context)
 
 
@@ -1876,11 +1951,11 @@ async def edit_source_tail_trim_value(update: Update, context: ContextTypes.DEFA
         try:
             seconds = float(choice)
         except Exception:
-            await query.answer("❌ قيمة القص غير صالحة", show_alert=True)
+            await query.answer("â‌Œ ظ‚ظٹظ…ط© ط§ظ„ظ‚طµ ط؛ظٹط± طµط§ظ„ط­ط©", show_alert=True)
             return await _show_tail_trim_editor(update, context)
         success = await _update_edit_source_settings(context, {"tail_trim": {"enabled": True, "seconds": seconds}})
 
-    await query.answer("✅ تم تحديث قص النهاية" if success else "❌ تعذر تحديث قص النهاية", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ظ‚طµ ط§ظ„ظ†ظ‡ط§ظٹط©" if success else "â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ظ‚طµ ط§ظ„ظ†ظ‡ط§ظٹط©", show_alert=True)
     return await _show_edit_source_menu(update, context)
 
 
@@ -1893,50 +1968,57 @@ async def _show_overlay_editor(update: Update, context: ContextTypes.DEFAULT_TYP
     settings = _source_settings(src)
     overlay = settings.get("shorts_overlay") or {}
     texts = overlay.get("texts") or []
+    overlay_has_image = bool(str(overlay.get("image_path") or "").strip())
     text = (
-        f"📝 <b>إدارة النص داخل فيديو الشورتس</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
+        f"ًں“‌ <b>ط¥ط¯ط§ط±ط© ط§ظ„ظ†طµ ط¯ط§ط®ظ„ ظپظٹط¯ظٹظˆ ط§ظ„ط´ظˆط±طھط³</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
         f"{_overlay_details(settings)}\n\n"
-        "يمكنك إضافة عدة أسطر، وسيتم اختيارها ثابتًا أو عشوائيًا حسب الإعداد."
+        "ظٹظ…ظƒظ†ظƒ ط¥ط¶ط§ظپط© ط¹ط¯ط© ط£ط³ط·ط±طŒ ظˆط³ظٹطھظ… ط§ط®طھظٹط§ط±ظ‡ط§ ط«ط§ط¨طھظ‹ط§ ط£ظˆ ط¹ط´ظˆط§ط¦ظٹظ‹ط§ ط­ط³ط¨ ط§ظ„ط¥ط¹ط¯ط§ط¯."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل" if not overlay.get("enabled") else "⏸ تعطيل", callback_data="am_edit_ov_toggle")],
-        [InlineKeyboardButton("✍️ إضافة/استبدال النصوص", callback_data="am_edit_ov_text")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„" if not overlay.get("enabled") else "âڈ¸ طھط¹ط·ظٹظ„", callback_data="am_edit_ov_toggle")],
+        [InlineKeyboardButton("âœچï¸ڈ ط¥ط¶ط§ظپط©/ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظ†طµظˆطµ", callback_data="am_edit_ov_text")],
         [
-            InlineKeyboardButton("ثابت", callback_data="am_edit_ov_mode:fixed"),
-            InlineKeyboardButton("عشوائي", callback_data="am_edit_ov_mode:random"),
+            InlineKeyboardButton("🖼️ رفع/تغيير الصورة", callback_data="am_edit_ov_img_prompt"),
+            InlineKeyboardButton("🗑️ حذف الصورة", callback_data="am_edit_ov_img_del"),
         ],
         [
-            InlineKeyboardButton("البداية", callback_data="am_edit_ov_time:start"),
-            InlineKeyboardButton("النهاية", callback_data="am_edit_ov_time:end"),
-            InlineKeyboardButton("كامل", callback_data="am_edit_ov_time:full"),
+            InlineKeyboardButton("ط«ط§ط¨طھ", callback_data="am_edit_ov_mode:fixed"),
+            InlineKeyboardButton("ط¹ط´ظˆط§ط¦ظٹ", callback_data="am_edit_ov_mode:random"),
         ],
         [
-            InlineKeyboardButton("1ث", callback_data="am_edit_ov_dur:1.0"),
-            InlineKeyboardButton("1.5ث", callback_data="am_edit_ov_dur:1.5"),
-            InlineKeyboardButton("2ث", callback_data="am_edit_ov_dur:2.0"),
-            InlineKeyboardButton("3ث", callback_data="am_edit_ov_dur:3.0"),
+            InlineKeyboardButton("ط§ظ„ط¨ط¯ط§ظٹط©", callback_data="am_edit_ov_time:start"),
+            InlineKeyboardButton("ط§ظ„ظ†ظ‡ط§ظٹط©", callback_data="am_edit_ov_time:end"),
+            InlineKeyboardButton("ظƒط§ظ…ظ„", callback_data="am_edit_ov_time:full"),
         ],
         [
-            InlineKeyboardButton("أعلى", callback_data="am_edit_ov_pos:top"),
-            InlineKeyboardButton("وسط", callback_data="am_edit_ov_pos:center"),
-            InlineKeyboardButton("أسفل", callback_data="am_edit_ov_pos:bottom"),
+            InlineKeyboardButton("1ط«", callback_data="am_edit_ov_dur:1.0"),
+            InlineKeyboardButton("1.5ط«", callback_data="am_edit_ov_dur:1.5"),
+            InlineKeyboardButton("2ط«", callback_data="am_edit_ov_dur:2.0"),
+            InlineKeyboardButton("3ط«", callback_data="am_edit_ov_dur:3.0"),
+        ],
+        [
+            InlineKeyboardButton("ط£ط¹ظ„ظ‰", callback_data="am_edit_ov_pos:top"),
+            InlineKeyboardButton("ظˆط³ط·", callback_data="am_edit_ov_pos:center"),
+            InlineKeyboardButton("ط£ط³ظپظ„", callback_data="am_edit_ov_pos:bottom"),
         ],
         [
             InlineKeyboardButton(
-                f"ظهور: {_overlay_animation_type_label((overlay.get('intro_animation') or {}).get('type'))}",
+                f"ط¸ظ‡ظˆط±: {_overlay_animation_type_label((overlay.get('intro_animation') or {}).get('type'))}",
                 callback_data="am_edit_ov_anim_menu:intro",
             ),
             InlineKeyboardButton(
-                f"اختفاء: {_overlay_animation_type_label((overlay.get('outro_animation') or {}).get('type'))}",
+                f"ط§ط®طھظپط§ط،: {_overlay_animation_type_label((overlay.get('outro_animation') or {}).get('type'))}",
                 callback_data="am_edit_ov_anim_menu:outro",
             ),
         ],
     ]
+    if not overlay_has_image:
+        keyboard.insert(0, [InlineKeyboardButton("⚠️ لا توجد صورة مرفوعة", callback_data="am_edit_ov_img_prompt")])
     for idx, item in enumerate(texts[:5]):
         label = item.replace("\n", " ")[:24]
-        keyboard.append([InlineKeyboardButton(f"🗑 حذف: {label}", callback_data=f"am_edit_ov_del:{idx}")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
+        keyboard.append([InlineKeyboardButton(f"ًں—‘ ط­ط°ظپ: {label}", callback_data=f"am_edit_ov_del:{idx}")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")])
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     else:
@@ -1954,27 +2036,27 @@ async def _show_description_editor(update: Update, context: ContextTypes.DEFAULT
     desc = settings.get("extra_description") or {}
     texts = desc.get("texts") or []
     text = (
-        f"📄 <b>إدارة النص الإضافي داخل الوصف</b>\n"
-        f"للمصدر: <code>{html.escape(src.get('source_name', 'مصدر'))}</code>\n\n"
+        f"ًں“„ <b>ط¥ط¯ط§ط±ط© ط§ظ„ظ†طµ ط§ظ„ط¥ط¶ط§ظپظٹ ط¯ط§ط®ظ„ ط§ظ„ظˆطµظپ</b>\n"
+        f"ظ„ظ„ظ…طµط¯ط±: <code>{html.escape(src.get('source_name', 'ظ…طµط¯ط±'))}</code>\n\n"
         f"{_description_details(settings)}\n\n"
-        "إذا أرسلت عدة فقرات، افصل بينها بسطر يحوي <code>---</code> فقط."
+        "ط¥ط°ط§ ط£ط±ط³ظ„طھ ط¹ط¯ط© ظپظ‚ط±ط§طھطŒ ط§ظپطµظ„ ط¨ظٹظ†ظ‡ط§ ط¨ط³ط·ط± ظٹط­ظˆظٹ <code>---</code> ظپظ‚ط·."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل" if not desc.get("enabled") else "⏸ تعطيل", callback_data="am_edit_desc_toggle")],
-        [InlineKeyboardButton("✍️ إضافة/استبدال النصوص", callback_data="am_edit_desc_text")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„" if not desc.get("enabled") else "âڈ¸ طھط¹ط·ظٹظ„", callback_data="am_edit_desc_toggle")],
+        [InlineKeyboardButton("âœچï¸ڈ ط¥ط¶ط§ظپط©/ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظ†طµظˆطµ", callback_data="am_edit_desc_text")],
         [
-            InlineKeyboardButton("ثابت", callback_data="am_edit_desc_mode:fixed"),
-            InlineKeyboardButton("عشوائي", callback_data="am_edit_desc_mode:random"),
+            InlineKeyboardButton("ط«ط§ط¨طھ", callback_data="am_edit_desc_mode:fixed"),
+            InlineKeyboardButton("ط¹ط´ظˆط§ط¦ظٹ", callback_data="am_edit_desc_mode:random"),
         ],
         [
-            InlineKeyboardButton("قبل الوصف", callback_data="am_edit_desc_place:prepend"),
-            InlineKeyboardButton("بعد الوصف", callback_data="am_edit_desc_place:append"),
+            InlineKeyboardButton("ظ‚ط¨ظ„ ط§ظ„ظˆطµظپ", callback_data="am_edit_desc_place:prepend"),
+            InlineKeyboardButton("ط¨ط¹ط¯ ط§ظ„ظˆطµظپ", callback_data="am_edit_desc_place:append"),
         ],
     ]
     for idx, item in enumerate(texts[:5]):
         label = item.replace("\n", " ")[:24]
-        keyboard.append([InlineKeyboardButton(f"🗑 حذف: {label}", callback_data=f"am_edit_desc_del:{idx}")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")])
+        keyboard.append([InlineKeyboardButton(f"ًں—‘ ط­ط°ظپ: {label}", callback_data=f"am_edit_desc_del:{idx}")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ…طµط¯ط±", callback_data="am_edit_src_menu")])
     if query:
         try:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1987,7 +2069,7 @@ async def _show_description_editor(update: Update, context: ContextTypes.DEFAULT
     return AM_EDIT_SOURCE_CHANNEL
 
 async def edit_source_channel_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة القنوات لتعديل المصدر"""
+    """ط¹ط±ط¶ ظ‚ط§ط¦ظ…ط© ط§ظ„ظ‚ظ†ظˆط§طھ ظ„طھط¹ط¯ظٹظ„ ط§ظ„ظ…طµط¯ط±"""
     query = update.callback_query
     await _safe_answer(query)
     src_id = context.user_data.get("am_edit_source_id")
@@ -1998,7 +2080,7 @@ async def edit_source_channel_list(update: Update, context: ContextTypes.DEFAULT
     db = _get_db()
     sources = await asyncio.to_thread(db.get_sources)
     src = next((s for s in sources if s.get("id") == src_id), None)
-    src_name = src.get("source_name", "مصدر") if src else "مصدر"
+    src_name = src.get("source_name", "ظ…طµط¯ط±") if src else "ظ…طµط¯ط±"
     current_ch = src.get("channel_id", "") if src else ""
 
     try:
@@ -2007,37 +2089,37 @@ async def edit_source_channel_list(update: Update, context: ContextTypes.DEFAULT
         channels, total = await asyncio.to_thread(cm.list_channels, enabled_only=True, limit=50)
 
         if total == 0:
-            text = "❌ لا توجد قنوات مفعلة."
-            keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+            text = "â‌Œ ظ„ط§ طھظˆط¬ط¯ ظ‚ظ†ظˆط§طھ ظ…ظپط¹ظ„ط©."
+            keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return AM_SOURCES
 
         text = (
-            f"✏️ <b>تعديل قناة المصدر:</b> {html.escape(src_name)}\n\n"
-            f"القناة الحالية: <code>{html.escape(current_ch[:20])}...</code>\n\n"
-            "اختر القناة الجديدة:"
+            f"âœڈï¸ڈ <b>طھط¹ط¯ظٹظ„ ظ‚ظ†ط§ط© ط§ظ„ظ…طµط¯ط±:</b> {html.escape(src_name)}\n\n"
+            f"ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(current_ch[:20])}...</code>\n\n"
+            "ط§ط®طھط± ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ط¬ط¯ظٹط¯ط©:"
         )
         keyboard = []
         for ch in channels:
-            icon = "✅" if ch.channel_id == current_ch else "📺"
+            icon = "âœ…" if ch.channel_id == current_ch else "ًں“؛"
             label = f"{icon} {ch.channel_name[:30]}"
             keyboard.append([InlineKeyboardButton(label, callback_data=f"am_edit_ch:{ch.channel_id}")])
 
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
+        keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")])
 
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_EDIT_SOURCE_CHANNEL
 
     except Exception as e:
         logger.error(f"Error listing channels for edit: {e}")
-        text = f"❌ خطأ: <code>{html.escape(str(e)[:100])}</code>"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+        text = f"â‌Œ ط®ط·ط£: <code>{html.escape(str(e)[:100])}</code>"
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_SOURCES
 
 
 async def edit_source_choose_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تطبيق تغيير القناة المستهدفة"""
+    """طھط·ط¨ظٹظ‚ طھط؛ظٹظٹط± ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط³طھظ‡ط¯ظپط©"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -2045,13 +2127,13 @@ async def edit_source_choose_channel(update: Update, context: ContextTypes.DEFAU
     src_id = context.user_data.get("am_edit_source_id", "")
 
     if not src_id:
-        await query.answer("❌ خطأ: لم يتم العثور على المصدر", show_alert=True)
+        await query.answer("â‌Œ ط®ط·ط£: ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ظ…طµط¯ط±", show_alert=True)
         return await sources_menu(update, context)
 
     db = _get_db()
     success = await asyncio.to_thread(db.update_source_channel, src_id, new_channel_id)
 
-    # الحصول على اسم القناة الجديدة
+    # ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ط§ط³ظ… ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ط¬ط¯ظٹط¯ط©
     ch_name = new_channel_id[:15]
     try:
         from ..channel_manager import ChannelManager
@@ -2064,17 +2146,17 @@ async def edit_source_choose_channel(update: Update, context: ContextTypes.DEFAU
         pass
 
     if success:
-        await query.answer(f"✅ تم تغيير القناة إلى: {ch_name}", show_alert=True)
+        await query.answer(f"âœ… طھظ… طھط؛ظٹظٹط± ط§ظ„ظ‚ظ†ط§ط© ط¥ظ„ظ‰: {ch_name}", show_alert=True)
     else:
-        await query.answer("❌ فشل في تحديث القناة", show_alert=True)
+        await query.answer("â‌Œ ظپط´ظ„ ظپظٹ طھط­ط¯ظٹط« ط§ظ„ظ‚ظ†ط§ط©", show_alert=True)
 
-    # تنظيف
+    # طھظ†ط¸ظٹظپ
     context.user_data.pop("am_edit_source_id", None)
 
     return await sources_menu(update, context)
 
 async def edit_source_duration_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء تعديل نوع الفيديوهات (المدة)"""
+    """ط¨ط¯ط، طھط¹ط¯ظٹظ„ ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ (ط§ظ„ظ…ط¯ط©)"""
     query = update.callback_query
     await _safe_answer(query)
     
@@ -2085,24 +2167,24 @@ async def edit_source_duration_start(update: Update, context: ContextTypes.DEFAU
     db = _get_db()
     sources = db.get_sources()
     src = next((s for s in sources if s.get("id") == src_id), None)
-    src_name = src.get("source_name", "مصدر") if src else "مصدر"
+    src_name = src.get("source_name", "ظ…طµط¯ط±") if src else "ظ…طµط¯ط±"
 
     text = (
-        f"⏳ <b>تعديل نوع الفيديوهات للمصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
-        "اختر النوع الجديد:"
+        f"âڈ³ <b>طھط¹ط¯ظٹظ„ ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظ„ظ„ظ…طµط¯ط±:</b> <code>{html.escape(src_name)}</code>\n\n"
+        "ط§ط®طھط± ط§ظ„ظ†ظˆط¹ ط§ظ„ط¬ط¯ظٹط¯:"
     )
     
     keyboard = [
-        [InlineKeyboardButton("🎬 طويلة فقط", callback_data="am_set_dur:youtube_long")],
-        [InlineKeyboardButton("📱 شورتس فقط", callback_data="am_set_dur:youtube_shorts")],
-        [InlineKeyboardButton("🔄 أي نوع", callback_data="am_set_dur:youtube_any")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]
+        [InlineKeyboardButton("ًںژ¬ ط·ظˆظٹظ„ط© ظپظ‚ط·", callback_data="am_set_dur:youtube_long")],
+        [InlineKeyboardButton("ًں“± ط´ظˆط±طھط³ ظپظ‚ط·", callback_data="am_set_dur:youtube_shorts")],
+        [InlineKeyboardButton("ًں”„ ط£ظٹ ظ†ظˆط¹", callback_data="am_set_dur:youtube_any")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_EDIT_SOURCE_CHANNEL
 
 async def edit_source_choose_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تطبيق تغيير نوع الفيديوهات"""
+    """طھط·ط¨ظٹظ‚ طھط؛ظٹظٹط± ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ"""
     query = update.callback_query
     await _safe_answer(query)
     
@@ -2110,22 +2192,22 @@ async def edit_source_choose_duration(update: Update, context: ContextTypes.DEFA
     src_id = context.user_data.get("am_edit_source_id", "")
 
     if not src_id:
-        await query.answer("❌ خطأ: لم يتم العثور على المصدر", show_alert=True)
+        await query.answer("â‌Œ ط®ط·ط£: ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط§ظ„ظ…طµط¯ط±", show_alert=True)
         return await sources_menu(update, context)
 
     db = _get_db()
     success = db.update_source_platform(src_id, new_platform)
 
     platform_map = {
-        "youtube_long": "طويلة فقط",
-        "youtube_shorts": "شورتس فقط",
-        "youtube_any": "أي نوع"
+        "youtube_long": "ط·ظˆظٹظ„ط© ظپظ‚ط·",
+        "youtube_shorts": "ط´ظˆط±طھط³ ظپظ‚ط·",
+        "youtube_any": "ط£ظٹ ظ†ظˆط¹"
     }
 
     if success:
-        await query.answer(f"✅ تم التغيير إلى: {platform_map.get(new_platform, new_platform)}", show_alert=True)
+        await query.answer(f"âœ… طھظ… ط§ظ„طھط؛ظٹظٹط± ط¥ظ„ظ‰: {platform_map.get(new_platform, new_platform)}", show_alert=True)
     else:
-        await query.answer("❌ فشل تغيير نوع الفيديوهات", show_alert=True)
+        await query.answer("â‌Œ ظپط´ظ„ طھط؛ظٹظٹط± ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ", show_alert=True)
 
     context.user_data.pop("am_edit_source_id", None)
     return await sources_menu(update, context)
@@ -2142,41 +2224,41 @@ def _build_facecam_menu_keyboard(settings: Dict[str, Any], *, mode: str) -> Inli
     if mode == "edit":
         enabled = bool(facecam.get("enabled"))
         keyboard.append([
-            InlineKeyboardButton("⬜ تعطيل" if enabled else "✅ تفعيل", callback_data=f"{prefix}toggle:{'off' if enabled else 'on'}")
+            InlineKeyboardButton("â¬œ طھط¹ط·ظٹظ„" if enabled else "âœ… طھظپط¹ظٹظ„", callback_data=f"{prefix}toggle:{'off' if enabled else 'on'}")
         ])
     else:
-        keyboard.append([InlineKeyboardButton("🚫 تعطيل الفيس كام", callback_data=f"{prefix}disable")])
+        keyboard.append([InlineKeyboardButton("ًںڑ« طھط¹ط·ظٹظ„ ط§ظ„ظپظٹط³ ظƒط§ظ…", callback_data=f"{prefix}disable")])
 
     keyboard.append([
-        InlineKeyboardButton("⬆️ دائري أعلى", callback_data=f"{prefix}pos:top_center"),
-        InlineKeyboardButton("⬇️ دائري أسفل", callback_data=f"{prefix}pos:bottom_center"),
+        InlineKeyboardButton("â¬†ï¸ڈ ط¯ط§ط¦ط±ظٹ ط£ط¹ظ„ظ‰", callback_data=f"{prefix}pos:top_center"),
+        InlineKeyboardButton("â¬‡ï¸ڈ ط¯ط§ط¦ط±ظٹ ط£ط³ظپظ„", callback_data=f"{prefix}pos:bottom_center"),
     ])
     keyboard.append([
-        InlineKeyboardButton("↖️ دائرة صغيرة أعلى اليسار", callback_data=f"{prefix}pos:small_circle_top_left"),
-        InlineKeyboardButton("↗️ دائرة صغيرة أعلى اليمين", callback_data=f"{prefix}pos:small_circle_top_right"),
+        InlineKeyboardButton("â†–ï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±", callback_data=f"{prefix}pos:small_circle_top_left"),
+        InlineKeyboardButton("â†—ï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†", callback_data=f"{prefix}pos:small_circle_top_right"),
     ])
     keyboard.append([
-        InlineKeyboardButton("↘️ دائرة صغيرة أسفل اليمين", callback_data=f"{prefix}pos:small_circle_bottom_right"),
-        InlineKeyboardButton("↙️ دائرة صغيرة أسفل اليسار", callback_data=f"{prefix}pos:small_circle_bottom_left"),
+        InlineKeyboardButton("â†کï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط³ظپظ„ ط§ظ„ظٹظ…ظٹظ†", callback_data=f"{prefix}pos:small_circle_bottom_right"),
+        InlineKeyboardButton("â†™ï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط³ظپظ„ ط§ظ„ظٹط³ط§ط±", callback_data=f"{prefix}pos:small_circle_bottom_left"),
     ])
-    keyboard.append([InlineKeyboardButton("📤 إضافة / رفع مقطع جديد", callback_data=f"{prefix}upload")])
+    keyboard.append([InlineKeyboardButton("ًں“¤ ط¥ط¶ط§ظپط© / ط±ظپط¹ ظ…ظ‚ط·ط¹ ط¬ط¯ظٹط¯", callback_data=f"{prefix}upload")])
 
     for clip in clips[:5]:
         clip_name = _truncate_facecam_clip_name(clip.get("name"))
-        keyboard.append([InlineKeyboardButton(f"🗑 حذف {clip_name}", callback_data=f"{prefix}del:{clip.get('id')}")])
+        keyboard.append([InlineKeyboardButton(f"ًں—‘ ط­ط°ظپ {clip_name}", callback_data=f"{prefix}del:{clip.get('id')}")])
 
-    keyboard.append([InlineKeyboardButton("✅ تم" if mode == "edit" else "➡️ متابعة", callback_data=done_callback)])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=back_callback)])
+    keyboard.append([InlineKeyboardButton("âœ… طھظ…" if mode == "edit" else "â‍،ï¸ڈ ظ…طھط§ط¨ط¹ط©", callback_data=done_callback)])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data=back_callback)])
     return InlineKeyboardMarkup(keyboard)
 
 
 async def _show_add_facecam_manager(update: Update, context: ContextTypes.DEFAULT_TYPE, notice: Optional[str] = None):
     settings = _draft_source_settings(context)
     text = (
-        "🎬 <b>مكتبة Facecam للمصدر الجديد</b>\n\n"
+        "ًںژ¬ <b>ظ…ظƒطھط¨ط© Facecam ظ„ظ„ظ…طµط¯ط± ط§ظ„ط¬ط¯ظٹط¯</b>\n\n"
         f"{_facecam_details(settings)}\n\n"
-        "أرسل الآن فيديو أو صورة لإضافتها إلى هذا المصدر. سيتم تحويل الصورة تلقائيًا إلى فيديو متوافق، ويمكنك رفع أكثر من مقطع، "
-        "وسيتم اختيار مقطع عشوائيًا أثناء المعالجة."
+        "ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ظپظٹط¯ظٹظˆ ط£ظˆ طµظˆط±ط© ظ„ط¥ط¶ط§ظپطھظ‡ط§ ط¥ظ„ظ‰ ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±. ط³ظٹطھظ… طھط­ظˆظٹظ„ ط§ظ„طµظˆط±ط© طھظ„ظ‚ط§ط¦ظٹظ‹ط§ ط¥ظ„ظ‰ ظپظٹط¯ظٹظˆ ظ…طھظˆط§ظپظ‚طŒ ظˆظٹظ…ظƒظ†ظƒ ط±ظپط¹ ط£ظƒط«ط± ظ…ظ† ظ…ظ‚ط·ط¹طŒ "
+        "ظˆط³ظٹطھظ… ط§ط®طھظٹط§ط± ظ…ظ‚ط·ط¹ ط¹ط´ظˆط§ط¦ظٹظ‹ط§ ط£ط«ظ†ط§ط، ط§ظ„ظ…ط¹ط§ظ„ط¬ط©."
     )
     if notice:
         text += f"\n\n{notice}"
@@ -2193,11 +2275,11 @@ async def _show_edit_facecam_manager(update: Update, context: ContextTypes.DEFAU
     if not src:
         return await sources_menu(update, context)
     settings = _source_settings(src)
-    src_name = src.get("source_name", "مصدر")
+    src_name = src.get("source_name", "ظ…طµط¯ط±")
     text = (
-        f"🎬 <b>إدارة Facecam للمصدر:</b> <code>{html.escape(src_name)}</code>\n\n"
+        f"ًںژ¬ <b>ط¥ط¯ط§ط±ط© Facecam ظ„ظ„ظ…طµط¯ط±:</b> <code>{html.escape(src_name)}</code>\n\n"
         f"{_facecam_details(settings)}\n\n"
-        "يمكنك من هنا تفعيل/تعطيل الـ Facecam، تغيير الوضعية، وإضافة أو حذف المقاطع الخاصة بهذا المصدر."
+        "ظٹظ…ظƒظ†ظƒ ظ…ظ† ظ‡ظ†ط§ طھظپط¹ظٹظ„/طھط¹ط·ظٹظ„ ط§ظ„ظ€ FacecamطŒ طھط؛ظٹظٹط± ط§ظ„ظˆط¶ط¹ظٹط©طŒ ظˆط¥ط¶ط§ظپط© ط£ظˆ ط­ط°ظپ ط§ظ„ظ…ظ‚ط§ط·ط¹ ط§ظ„ط®ط§طµط© ط¨ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±."
     )
     if notice:
         text += f"\n\n{notice}"
@@ -2221,9 +2303,9 @@ async def edit_source_choose_facecam(update: Update, context: ContextTypes.DEFAU
     await _safe_answer(query)
     choice = (query.data.split(":", 1)[1] if query and query.data else "").strip().lower()
     if choice == "yes":
-        return await _update_edit_facecam_setting(update, context, {"enabled": True}, notice="✅ تم تفعيل الفيس كام.")
+        return await _update_edit_facecam_setting(update, context, {"enabled": True}, notice="âœ… طھظ… طھظپط¹ظٹظ„ ط§ظ„ظپظٹط³ ظƒط§ظ….")
     if choice == "no":
-        return await _update_edit_facecam_setting(update, context, {"enabled": False}, notice="✅ تم تعطيل الفيس كام.")
+        return await _update_edit_facecam_setting(update, context, {"enabled": False}, notice="âœ… طھظ… طھط¹ط·ظٹظ„ ط§ظ„ظپظٹط³ ظƒط§ظ….")
     return await _show_edit_facecam_manager(update, context)
 
 
@@ -2237,15 +2319,15 @@ async def edit_source_choose_facecam_pos(update: Update, context: ContextTypes.D
         update,
         context,
         _build_facecam_settings(position, _facecam_clips(current_settings), enabled=True),
-        notice="✅ تم تحديث وضعية الفيس كام.",
+        notice="âœ… طھظ… طھط­ط¯ظٹط« ظˆط¶ط¹ظٹط© ط§ظ„ظپظٹط³ ظƒط§ظ….",
     )
 
 
 async def _update_edit_facecam_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, facecam_update: Dict[str, Any], *, notice: Optional[str] = None):
     success = await _update_edit_source_settings(context, {"facecam": facecam_update})
     if not success and update.callback_query:
-        await update.callback_query.answer("❌ تعذر تحديث إعدادات الفيس كام", show_alert=True)
-    return await _show_edit_facecam_manager(update, context, notice if success else "❌ تعذر تحديث إعدادات الفيس كام.")
+        await update.callback_query.answer("â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…", show_alert=True)
+    return await _show_edit_facecam_manager(update, context, notice if success else "â‌Œ طھط¹ط°ط± طھط­ط¯ظٹط« ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ….")
 
 
 async def edit_source_facecam_manage(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2256,7 +2338,7 @@ async def edit_source_facecam_manage(update: Update, context: ContextTypes.DEFAU
     value = data[2] if len(data) > 2 else ""
 
     if action == "toggle":
-        return await _update_edit_facecam_setting(update, context, {"enabled": value == "on"}, notice="✅ تم تحديث حالة الفيس كام.")
+        return await _update_edit_facecam_setting(update, context, {"enabled": value == "on"}, notice="âœ… طھظ… طھط­ط¯ظٹط« ط­ط§ظ„ط© ط§ظ„ظپظٹط³ ظƒط§ظ….")
     if action == "pos":
         src = await _get_edit_source(context)
         current_settings = _source_settings(src) if src else {}
@@ -2264,11 +2346,11 @@ async def edit_source_facecam_manage(update: Update, context: ContextTypes.DEFAU
             update,
             context,
             _build_facecam_settings(value, _facecam_clips(current_settings), enabled=True),
-            notice="✅ تم تحديث وضعية الفيس كام.",
+            notice="âœ… طھظ… طھط­ط¯ظٹط« ظˆط¶ط¹ظٹط© ط§ظ„ظپظٹط³ ظƒط§ظ….",
         )
     if action == "upload":
         context.user_data["am_facecam_upload_mode"] = "edit"
-        return await _show_edit_facecam_manager(update, context, "📤 أرسل الآن فيديو أو صورة Facecam وسيتم ربطها بهذا المصدر.")
+        return await _show_edit_facecam_manager(update, context, "ًں“¤ ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ظپظٹط¯ظٹظˆ ط£ظˆ طµظˆط±ط© Facecam ظˆط³ظٹطھظ… ط±ط¨ط·ظ‡ط§ ط¨ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±.")
     if action == "del":
         src = await _get_edit_source(context)
         if not src:
@@ -2290,8 +2372,8 @@ async def edit_source_facecam_manage(update: Update, context: ContextTypes.DEFAU
                 context,
                 {"facecam": _build_facecam_settings(selection, kept, enabled=current_facecam.get("enabled", True))},
             )
-            return await _show_edit_facecam_manager(update, context, "✅ تم حذف مقطع الفيس كام.")
-        return await _show_edit_facecam_manager(update, context, "⚠️ لم يتم العثور على هذا المقطع.")
+            return await _show_edit_facecam_manager(update, context, "âœ… طھظ… ط­ط°ظپ ظ…ظ‚ط·ط¹ ط§ظ„ظپظٹط³ ظƒط§ظ….")
+        return await _show_edit_facecam_manager(update, context, "âڑ ï¸ڈ ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ظ‡ط°ط§ ط§ظ„ظ…ظ‚ط·ط¹.")
     return await _show_edit_facecam_manager(update, context)
 
 
@@ -2314,12 +2396,13 @@ async def edit_source_facecam_upload_receive(update: Update, context: ContextTyp
     current_facecam = _facecam_config(settings)
     selection = str(current_facecam.get("layout") or current_facecam.get("position") or "top_center")
     await _update_edit_source_settings(context, {"facecam": _build_facecam_settings(selection, clips, enabled=True)})
-    return await _show_edit_facecam_manager(update, context, "✅ تم رفع مقطع/صورة Facecam جديد لهذا المصدر.")
+    return await _show_edit_facecam_manager(update, context, "âœ… طھظ… ط±ظپط¹ ظ…ظ‚ط·ط¹/طµظˆط±ط© Facecam ط¬ط¯ظٹط¯ ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±.")
 
 
 async def edit_source_overlay_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await _safe_answer(query)
+    context.user_data.pop("am_text_input_mode", None)
     return await _show_overlay_editor(update, context)
 
 
@@ -2346,7 +2429,7 @@ async def edit_source_raw_review_toggle(update: Update, context: ContextTypes.DE
     settings = _source_settings(src)
     enabled = bool(settings.get("require_raw_review"))
     success = await _update_edit_source_settings(context, {"require_raw_review": not enabled})
-    await query.answer("✅ تم تحديث مراجعة الخام" if success else "❌ تعذر التحديث", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط®ط§ظ…" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=True)
     return await _show_edit_source_menu(update, context)
 
 
@@ -2359,12 +2442,12 @@ async def edit_source_overlay_toggle(update: Update, context: ContextTypes.DEFAU
     settings = _source_settings(src)
     overlay = settings.get("shorts_overlay") or {}
     if not overlay.get("texts") and not overlay.get("enabled"):
-        await query.answer("أضف نصوصًا أولًا قبل التفعيل", show_alert=True)
+        await query.answer("ط£ط¶ظپ ظ†طµظˆطµظ‹ط§ ط£ظˆظ„ظ‹ط§ ظ‚ط¨ظ„ ط§ظ„طھظپط¹ظٹظ„", show_alert=True)
         return await _show_overlay_editor(update, context)
     success = await _update_edit_source_settings(context, {
         "shorts_overlay": {"enabled": not overlay.get("enabled", False)}
     })
-    await query.answer("✅ تم تحديث حالة النص داخل الفيديو" if success else "❌ تعذر التحديث", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط­ط§ظ„ط© ط§ظ„ظ†طµ ط¯ط§ط®ظ„ ط§ظ„ظپظٹط¯ظٹظˆ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=True)
     return await _show_overlay_editor(update, context)
 
 
@@ -2373,7 +2456,7 @@ async def edit_source_overlay_mode(update: Update, context: ContextTypes.DEFAULT
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"selection_mode": mode}})
-    await query.answer("✅ تم تحديث طريقة الاختيار" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط·ط±ظٹظ‚ط© ط§ظ„ط§ط®طھظٹط§ط±" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_overlay_editor(update, context)
 
 
@@ -2382,7 +2465,7 @@ async def edit_source_overlay_timing(update: Update, context: ContextTypes.DEFAU
     await _safe_answer(query)
     timing = query.data.split(":", 1)[1]
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"timing": timing}})
-    await query.answer("✅ تم تحديث التوقيت" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„طھظˆظ‚ظٹطھ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_overlay_editor(update, context)
 
 
@@ -2391,7 +2474,7 @@ async def edit_source_overlay_duration(update: Update, context: ContextTypes.DEF
     await _safe_answer(query)
     duration = float(query.data.split(":", 1)[1])
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"duration": duration}})
-    await query.answer("✅ تم تحديث المدة" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„ظ…ط¯ط©" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_overlay_editor(update, context)
 
 
@@ -2400,7 +2483,7 @@ async def edit_source_overlay_position(update: Update, context: ContextTypes.DEF
     await _safe_answer(query)
     position = query.data.split(":", 1)[1]
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"screen_position": position}})
-    await query.answer("✅ تم تحديث الموضع" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„ظ…ظˆط¶ط¹" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_overlay_editor(update, context)
 
 
@@ -2410,12 +2493,12 @@ async def _ask_source_overlay_animation_kind(update: Update, context: ContextTyp
     title = _overlay_animation_target_label(target_key)
     prefix = "am_edit_ov_anim_kind" if edit_mode else "am_src_ov_anim_kind"
     back_callback = f"am_edit_ov_menu" if edit_mode else "am_add_overlay_menu"
-    text = f"✨ <b>اختر أنيميشن {title} النص:</b>"
+    text = f"âœ¨ <b>ط§ط®طھط± ط£ظ†ظٹظ…ظٹط´ظ† {title} ط§ظ„ظ†طµ:</b>"
     keyboard = [
-        [InlineKeyboardButton("بدون أنيميشن", callback_data=f"{prefix}:{target_key}:none")],
+        [InlineKeyboardButton("ط¨ط¯ظˆظ† ط£ظ†ظٹظ…ظٹط´ظ†", callback_data=f"{prefix}:{target_key}:none")],
         [InlineKeyboardButton("Fade", callback_data=f"{prefix}:{target_key}:fade")],
         [InlineKeyboardButton("Blur", callback_data=f"{prefix}:{target_key}:blur")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=back_callback)],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data=back_callback)],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_EDIT_SOURCE_CHANNEL if edit_mode else AM_ADD_SOURCE_CUSTOMIZE
@@ -2427,9 +2510,9 @@ async def _ask_source_overlay_animation_duration(update: Update, context: Contex
     title = _overlay_animation_target_label(target_key)
     prefix = "am_edit_ov_anim_dur" if edit_mode else "am_src_ov_anim_dur"
     back_callback = f"am_edit_ov_anim_menu:{target_key}" if edit_mode else "am_add_overlay_menu"
-    text = f"⏳ <b>اختر مدة أنيميشن {title} النص ({html.escape(_overlay_animation_type_label(animation_type))}):</b>"
-    keyboard = [[InlineKeyboardButton(f"{_seconds_label(val)} ثانية", callback_data=f"{prefix}:{target_key}:{animation_type}:{val}")] for val in OVERLAY_ANIMATION_DURATION_OPTIONS]
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data=back_callback)])
+    text = f"âڈ³ <b>ط§ط®طھط± ظ…ط¯ط© ط£ظ†ظٹظ…ظٹط´ظ† {title} ط§ظ„ظ†طµ ({html.escape(_overlay_animation_type_label(animation_type))}):</b>"
+    keyboard = [[InlineKeyboardButton(f"{_seconds_label(val)} ط«ط§ظ†ظٹط©", callback_data=f"{prefix}:{target_key}:{animation_type}:{val}")] for val in OVERLAY_ANIMATION_DURATION_OPTIONS]
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data=back_callback)])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_EDIT_SOURCE_CHANNEL if edit_mode else AM_ADD_SOURCE_CUSTOMIZE
 
@@ -2448,7 +2531,7 @@ async def edit_source_overlay_animation_kind(update: Update, context: ContextTyp
     target_key = "intro" if target == "intro" else "outro"
     if animation_type == "none":
         success = await _update_edit_source_settings(context, {"shorts_overlay": {f"{target_key}_animation": _build_overlay_animation_config("none", 0.0)}})
-        await query.answer("✅ تم تعطيل الأنيميشن" if success else "❌ تعذر التحديث", show_alert=False)
+        await query.answer("âœ… طھظ… طھط¹ط·ظٹظ„ ط§ظ„ط£ظ†ظٹظ…ظٹط´ظ†" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
         return await _show_overlay_editor(update, context)
     return await _ask_source_overlay_animation_duration(update, context, target_key, animation_type, edit_mode=True)
 
@@ -2460,7 +2543,7 @@ async def edit_source_overlay_animation_duration(update: Update, context: Contex
     target_key = "intro" if target == "intro" else "outro"
     duration = float(raw_duration)
     success = await _update_edit_source_settings(context, {"shorts_overlay": {f"{target_key}_animation": _build_overlay_animation_config(animation_type, duration)}})
-    await query.answer("✅ تم تحديث الأنيميشن" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„ط£ظ†ظٹظ…ظٹط´ظ†" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_overlay_editor(update, context)
 
 
@@ -2478,7 +2561,122 @@ async def edit_source_overlay_delete(update: Update, context: ContextTypes.DEFAU
         texts.pop(idx)
     enabled = bool(texts) and overlay.get("enabled", False)
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"texts": texts, "enabled": enabled}})
-    await query.answer("✅ تم حذف النص" if success else "❌ تعذر الحذف", show_alert=False)
+    await query.answer("âœ… طھظ… ط­ط°ظپ ط§ظ„ظ†طµ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„ط­ط°ظپ", show_alert=False)
+    return await _show_overlay_editor(update, context)
+
+
+async def _show_add_overlay_mode_picker(update: Update, context: ContextTypes.DEFAULT_TYPE, notice: Optional[str] = None):
+    keyboard = [
+        [InlineKeyboardButton("ط«ط§ط¨طھ", callback_data="am_src_ov_mode:fixed")],
+        [InlineKeyboardButton("ط¹ط´ظˆط§ط¦ظٹ", callback_data="am_src_ov_mode:random")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")],
+    ]
+    text = "✅ تم حفظ نصوص الشورتس."
+    if notice:
+        text = f"{notice}\n\n{text}"
+    text += "\n\nالآن اختر طريقة الاختيار:"
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    elif update.message:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return AM_ADD_SOURCE_CUSTOMIZE
+
+
+async def edit_source_overlay_image_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    context.user_data["am_text_input_mode"] = "edit_overlay_image"
+    text = (
+        "🖼️ <b>رفع/تغيير صورة النص داخل الشورتس</b>\n\n"
+        "أرسل الآن صورة (JPG/PNG/WEBP/BMP) ليتم عرضها يمين النص،"
+        " والنص يظهر يسارها داخل الفيديو بنفس الأنيميشن."
+    )
+    keyboard = [
+        [InlineKeyboardButton("⏭️ متابعة بدون تغيير الصورة", callback_data="am_edit_ov_img_skip")],
+        [InlineKeyboardButton("🗑️ حذف الصورة الحالية", callback_data="am_edit_ov_img_del")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_ov_menu")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_SOURCE_TEXT_INPUT
+
+
+async def edit_source_overlay_image_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    overlay = settings.get("shorts_overlay") or {}
+    old_path = str(overlay.get("image_path") or "").strip()
+    success = await _update_edit_source_settings(context, {"shorts_overlay": {"image_path": None}})
+    if success and old_path:
+        _delete_overlay_image_file(old_path)
+    await query.answer("✅ تم حذف صورة النص." if success else "❌ تعذر حذف الصورة.", show_alert=False)
+    return await _show_overlay_editor(update, context)
+
+
+async def add_source_overlay_image_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    context.user_data.pop("am_text_input_mode", None)
+    return await _show_add_overlay_mode_picker(update, context, notice="⚠️ تم المتابعة بدون صورة.")
+
+
+async def edit_source_overlay_image_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    context.user_data.pop("am_text_input_mode", None)
+    return await _show_overlay_editor(update, context)
+
+
+async def source_overlay_image_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = context.user_data.get("am_text_input_mode")
+    if mode not in {"add_overlay_image", "edit_overlay_image"}:
+        await update.message.reply_text("⚠️ لا يوجد طلب رفع صورة الآن. استخدم إعدادات النص داخل الشورتس أولًا.")
+        return AM_SOURCE_TEXT_INPUT
+
+    source_id = ""
+    old_path = ""
+    if mode == "add_overlay_image":
+        source_id = _ensure_draft_source_id(context)
+        overlay_cfg = (_draft_source_settings(context).get("shorts_overlay") or {})
+        old_path = str(overlay_cfg.get("image_path") or "").strip()
+    else:
+        src = await _get_edit_source(context)
+        if not src:
+            context.user_data.pop("am_text_input_mode", None)
+            return await sources_menu(update, context)
+        source_id = str(src.get("id") or "").strip()
+        settings = _source_settings(src)
+        old_path = str((settings.get("shorts_overlay") or {}).get("image_path") or "").strip()
+
+    if not source_id:
+        await update.message.reply_text("❌ تعذر تحديد المصدر لحفظ الصورة.")
+        return AM_SOURCE_TEXT_INPUT
+
+    rel_path, error_message = await _download_overlay_image(update, context, source_id)
+    if error_message:
+        await update.message.reply_text(error_message)
+        return AM_SOURCE_TEXT_INPUT
+
+    if mode == "add_overlay_image":
+        _update_draft_source_settings(context, {"shorts_overlay": {"image_path": rel_path}})
+        context.user_data.pop("am_text_input_mode", None)
+        if old_path and old_path != rel_path:
+            _delete_overlay_image_file(old_path)
+        return await _show_add_overlay_mode_picker(update, context, notice="✅ تم حفظ صورة النص.")
+
+    success = await _update_edit_source_settings(context, {"shorts_overlay": {"image_path": rel_path}})
+    context.user_data.pop("am_text_input_mode", None)
+    if success and old_path and old_path != rel_path:
+        _delete_overlay_image_file(old_path)
+    if not success:
+        _delete_overlay_image_file(rel_path)
+    await update.message.reply_text("✅ تم تحديث صورة النص." if success else "❌ تعذر تحديث صورة النص.")
     return await _show_overlay_editor(update, context)
 
 
@@ -2487,12 +2685,13 @@ async def edit_source_overlay_text_prompt(update: Update, context: ContextTypes.
     await _safe_answer(query)
     context.user_data["am_text_input_mode"] = "edit_overlay_texts"
     text = (
-        "✍️ <b>أرسل الآن نصوص الشورتس</b>\n\n"
-        "- كل سطر = خيار مستقل\n"
-        "- سيتم استبدال النصوص الحالية بهذه القائمة\n"
-        "- مثال:\n<code>اشترك الآن\nحلقة اليوم\nأفضل مود اليوم</code>"
+        "âœچï¸ڈ <b>ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ظ†طµظˆطµ ط§ظ„ط´ظˆط±طھط³</b>\n\n"
+        "- ظƒظ„ ط³ط·ط± = ط®ظٹط§ط± ظ…ط³طھظ‚ظ„\n"
+        "- ط³ظٹطھظ… ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظ†طµظˆطµ ط§ظ„ط­ط§ظ„ظٹط© ط¨ظ‡ط°ظ‡ ط§ظ„ظ‚ط§ط¦ظ…ط©\n"
+        "- بعد الحفظ سيطلب منك البوت رفع صورة لتظهر يمين النص داخل الفيديو\n"
+        "- ظ…ط«ط§ظ„:\n<code>ط§ط´طھط±ظƒ ط§ظ„ط¢ظ†\nط­ظ„ظ‚ط© ط§ظ„ظٹظˆظ…\nط£ظپط¶ظ„ ظ…ظˆط¯ ط§ظ„ظٹظˆظ…</code>"
     )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_ov_menu")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_edit_ov_menu")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SOURCE_TEXT_INPUT
 
@@ -2506,12 +2705,12 @@ async def edit_source_description_toggle(update: Update, context: ContextTypes.D
     settings = _source_settings(src)
     desc = settings.get("extra_description") or {}
     if not desc.get("texts") and not desc.get("enabled"):
-        await query.answer("أضف نصوصًا أولًا قبل التفعيل", show_alert=True)
+        await query.answer("ط£ط¶ظپ ظ†طµظˆطµظ‹ط§ ط£ظˆظ„ظ‹ط§ ظ‚ط¨ظ„ ط§ظ„طھظپط¹ظٹظ„", show_alert=True)
         return await _show_description_editor(update, context)
     success = await _update_edit_source_settings(context, {
         "extra_description": {"enabled": not desc.get("enabled", False)}
     })
-    await query.answer("✅ تم تحديث النص الإضافي" if success else "❌ تعذر التحديث", show_alert=True)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط§ظ„ظ†طµ ط§ظ„ط¥ط¶ط§ظپظٹ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=True)
     return await _show_description_editor(update, context)
 
 
@@ -2520,7 +2719,7 @@ async def edit_source_description_mode(update: Update, context: ContextTypes.DEF
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
     success = await _update_edit_source_settings(context, {"extra_description": {"selection_mode": mode}})
-    await query.answer("✅ تم تحديث طريقة الاختيار" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ط·ط±ظٹظ‚ط© ط§ظ„ط§ط®طھظٹط§ط±" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_description_editor(update, context)
 
 
@@ -2529,7 +2728,7 @@ async def edit_source_description_placement(update: Update, context: ContextType
     await _safe_answer(query)
     placement = query.data.split(":", 1)[1]
     success = await _update_edit_source_settings(context, {"extra_description": {"placement": placement}})
-    await query.answer("✅ تم تحديث موضع النص داخل الوصف" if success else "❌ تعذر التحديث", show_alert=False)
+    await query.answer("âœ… طھظ… طھط­ط¯ظٹط« ظ…ظˆط¶ط¹ ط§ظ„ظ†طµ ط¯ط§ط®ظ„ ط§ظ„ظˆطµظپ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„طھط­ط¯ظٹط«", show_alert=False)
     return await _show_description_editor(update, context)
 
 
@@ -2547,7 +2746,7 @@ async def edit_source_description_delete(update: Update, context: ContextTypes.D
         texts.pop(idx)
     enabled = bool(texts) and desc.get("enabled", False)
     success = await _update_edit_source_settings(context, {"extra_description": {"texts": texts, "enabled": enabled}})
-    await query.answer("✅ تم حذف النص" if success else "❌ تعذر الحذف", show_alert=False)
+    await query.answer("âœ… طھظ… ط­ط°ظپ ط§ظ„ظ†طµ" if success else "â‌Œ طھط¹ط°ط± ط§ظ„ط­ط°ظپ", show_alert=False)
     return await _show_description_editor(update, context)
 
 
@@ -2556,19 +2755,19 @@ async def edit_source_description_text_prompt(update: Update, context: ContextTy
     await _safe_answer(query)
     context.user_data["am_text_input_mode"] = "edit_desc_texts"
     text = (
-        "✍️ <b>أرسل الآن النصوص الإضافية للوصف</b>\n\n"
-        "- إذا أردت عدة فقرات، افصل بينها بسطر يحوي <code>---</code> فقط\n"
-        "- سيتم استبدال النصوص الحالية بهذه القائمة"
+        "âœچï¸ڈ <b>ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ط§ظ„ظ†طµظˆطµ ط§ظ„ط¥ط¶ط§ظپظٹط© ظ„ظ„ظˆطµظپ</b>\n\n"
+        "- ط¥ط°ط§ ط£ط±ط¯طھ ط¹ط¯ط© ظپظ‚ط±ط§طھطŒ ط§ظپطµظ„ ط¨ظٹظ†ظ‡ط§ ط¨ط³ط·ط± ظٹط­ظˆظٹ <code>---</code> ظپظ‚ط·\n"
+        "- ط³ظٹطھظ… ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظ†طµظˆطµ ط§ظ„ط­ط§ظ„ظٹط© ط¨ظ‡ط°ظ‡ ط§ظ„ظ‚ط§ط¦ظ…ط©"
     )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_desc_menu")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_edit_desc_menu")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SOURCE_TEXT_INPUT
 
 
-# ==================== إضافة مصدر جديد ====================
+# ==================== ط¥ط¶ط§ظپط© ظ…طµط¯ط± ط¬ط¯ظٹط¯ ====================
 
 async def add_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء إضافة مصدر - اختيار القناة المستهدفة"""
+    """ط¨ط¯ط، ط¥ط¶ط§ظپط© ظ…طµط¯ط± - ط§ط®طھظٹط§ط± ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط³طھظ‡ط¯ظپط©"""
     query = update.callback_query
     await _safe_answer(query)
     context.user_data.pop("am_facecam_upload_mode", None)
@@ -2579,74 +2778,74 @@ async def add_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channels, total = cm.list_channels(enabled_only=True, limit=50)
 
         if total == 0:
-            text = "❌ لا توجد قنوات مفعلة. أضف قناة يوتيوب أولاً."
-            keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+            text = "â‌Œ ظ„ط§ طھظˆط¬ط¯ ظ‚ظ†ظˆط§طھ ظ…ظپط¹ظ„ط©. ط£ط¶ظپ ظ‚ظ†ط§ط© ظٹظˆطھظٹظˆط¨ ط£ظˆظ„ط§ظ‹."
+            keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             return AM_SOURCES
 
-        text = "📺 <b>اختر القناة المستهدفة للنشر:</b>\n\nالفيديوهات المجلوبة سيتم نشرها على هذه القناة."
+        text = "ًں“؛ <b>ط§ط®طھط± ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط³طھظ‡ط¯ظپط© ظ„ظ„ظ†ط´ط±:</b>\n\nط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظ…ط¬ظ„ظˆط¨ط© ط³ظٹطھظ… ظ†ط´ط±ظ‡ط§ ط¹ظ„ظ‰ ظ‡ط°ظ‡ ط§ظ„ظ‚ظ†ط§ط©."
         keyboard = []
         for ch in channels:
-            label = f"📺 {html.escape(ch.channel_name[:30])}"
+            label = f"ًں“؛ {html.escape(ch.channel_name[:30])}"
             keyboard.append([InlineKeyboardButton(label, callback_data=f"am_src_ch:{ch.channel_id}")])
 
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
+        keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")])
 
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_ADD_SOURCE_CHANNEL
 
     except Exception as e:
         logger.error(f"Error listing channels: {e}")
-        text = f"❌ خطأ: <code>{html.escape(str(e)[:100])}</code>"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+        text = f"â‌Œ ط®ط·ط£: <code>{html.escape(str(e)[:100])}</code>"
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_SOURCES
 
 
 async def add_source_choose_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """اختيار القناة المستهدفة"""
+    """ط§ط®طھظٹط§ط± ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط³طھظ‡ط¯ظپط©"""
     query = update.callback_query
     await _safe_answer(query)
 
     channel_id = query.data.split(":", 1)[1]
     context.user_data["am_new_source"] = {"channel_id": channel_id}
 
-    # اختيار نوع المحتوى
+    # ط§ط®طھظٹط§ط± ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰
     text = (
-        "📦 <b>اختر نوع المحتوى:</b>\n\n"
-        "اختر نوع المحتوى لهذا المصدر، أو اضغط <b>نوع جديد</b> لإضافة نوع مخصص."
+        "ًں“¦ <b>ط§ط®طھط± ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰:</b>\n\n"
+        "ط§ط®طھط± ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰ ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±طŒ ط£ظˆ ط§ط¶ط؛ط· <b>ظ†ظˆط¹ ط¬ط¯ظٹط¯</b> ظ„ط¥ط¶ط§ظپط© ظ†ظˆط¹ ظ…ط®طµطµ."
     )
 
-    # أنواع المحتوى المتاحة
+    # ط£ظ†ظˆط§ط¹ ط§ظ„ظ…ط­طھظˆظ‰ ط§ظ„ظ…طھط§ط­ط©
     types = [
-        ("minecraft_mods", "🎮 مودات ماين كرافت"),
-        ("minecraft_builds", "🏗 بناء ماين كرافت"),
-        ("minecraft_shaders", "🌈 شيدرز ماين كرافت"),
-        ("gaming_clips", "🕹 مقاطع ألعاب"),
-        ("tutorials", "📚 شروحات"),
+        ("minecraft_mods", "ًںژ® ظ…ظˆط¯ط§طھ ظ…ط§ظٹظ† ظƒط±ط§ظپطھ"),
+        ("minecraft_builds", "ًںڈ— ط¨ظ†ط§ط، ظ…ط§ظٹظ† ظƒط±ط§ظپطھ"),
+        ("minecraft_shaders", "ًںŒˆ ط´ظٹط¯ط±ط² ظ…ط§ظٹظ† ظƒط±ط§ظپطھ"),
+        ("gaming_clips", "ًں•¹ ظ…ظ‚ط§ط·ط¹ ط£ظ„ط¹ط§ط¨"),
+        ("tutorials", "ًں“ڑ ط´ط±ظˆط­ط§طھ"),
     ]
 
     keyboard = []
     for type_id, type_name in types:
         keyboard.append([InlineKeyboardButton(type_name, callback_data=f"am_src_type:{type_id}")])
 
-    keyboard.append([InlineKeyboardButton("➕ نوع جديد", callback_data="am_src_type_custom")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
+    keyboard.append([InlineKeyboardButton("â‍• ظ†ظˆط¹ ط¬ط¯ظٹط¯", callback_data="am_src_type_custom")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_TYPE
 
 
 async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """اختيار نوع المحتوى"""
+    """ط§ط®طھظٹط§ط± ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰"""
     query = update.callback_query
     await _safe_answer(query)
 
     data = query.data
 
     if data == "am_src_type_custom":
-        text = "📝 <b>أدخل اسم نوع المحتوى الجديد:</b>\n\nمثال: <code>roblox_mods</code>, <code>fortnite_clips</code>"
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+        text = "ًں“‌ <b>ط£ط¯ط®ظ„ ط§ط³ظ… ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰ ط§ظ„ط¬ط¯ظٹط¯:</b>\n\nظ…ط«ط§ظ„: <code>roblox_mods</code>, <code>fortnite_clips</code>"
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_ADD_CONTENT_TYPE_NAME
 
@@ -2654,32 +2853,32 @@ async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["am_new_source"]["content_type"] = content_type
 
     text = (
-        "📍 <b>اختر طريقة المصدر:</b>\n\n"
-        "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
-        "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
-        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
-        "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)\n\n"
-        "سيتم بعد ذلك تحديد المصدر الذي يعتمد عليه البوت ضمن أتمتة الجلب."
+        "ًں“چ <b>ط§ط®طھط± ط·ط±ظٹظ‚ط© ط§ظ„ظ…طµط¯ط±:</b>\n\n"
+        "â€¢ <b>YouTube</b>: ط¬ظ„ط¨ ظ…ظ† ظ‚ظ†ط§ط©/ظ‚ط§ط¦ظ…ط© طھط´ط؛ظٹظ„\n"
+        "â€¢ <b>Facebook</b>: ط¬ظ„ط¨ ظ…ظ† طµظپط­ط©/ط­ط³ط§ط¨/ظپظٹط¯ظٹظˆ\n"
+        "â€¢ <b>Google Drive</b>: ط¬ظ„ط¨ ظ…ظ† ظ…ط¬ظ„ط¯ (Folder)\n"
+        "â€¢ <b>ظ‚ط§ط¹ط¯ط© ط¨ظٹط§ظ†ط§طھ</b>: ط¬ظ„ط¨ ظ…ظ† ط­ط§ظˆظٹط© ظپظٹط¯ظٹظˆ (Containers)\n\n"
+        "ط³ظٹطھظ… ط¨ط¹ط¯ ط°ظ„ظƒ طھط­ط¯ظٹط¯ ط§ظ„ظ…طµط¯ط± ط§ظ„ط°ظٹ ظٹط¹طھظ…ط¯ ط¹ظ„ظٹظ‡ ط§ظ„ط¨ظˆطھ ط¶ظ…ظ† ط£طھظ…طھط© ط§ظ„ط¬ظ„ط¨."
     )
     keyboard = [
-        [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
-        [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
-        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
-        [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("â–¶ï¸ڈ YouTube", callback_data="am_src_kind:youtube")],
+        [InlineKeyboardButton("ًں“ک Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("âکپï¸ڈ Google Drive", callback_data="am_src_kind:gdrive")],
+        [InlineKeyboardButton("ًں“¦ ظ‚ط§ط¹ط¯ط© ط¨ظٹط§ظ†ط§طھ (ط­ط§ظˆظٹط§طھ)", callback_data="am_src_kind:container")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_KIND
 
 
 async def add_source_custom_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إدخال نوع محتوى مخصص"""
+    """ط¥ط¯ط®ط§ظ„ ظ†ظˆط¹ ظ…ط­طھظˆظ‰ ظ…ط®طµطµ"""
     text = update.message.text.strip()
     if not text or len(text) < 2:
-        await update.message.reply_text("❌ اسم قصير جدًا. أدخل اسمًا أطول.")
+        await update.message.reply_text("â‌Œ ط§ط³ظ… ظ‚طµظٹط± ط¬ط¯ظ‹ط§. ط£ط¯ط®ظ„ ط§ط³ظ…ظ‹ط§ ط£ط·ظˆظ„.")
         return AM_ADD_CONTENT_TYPE_NAME
 
-    # تنظيف الاسم
+    # طھظ†ط¸ظٹظپ ط§ظ„ط§ط³ظ…
     import re
     clean_name = re.sub(r"[^a-zA-Z0-9_\u0600-\u06FF]", "_", text).strip("_").lower()
     if not clean_name:
@@ -2688,19 +2887,19 @@ async def add_source_custom_type(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["am_new_source"]["content_type"] = clean_name
 
     msg_text = (
-        f"✅ تم حفظ نوع المحتوى: <code>{html.escape(clean_name)}</code>\n\n"
-        "📍 <b>اختر طريقة المصدر:</b>\n\n"
-        "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
-        "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
-        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
-        "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)"
+        f"âœ… طھظ… ط­ظپط¸ ظ†ظˆط¹ ط§ظ„ظ…ط­طھظˆظ‰: <code>{html.escape(clean_name)}</code>\n\n"
+        "ًں“چ <b>ط§ط®طھط± ط·ط±ظٹظ‚ط© ط§ظ„ظ…طµط¯ط±:</b>\n\n"
+        "â€¢ <b>YouTube</b>: ط¬ظ„ط¨ ظ…ظ† ظ‚ظ†ط§ط©/ظ‚ط§ط¦ظ…ط© طھط´ط؛ظٹظ„\n"
+        "â€¢ <b>Facebook</b>: ط¬ظ„ط¨ ظ…ظ† طµظپط­ط©/ط­ط³ط§ط¨/ظپظٹط¯ظٹظˆ\n"
+        "â€¢ <b>Google Drive</b>: ط¬ظ„ط¨ ظ…ظ† ظ…ط¬ظ„ط¯ (Folder)\n"
+        "â€¢ <b>ظ‚ط§ط¹ط¯ط© ط¨ظٹط§ظ†ط§طھ</b>: ط¬ظ„ط¨ ظ…ظ† ط­ط§ظˆظٹط© ظپظٹط¯ظٹظˆ (Containers)"
     )
     keyboard = [
-        [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
-        [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
-        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
-        [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("â–¶ï¸ڈ YouTube", callback_data="am_src_kind:youtube")],
+        [InlineKeyboardButton("ًں“ک Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("âکپï¸ڈ Google Drive", callback_data="am_src_kind:gdrive")],
+        [InlineKeyboardButton("ًں“¦ ظ‚ط§ط¹ط¯ط© ط¨ظٹط§ظ†ط§طھ (ط­ط§ظˆظٹط§طھ)", callback_data="am_src_kind:container")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_KIND
@@ -2742,24 +2941,24 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
         )
         if not linked:
             text = (
-                "❌ <b>Google Drive غير مربوط</b>\n\n"
-                "قبل إضافة مصدر Google Drive يجب ربط الحساب من قائمة الإعدادات."
+                "â‌Œ <b>Google Drive ط؛ظٹط± ظ…ط±ط¨ظˆط·</b>\n\n"
+                "ظ‚ط¨ظ„ ط¥ط¶ط§ظپط© ظ…طµط¯ط± Google Drive ظٹط¬ط¨ ط±ط¨ط· ط§ظ„ط­ط³ط§ط¨ ظ…ظ† ظ‚ط§ط¦ظ…ط© ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ."
             )
             keyboard = [
-                [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
-                [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+                [InlineKeyboardButton("âکپï¸ڈ ط±ط¨ط· Google Drive", callback_data="am_gdrive_connect")],
+                [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
             ]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
             return AM_ADD_SOURCE_KIND
 
         text = (
-            "☁️ <b>مصدر Google Drive</b>\n\n"
-            "أرسل <b>Folder ID</b> (معرف المجلد) الذي تريد أن يجلب منه البوت الفيديوهات.\n\n"
-            "💡 يمكنك الحصول عليه من رابط المجلد:\n"
+            "âکپï¸ڈ <b>ظ…طµط¯ط± Google Drive</b>\n\n"
+            "ط£ط±ط³ظ„ <b>Folder ID</b> (ظ…ط¹ط±ظپ ط§ظ„ظ…ط¬ظ„ط¯) ط§ظ„ط°ظٹ طھط±ظٹط¯ ط£ظ† ظٹط¬ظ„ط¨ ظ…ظ†ظ‡ ط§ظ„ط¨ظˆطھ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ.\n\n"
+            "ًں’، ظٹظ…ظƒظ†ظƒ ط§ظ„ط­طµظˆظ„ ط¹ظ„ظٹظ‡ ظ…ظ† ط±ط§ط¨ط· ط§ظ„ظ…ط¬ظ„ط¯:\n"
             "<code>https://drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>\n\n"
-            "⚠️ يجب أن تكون قد ربطت Google Drive من قائمة الإعدادات أولاً."
+            "âڑ ï¸ڈ ظٹط¬ط¨ ط£ظ† طھظƒظˆظ† ظ‚ط¯ ط±ط¨ط·طھ Google Drive ظ…ظ† ظ‚ط§ط¦ظ…ط© ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ط£ظˆظ„ط§ظ‹."
         )
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         context.user_data.setdefault("am_new_source", {})["platform"] = "google_drive"
         context.user_data["am_new_source"]["awaiting_url"] = True
@@ -2767,31 +2966,31 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
 
     if kind == "facebook":
         text = (
-            "⏳ <b>اختر نوع فيديوهات فيس بوك التي تود جلبها:</b>\n\n"
-            "🎬 <b>طويلة فقط</b>: فيديوهات عادية\n"
-            "📱 <b>ريلز فقط</b>: فيديوهات قصيرة (≈ أقل من 60 ثانية)\n"
-            "🔄 <b>أي نوع</b>: أي فيديو"
+            "âڈ³ <b>ط§ط®طھط± ظ†ظˆط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ظپظٹط³ ط¨ظˆظƒ ط§ظ„طھظٹ طھظˆط¯ ط¬ظ„ط¨ظ‡ط§:</b>\n\n"
+            "ًںژ¬ <b>ط·ظˆظٹظ„ط© ظپظ‚ط·</b>: ظپظٹط¯ظٹظˆظ‡ط§طھ ط¹ط§ط¯ظٹط©\n"
+            "ًں“± <b>ط±ظٹظ„ط² ظپظ‚ط·</b>: ظپظٹط¯ظٹظˆظ‡ط§طھ ظ‚طµظٹط±ط© (â‰ˆ ط£ظ‚ظ„ ظ…ظ† 60 ط«ط§ظ†ظٹط©)\n"
+            "ًں”„ <b>ط£ظٹ ظ†ظˆط¹</b>: ط£ظٹ ظپظٹط¯ظٹظˆ"
         )
         keyboard = [
-            [InlineKeyboardButton("🎬 طويلة فقط", callback_data="am_src_dur:facebook_long")],
-            [InlineKeyboardButton("📱 ريلز فقط", callback_data="am_src_dur:facebook_reels")],
-            [InlineKeyboardButton("🔄 أي نوع", callback_data="am_src_dur:facebook_any")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+            [InlineKeyboardButton("ًںژ¬ ط·ظˆظٹظ„ط© ظپظ‚ط·", callback_data="am_src_dur:facebook_long")],
+            [InlineKeyboardButton("ًں“± ط±ظٹظ„ط² ظپظ‚ط·", callback_data="am_src_dur:facebook_reels")],
+            [InlineKeyboardButton("ًں”„ ط£ظٹ ظ†ظˆط¹", callback_data="am_src_dur:facebook_any")],
+            [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_ADD_SOURCE_URL
 
     text = (
-        "⏳ <b>اختر نوع الفيديوهات التي تود جلبها من هذا المصدر:</b>\n\n"
-        "🎬 <b>طويلة فقط</b>: فيديوهات عادية (أكثر من 60 ثانية، وأقل من 30 دقيقة)\n"
-        "📱 <b>شورتس فقط</b>: الفيديوهات القصيرة (أقل من 60 ثانية)\n"
-        "🔄 <b>أي نوع</b>: أي فيديو يتم تنزيله بحسب الرابط (بحد أقصى 30 دقيقة)"
+        "âڈ³ <b>ط§ط®طھط± ظ†ظˆط¹ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„طھظٹ طھظˆط¯ ط¬ظ„ط¨ظ‡ط§ ظ…ظ† ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±:</b>\n\n"
+        "ًںژ¬ <b>ط·ظˆظٹظ„ط© ظپظ‚ط·</b>: ظپظٹط¯ظٹظˆظ‡ط§طھ ط¹ط§ط¯ظٹط© (ط£ظƒط«ط± ظ…ظ† 60 ط«ط§ظ†ظٹط©طŒ ظˆط£ظ‚ظ„ ظ…ظ† 30 ط¯ظ‚ظٹظ‚ط©)\n"
+        "ًں“± <b>ط´ظˆط±طھط³ ظپظ‚ط·</b>: ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظ‚طµظٹط±ط© (ط£ظ‚ظ„ ظ…ظ† 60 ط«ط§ظ†ظٹط©)\n"
+        "ًں”„ <b>ط£ظٹ ظ†ظˆط¹</b>: ط£ظٹ ظپظٹط¯ظٹظˆ ظٹطھظ… طھظ†ط²ظٹظ„ظ‡ ط¨ط­ط³ط¨ ط§ظ„ط±ط§ط¨ط· (ط¨ط­ط¯ ط£ظ‚طµظ‰ 30 ط¯ظ‚ظٹظ‚ط©)"
     )
     keyboard = [
-        [InlineKeyboardButton("🎬 طويلة فقط", callback_data="am_src_dur:youtube_long")],
-        [InlineKeyboardButton("📱 شورتس فقط", callback_data="am_src_dur:youtube_shorts")],
-        [InlineKeyboardButton("🔄 أي نوع", callback_data="am_src_dur:youtube_any")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("ًںژ¬ ط·ظˆظٹظ„ط© ظپظ‚ط·", callback_data="am_src_dur:youtube_long")],
+        [InlineKeyboardButton("ًں“± ط´ظˆط±طھط³ ظپظ‚ط·", callback_data="am_src_dur:youtube_shorts")],
+        [InlineKeyboardButton("ًں”„ ط£ظٹ ظ†ظˆط¹", callback_data="am_src_dur:youtube_any")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_URL
@@ -2815,12 +3014,12 @@ async def _show_container_picker(update: Update, context: ContextTypes.DEFAULT_T
 
     if not containers:
         text = (
-            "⚠️ <b>لا توجد حاويات متاحة حالياً.</b>\n\n"
-            "قم بإنشاء حاوية ورفع فيديوهات إليها أولاً، ثم أعد المحاولة."
+            "âڑ ï¸ڈ <b>ظ„ط§ طھظˆط¬ط¯ ط­ط§ظˆظٹط§طھ ظ…طھط§ط­ط© ط­ط§ظ„ظٹط§ظ‹.</b>\n\n"
+            "ظ‚ظ… ط¨ط¥ظ†ط´ط§ط، ط­ط§ظˆظٹط© ظˆط±ظپط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ط¥ظ„ظٹظ‡ط§ ط£ظˆظ„ط§ظ‹طŒ ط«ظ… ط£ط¹ط¯ ط§ظ„ظ…ط­ط§ظˆظ„ط©."
         )
         keyboard = [
-            [InlineKeyboardButton("🔄 تحديث", callback_data="am_cont_refresh")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+            [InlineKeyboardButton("ًں”„ طھط­ط¯ظٹط«", callback_data="am_cont_refresh")],
+            [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
         ]
         if query:
             try:
@@ -2844,9 +3043,9 @@ async def _show_container_picker(update: Update, context: ContextTypes.DEFAULT_T
     from datetime import datetime as _dt
     _ts = _dt.now().strftime("%H:%M:%S")
     text = (
-        "📦 <b>اختر حاوية من قاعدة البيانات:</b>\n"
-        "سيقوم AutoModBot بجلب الفيديوهات منها تلقائياً.\n\n"
-        f"الصفحة: {page + 1}/{total_pages}  •  🕐 {_ts}"
+        "ًں“¦ <b>ط§ط®طھط± ط­ط§ظˆظٹط© ظ…ظ† ظ‚ط§ط¹ط¯ط© ط§ظ„ط¨ظٹط§ظ†ط§طھ:</b>\n"
+        "ط³ظٹظ‚ظˆظ… AutoModBot ط¨ط¬ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظ…ظ†ظ‡ط§ طھظ„ظ‚ط§ط¦ظٹط§ظ‹.\n\n"
+        f"ط§ظ„طµظپط­ط©: {page + 1}/{total_pages}  â€¢  ًں•گ {_ts}"
     )
     keyboard: List[List[InlineKeyboardButton]] = []
     for c in current:
@@ -2854,19 +3053,19 @@ async def _show_container_picker(update: Update, context: ContextTypes.DEFAULT_T
         name = str(c.get("name") or "container").strip()
         if not cid:
             continue
-        label = f"📦 {name[:28]}"
+        label = f"ًں“¦ {name[:28]}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"am_cont_sel:{cid}")])
 
     nav: List[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ سابق", callback_data=f"am_cont_page:{page - 1}"))
+        nav.append(InlineKeyboardButton("â¬…ï¸ڈ ط³ط§ط¨ظ‚", callback_data=f"am_cont_page:{page - 1}"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("تالي ➡️", callback_data=f"am_cont_page:{page + 1}"))
+        nav.append(InlineKeyboardButton("طھط§ظ„ظٹ â‍،ï¸ڈ", callback_data=f"am_cont_page:{page + 1}"))
     if nav:
         keyboard.append(nav)
 
-    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="am_cont_refresh")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
+    keyboard.append([InlineKeyboardButton("ًں”„ طھط­ط¯ظٹط«", callback_data="am_cont_refresh")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")])
 
     if query:
         try:
@@ -2911,7 +3110,7 @@ async def add_source_choose_container(update: Update, context: ContextTypes.DEFA
 
 
 async def add_source_choose_video_duration(update: Update, context: ContextTypes.DEFAULT_TYPE, preset_platform: Optional[str] = None):
-    """اختيار طول الفيديو ثم الانتقال لطلب الرابط"""
+    """ط§ط®طھظٹط§ط± ط·ظˆظ„ ط§ظ„ظپظٹط¯ظٹظˆ ط«ظ… ط§ظ„ط§ظ†طھظ‚ط§ظ„ ظ„ط·ظ„ط¨ ط§ظ„ط±ط§ط¨ط·"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -2919,38 +3118,38 @@ async def add_source_choose_video_duration(update: Update, context: ContextTypes
     context.user_data["am_new_source"]["platform"] = video_platform
 
     text = (
-        "🔗 <b>اختر إعدادات الفيس كام:</b>\n\n"
-        "هل تريد إضافة فيديو فيس كام (كاميرا الوجه) على الفيديوهات من هذا المصدر؟"
+        "ًں”— <b>ط§ط®طھط± ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…:</b>\n\n"
+        "ظ‡ظ„ طھط±ظٹط¯ ط¥ط¶ط§ظپط© ظپظٹط¯ظٹظˆ ظپظٹط³ ظƒط§ظ… (ظƒط§ظ…ظٹط±ط§ ط§ظ„ظˆط¬ظ‡) ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظ…ظ† ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±طں"
     )
     keyboard = [
-        [InlineKeyboardButton("✅ نعم", callback_data="am_src_fc:yes"), InlineKeyboardButton("⬜ لا", callback_data="am_src_fc:no")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]
+        [InlineKeyboardButton("âœ… ظ†ط¹ظ…", callback_data="am_src_fc:yes"), InlineKeyboardButton("â¬œ ظ„ط§", callback_data="am_src_fc:no")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_FACECAM
 
 
 async def add_source_choose_facecam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """اختيار إعدادات الفيس كام"""
+    """ط§ط®طھظٹط§ط± ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…"""
     query = update.callback_query
     await _safe_answer(query)
 
     choice = query.data.split(":", 1)[1]
     
     if choice == "yes":
-        # اختيار وضعية الفيس كام
+        # ط§ط®طھظٹط§ط± ظˆط¶ط¹ظٹط© ط§ظ„ظپظٹط³ ظƒط§ظ…
         text = (
-            "🎬 <b>اختر وضعية الفيس كام:</b>\n\n"
-            "اختر طريقة عرض فيديو الفيس كام داخل الفيديو النهائي."
+            "ًںژ¬ <b>ط§ط®طھط± ظˆط¶ط¹ظٹط© ط§ظ„ظپظٹط³ ظƒط§ظ…:</b>\n\n"
+            "ط§ط®طھط± ط·ط±ظٹظ‚ط© ط¹ط±ط¶ ظپظٹط¯ظٹظˆ ط§ظ„ظپظٹط³ ظƒط§ظ… ط¯ط§ط®ظ„ ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ظ†ظ‡ط§ط¦ظٹ."
         )
         keyboard = [
-            [InlineKeyboardButton("⬆️ دائري أعلى الفيديو", callback_data="am_src_fc_pos:top_center")],
-            [InlineKeyboardButton("⬇️ دائري أسفل الفيديو", callback_data="am_src_fc_pos:bottom_center")],
-            [InlineKeyboardButton("↖️ دائرة صغيرة أعلى اليسار", callback_data="am_src_fc_pos:small_circle_top_left")],
-            [InlineKeyboardButton("↗️ دائرة صغيرة أعلى اليمين", callback_data="am_src_fc_pos:small_circle_top_right")],
-            [InlineKeyboardButton("↘️ دائرة صغيرة أسفل اليمين", callback_data="am_src_fc_pos:small_circle_bottom_right")],
-            [InlineKeyboardButton("↙️ دائرة صغيرة أسفل اليسار", callback_data="am_src_fc_pos:small_circle_bottom_left")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]
+            [InlineKeyboardButton("â¬†ï¸ڈ ط¯ط§ط¦ط±ظٹ ط£ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ", callback_data="am_src_fc_pos:top_center")],
+            [InlineKeyboardButton("â¬‡ï¸ڈ ط¯ط§ط¦ط±ظٹ ط£ط³ظپظ„ ط§ظ„ظپظٹط¯ظٹظˆ", callback_data="am_src_fc_pos:bottom_center")],
+            [InlineKeyboardButton("â†–ï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±", callback_data="am_src_fc_pos:small_circle_top_left")],
+            [InlineKeyboardButton("â†—ï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†", callback_data="am_src_fc_pos:small_circle_top_right")],
+            [InlineKeyboardButton("â†کï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط³ظپظ„ ط§ظ„ظٹظ…ظٹظ†", callback_data="am_src_fc_pos:small_circle_bottom_right")],
+            [InlineKeyboardButton("â†™ï¸ڈ ط¯ط§ط¦ط±ط© طµط؛ظٹط±ط© ط£ط³ظپظ„ ط§ظ„ظٹط³ط§ط±", callback_data="am_src_fc_pos:small_circle_bottom_left")],
+            [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_ADD_SOURCE_FACECAM
@@ -2964,7 +3163,7 @@ async def add_source_choose_facecam(update: Update, context: ContextTypes.DEFAUL
 
 
 async def add_source_choose_facecam_pos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """اختيار موضع الفيس كام"""
+    """ط§ط®طھظٹط§ط± ظ…ظˆط¶ط¹ ط§ظ„ظپظٹط³ ظƒط§ظ…"""
     query = update.callback_query
     await _safe_answer(query)
     
@@ -2986,10 +3185,10 @@ async def add_source_facecam_manage(update: Update, context: ContextTypes.DEFAUL
 
     if action == "upload":
         context.user_data["am_facecam_upload_mode"] = "add"
-        return await _show_add_facecam_manager(update, context, "📤 أرسل الآن فيديو أو صورة Facecam لإضافتها إلى هذا المصدر.")
+        return await _show_add_facecam_manager(update, context, "ًں“¤ ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ظپظٹط¯ظٹظˆ ط£ظˆ طµظˆط±ط© Facecam ظ„ط¥ط¶ط§ظپطھظ‡ط§ ط¥ظ„ظ‰ ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±.")
     if action == "pos":
         _set_draft_facecam_settings(context, _build_facecam_settings(value, _facecam_clips(settings), enabled=True))
-        return await _show_add_facecam_manager(update, context, "✅ تم تحديث وضعية الفيس كام.")
+        return await _show_add_facecam_manager(update, context, "âœ… طھظ… طھط­ط¯ظٹط« ظˆط¶ط¹ظٹط© ط§ظ„ظپظٹط³ ظƒط§ظ….")
     if action == "del":
         kept: List[Dict[str, Any]] = []
         removed: Optional[Dict[str, Any]] = None
@@ -3003,8 +3202,8 @@ async def add_source_facecam_manage(update: Update, context: ContextTypes.DEFAUL
             current_facecam = _facecam_config(settings)
             selection = str(current_facecam.get("layout") or current_facecam.get("position") or "top_center")
             _set_draft_facecam_settings(context, _build_facecam_settings(selection, kept, enabled=current_facecam.get("enabled", True)))
-            return await _show_add_facecam_manager(update, context, "✅ تم حذف مقطع الفيس كام من المسودة.")
-        return await _show_add_facecam_manager(update, context, "⚠️ لم يتم العثور على هذا المقطع.")
+            return await _show_add_facecam_manager(update, context, "âœ… طھظ… ط­ط°ظپ ظ…ظ‚ط·ط¹ ط§ظ„ظپظٹط³ ظƒط§ظ… ظ…ظ† ط§ظ„ظ…ط³ظˆط¯ط©.")
+        return await _show_add_facecam_manager(update, context, "âڑ ï¸ڈ ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ظ‡ط°ط§ ط§ظ„ظ…ظ‚ط·ط¹.")
     if action == "disable":
         context.user_data.pop("am_facecam_upload_mode", None)
         current_facecam = _facecam_config(settings)
@@ -3033,7 +3232,7 @@ async def add_source_facecam_upload_receive(update: Update, context: ContextType
     current_facecam = _facecam_config(settings)
     selection = str(current_facecam.get("layout") or current_facecam.get("position") or "top_center")
     _set_draft_facecam_settings(context, _build_facecam_settings(selection, clips, enabled=True))
-    return await _show_add_facecam_manager(update, context, "✅ تم رفع مقطع/صورة Facecam جديد إلى هذا المصدر.")
+    return await _show_add_facecam_manager(update, context, "âœ… طھظ… ط±ظپط¹ ظ…ظ‚ط·ط¹/طµظˆط±ط© Facecam ط¬ط¯ظٹط¯ ط¥ظ„ظ‰ ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±.")
 
 
 async def add_source_overlay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3042,14 +3241,14 @@ async def add_source_overlay_start(update: Update, context: ContextTypes.DEFAULT
     settings = _draft_source_settings(context)
     overlay_status = _short_overlay_status(settings)
     text = (
-        "📝 <b>إعداد النص داخل فيديو الشورتس</b>\n\n"
-        f"الحالة الحالية: <code>{html.escape(overlay_status)}</code>\n\n"
-        "يمكنك إضافة أكثر من نص ليظهر داخل الفيديو، مع اختيار ثابت أو عشوائي."
+        "ًں“‌ <b>ط¥ط¹ط¯ط§ط¯ ط§ظ„ظ†طµ ط¯ط§ط®ظ„ ظپظٹط¯ظٹظˆ ط§ظ„ط´ظˆط±طھط³</b>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(overlay_status)}</code>\n\n"
+        "ظٹظ…ظƒظ†ظƒ ط¥ط¶ط§ظپط© ط£ظƒط«ط± ظ…ظ† ظ†طµ ظ„ظٹط¸ظ‡ط± ط¯ط§ط®ظ„ ط§ظ„ظپظٹط¯ظٹظˆطŒ ظ…ط¹ ط§ط®طھظٹط§ط± ط«ط§ط¨طھ ط£ظˆ ط¹ط´ظˆط§ط¦ظٹ."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل وإضافة نصوص", callback_data="am_src_ov:on")],
-        [InlineKeyboardButton("⬜ تخطي / تعطيل", callback_data="am_src_ov:off")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„ ظˆط¥ط¶ط§ظپط© ظ†طµظˆطµ", callback_data="am_src_ov:on")],
+        [InlineKeyboardButton("â¬œ طھط®ط·ظٹ / طھط¹ط·ظٹظ„", callback_data="am_src_ov:off")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
@@ -3060,18 +3259,19 @@ async def add_source_choose_overlay_enabled(update: Update, context: ContextType
     await _safe_answer(query)
     choice = query.data.split(":", 1)[1]
     if choice == "off":
-        _update_draft_source_settings(context, {"shorts_overlay": {"enabled": False, "texts": []}})
+        _update_draft_source_settings(context, {"shorts_overlay": {"enabled": False, "texts": [], "image_path": None}})
         context.user_data.setdefault("am_new_source", {})["overlay_configured"] = True
         return await _continue_source_creation(update, context)
 
     context.user_data["am_text_input_mode"] = "add_overlay_texts"
     text = (
-        "✍️ <b>أرسل الآن نصوص الشورتس</b>\n\n"
-        "- كل سطر = خيار مختلف\n"
-        "- سيتم اختيار أحدها لاحقًا حسب الوضع الذي ستحدده\n\n"
-        "مثال:\n<code>اشترك الآن\nأفضل مود اليوم\nلا يفوتك هذا المشهد</code>"
+        "âœچï¸ڈ <b>ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ظ†طµظˆطµ ط§ظ„ط´ظˆط±طھط³</b>\n\n"
+        "- ظƒظ„ ط³ط·ط± = ط®ظٹط§ط± ظ…ط®طھظ„ظپ\n"
+        "- ط³ظٹطھظ… ط§ط®طھظٹط§ط± ط£ط­ط¯ظ‡ط§ ظ„ط§ط­ظ‚ظ‹ط§ ط­ط³ط¨ ط§ظ„ظˆط¶ط¹ ط§ظ„ط°ظٹ ط³طھط­ط¯ط¯ظ‡\n\n"
+        "- بعد حفظ النص، سيطلب منك البوت رفع صورة لتظهر يمين النص\n\n"
+        "ظ…ط«ط§ظ„:\n<code>ط§ط´طھط±ظƒ ط§ظ„ط¢ظ†\nط£ظپط¶ظ„ ظ…ظˆط¯ ط§ظ„ظٹظˆظ…\nظ„ط§ ظٹظپظˆطھظƒ ظ‡ط°ط§ ط§ظ„ظ…ط´ظ‡ط¯</code>"
     )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SOURCE_TEXT_INPUT
 
@@ -3082,12 +3282,12 @@ async def add_source_overlay_mode(update: Update, context: ContextTypes.DEFAULT_
     mode = query.data.split(":", 1)[1]
     _update_draft_source_settings(context, {"shorts_overlay": {"selection_mode": mode}})
 
-    text = "⏱ <b>اختر توقيت ظهور النص داخل الفيديو:</b>"
+    text = "âڈ± <b>ط§ط®طھط± طھظˆظ‚ظٹطھ ط¸ظ‡ظˆط± ط§ظ„ظ†طµ ط¯ط§ط®ظ„ ط§ظ„ظپظٹط¯ظٹظˆ:</b>"
     keyboard = [
-        [InlineKeyboardButton("في البداية", callback_data="am_src_ov_time:start")],
-        [InlineKeyboardButton("في النهاية", callback_data="am_src_ov_time:end")],
-        [InlineKeyboardButton("طوال الفيديو", callback_data="am_src_ov_time:full")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")],
+        [InlineKeyboardButton("ظپظٹ ط§ظ„ط¨ط¯ط§ظٹط©", callback_data="am_src_ov_time:start")],
+        [InlineKeyboardButton("ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©", callback_data="am_src_ov_time:end")],
+        [InlineKeyboardButton("ط·ظˆط§ظ„ ط§ظ„ظپظٹط¯ظٹظˆ", callback_data="am_src_ov_time:full")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
@@ -3099,9 +3299,9 @@ async def add_source_overlay_timing(update: Update, context: ContextTypes.DEFAUL
     timing = query.data.split(":", 1)[1]
     _update_draft_source_settings(context, {"shorts_overlay": {"timing": timing}})
 
-    text = "⌛ <b>اختر مدة ظهور النص:</b>"
-    keyboard = [[InlineKeyboardButton(f"{val} ثانية", callback_data=f"am_src_ov_dur:{val}")] for val in OVERLAY_DURATION_OPTIONS]
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")])
+    text = "âŒ› <b>ط§ط®طھط± ظ…ط¯ط© ط¸ظ‡ظˆط± ط§ظ„ظ†طµ:</b>"
+    keyboard = [[InlineKeyboardButton(f"{val} ط«ط§ظ†ظٹط©", callback_data=f"am_src_ov_dur:{val}")] for val in OVERLAY_DURATION_OPTIONS]
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
 
@@ -3112,12 +3312,12 @@ async def add_source_overlay_duration(update: Update, context: ContextTypes.DEFA
     duration = float(query.data.split(":", 1)[1])
     _update_draft_source_settings(context, {"shorts_overlay": {"duration": duration}})
 
-    text = "📍 <b>اختر موضع النص داخل الفيديو:</b>"
+    text = "ًں“چ <b>ط§ط®طھط± ظ…ظˆط¶ط¹ ط§ظ„ظ†طµ ط¯ط§ط®ظ„ ط§ظ„ظپظٹط¯ظٹظˆ:</b>"
     keyboard = [
-        [InlineKeyboardButton("⬆️ أعلى", callback_data="am_src_ov_pos:top")],
-        [InlineKeyboardButton("🎯 المنتصف", callback_data="am_src_ov_pos:center")],
-        [InlineKeyboardButton("⬇️ أسفل", callback_data="am_src_ov_pos:bottom")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")],
+        [InlineKeyboardButton("â¬†ï¸ڈ ط£ط¹ظ„ظ‰", callback_data="am_src_ov_pos:top")],
+        [InlineKeyboardButton("ًںژ¯ ط§ظ„ظ…ظ†طھطµظپ", callback_data="am_src_ov_pos:center")],
+        [InlineKeyboardButton("â¬‡ï¸ڈ ط£ط³ظپظ„", callback_data="am_src_ov_pos:bottom")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
@@ -3163,14 +3363,14 @@ async def add_source_description_start(update: Update, context: ContextTypes.DEF
     settings = _draft_source_settings(context)
     desc_status = _short_desc_status(settings)
     text = (
-        "📄 <b>إعداد النص الإضافي داخل وصف الفيديو</b>\n\n"
-        f"الحالة الحالية: <code>{html.escape(desc_status)}</code>\n\n"
-        "هذا النص يُدمج مع الوصف النهائي قبل النشر، بدون استبدال الوصف الأساسي."
+        "ًں“„ <b>ط¥ط¹ط¯ط§ط¯ ط§ظ„ظ†طµ ط§ظ„ط¥ط¶ط§ظپظٹ ط¯ط§ط®ظ„ ظˆطµظپ ط§ظ„ظپظٹط¯ظٹظˆ</b>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(desc_status)}</code>\n\n"
+        "ظ‡ط°ط§ ط§ظ„ظ†طµ ظٹظڈط¯ظ…ط¬ ظ…ط¹ ط§ظ„ظˆطµظپ ط§ظ„ظ†ظ‡ط§ط¦ظٹ ظ‚ط¨ظ„ ط§ظ„ظ†ط´ط±طŒ ط¨ط¯ظˆظ† ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظˆطµظپ ط§ظ„ط£ط³ط§ط³ظٹ."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل وإضافة نصوص", callback_data="am_src_desc:on")],
-        [InlineKeyboardButton("⬜ تخطي / تعطيل", callback_data="am_src_desc:off")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„ ظˆط¥ط¶ط§ظپط© ظ†طµظˆطµ", callback_data="am_src_desc:on")],
+        [InlineKeyboardButton("â¬œ طھط®ط·ظٹ / طھط¹ط·ظٹظ„", callback_data="am_src_desc:off")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")],
     ]
     await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
@@ -3187,11 +3387,11 @@ async def add_source_choose_description_enabled(update: Update, context: Context
 
     context.user_data["am_text_input_mode"] = "add_desc_texts"
     text = (
-        "✍️ <b>أرسل الآن النصوص الإضافية للوصف</b>\n\n"
-        "- يمكنك إرسال نص واحد أو عدة فقرات\n"
-        "- للفصل بين كل خيار وآخر، ضع سطرًا يحتوي على <code>---</code> فقط"
+        "âœچï¸ڈ <b>ط£ط±ط³ظ„ ط§ظ„ط¢ظ† ط§ظ„ظ†طµظˆطµ ط§ظ„ط¥ط¶ط§ظپظٹط© ظ„ظ„ظˆطµظپ</b>\n\n"
+        "- ظٹظ…ظƒظ†ظƒ ط¥ط±ط³ط§ظ„ ظ†طµ ظˆط§ط­ط¯ ط£ظˆ ط¹ط¯ط© ظپظ‚ط±ط§طھ\n"
+        "- ظ„ظ„ظپطµظ„ ط¨ظٹظ† ظƒظ„ ط®ظٹط§ط± ظˆط¢ط®ط±طŒ ط¶ط¹ ط³ط·ط±ظ‹ط§ ظٹط­طھظˆظٹ ط¹ظ„ظ‰ <code>---</code> ظپظ‚ط·"
     )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_desc_menu")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SOURCE_TEXT_INPUT
 
@@ -3201,11 +3401,11 @@ async def add_source_description_mode(update: Update, context: ContextTypes.DEFA
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
     _update_draft_source_settings(context, {"extra_description": {"selection_mode": mode}})
-    text = "📌 <b>أين تريد دمج النص الإضافي داخل الوصف النهائي؟</b>"
+    text = "ًں“Œ <b>ط£ظٹظ† طھط±ظٹط¯ ط¯ظ…ط¬ ط§ظ„ظ†طµ ط§ظ„ط¥ط¶ط§ظپظٹ ط¯ط§ط®ظ„ ط§ظ„ظˆطµظپ ط§ظ„ظ†ظ‡ط§ط¦ظٹطں</b>"
     keyboard = [
-        [InlineKeyboardButton("قبل الوصف", callback_data="am_src_desc_place:prepend")],
-        [InlineKeyboardButton("بعد الوصف", callback_data="am_src_desc_place:append")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
+        [InlineKeyboardButton("ظ‚ط¨ظ„ ط§ظ„ظˆطµظپ", callback_data="am_src_desc_place:prepend")],
+        [InlineKeyboardButton("ط¨ط¹ط¯ ط§ظ„ظˆطµظپ", callback_data="am_src_desc_place:append")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_desc_menu")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
@@ -3225,14 +3425,14 @@ async def add_source_raw_review_start(update: Update, context: ContextTypes.DEFA
     settings = _draft_source_settings(context)
     status = _raw_review_status(settings)
     text = (
-        "🧪 <b>مراجعة الفيديو الخام قبل المعالجة</b>\n\n"
-        f"الحالة الحالية: <code>{html.escape(status)}</code>\n\n"
-        "عند التفعيل، لن يبدأ هذا المصدر بالمعالجة أو التعديل أو النشر قبل موافقتك الصريحة على الفيديو الخام."
+        "ًں§ھ <b>ظ…ط±ط§ط¬ط¹ط© ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ط®ط§ظ… ظ‚ط¨ظ„ ط§ظ„ظ…ط¹ط§ظ„ط¬ط©</b>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(status)}</code>\n\n"
+        "ط¹ظ†ط¯ ط§ظ„طھظپط¹ظٹظ„طŒ ظ„ظ† ظٹط¨ط¯ط£ ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط± ط¨ط§ظ„ظ…ط¹ط§ظ„ط¬ط© ط£ظˆ ط§ظ„طھط¹ط¯ظٹظ„ ط£ظˆ ط§ظ„ظ†ط´ط± ظ‚ط¨ظ„ ظ…ظˆط§ظپظ‚طھظƒ ط§ظ„طµط±ظٹط­ط© ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ط®ط§ظ…."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل المراجعة اليدوية", callback_data="am_src_raw_review:on")],
-        [InlineKeyboardButton("⬜ تعطيل والمتابعة المباشرة", callback_data="am_src_raw_review:off")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„ ط§ظ„ظ…ط±ط§ط¬ط¹ط© ط§ظ„ظٹط¯ظˆظٹط©", callback_data="am_src_raw_review:on")],
+        [InlineKeyboardButton("â¬œ طھط¹ط·ظٹظ„ ظˆط§ظ„ظ…طھط§ط¨ط¹ط© ط§ظ„ظ…ط¨ط§ط´ط±ط©", callback_data="am_src_raw_review:off")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_desc_menu")],
     ]
     await _safe_edit_message_text(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_ADD_SOURCE_CUSTOMIZE
@@ -3250,6 +3450,7 @@ async def add_source_choose_raw_review(update: Update, context: ContextTypes.DEF
 async def add_source_overlay_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await _safe_answer(query)
+    context.user_data.pop("am_text_input_mode", None)
     return await add_source_overlay_start(update, context)
 
 
@@ -3260,55 +3461,55 @@ async def add_source_description_menu(update: Update, context: ContextTypes.DEFA
 
 
 async def _ask_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """طلب رابط المصدر"""
+    """ط·ظ„ط¨ ط±ط§ط¨ط· ط§ظ„ظ…طµط¯ط±"""
     query = update.callback_query
     new_src = context.user_data.get("am_new_source", {}) or {}
     platform = (new_src.get("platform") or "youtube").strip().lower()
     if platform == "container":
         text = (
-            "📦 <b>أدخل معرف الحاوية (Container ID):</b>\n\n"
-            "أمثلة:\n"
-            "• <code>container:2f6c0b2a-....</code>\n"
-            "• <code>2f6c0b2a-....</code>\n\n"
-            "سيتم جلب الفيديوهات من هذه الحاوية بدل يوتيوب."
+            "ًں“¦ <b>ط£ط¯ط®ظ„ ظ…ط¹ط±ظپ ط§ظ„ط­ط§ظˆظٹط© (Container ID):</b>\n\n"
+            "ط£ظ…ط«ظ„ط©:\n"
+            "â€¢ <code>container:2f6c0b2a-....</code>\n"
+            "â€¢ <code>2f6c0b2a-....</code>\n\n"
+            "ط³ظٹطھظ… ط¬ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظ…ظ† ظ‡ط°ظ‡ ط§ظ„ط­ط§ظˆظٹط© ط¨ط¯ظ„ ظٹظˆطھظٹظˆط¨."
         )
     elif platform.startswith("facebook"):
         is_reels = platform == "facebook_reels"
         text = (
-            "🔗 <b>أدخل رابط فيس بوك المصدر:</b>\n\n"
-            + ("📱 <b>وضع ريلز فقط:</b> يمكنك إدخال رابط الصفحة مباشرة وسيتم تلقائياً استخدام <code>/reels</code>.\n\n" if is_reels else "")
-            + "أمثلة (قد يختلف الدعم حسب نوع الرابط):\n"
-            + ("• <code>https://www.facebook.com/&lt;page&gt;</code>\n" if is_reels else "")
-            + ("• <code>https://www.facebook.com/&lt;page&gt;/reels</code>\n" if is_reels else "")
-            + "• <code>https://www.facebook.com/watch/?v=...</code>\n"
-            + "• <code>https://www.facebook.com/reel/...</code>\n\n"
-            + "💡 الأفضل عادةً إرسال رابط ريل مباشر لضمان نجاح الجلب.\n"
-            "⚠️ إذا فشل الجلب، جرّب تزويد Cookies عبر متغير البيئة <code>YTDLP_COOKIES_PATH</code>."
+            "ًں”— <b>ط£ط¯ط®ظ„ ط±ط§ط¨ط· ظپظٹط³ ط¨ظˆظƒ ط§ظ„ظ…طµط¯ط±:</b>\n\n"
+            + ("ًں“± <b>ظˆط¶ط¹ ط±ظٹظ„ط² ظپظ‚ط·:</b> ظٹظ…ظƒظ†ظƒ ط¥ط¯ط®ط§ظ„ ط±ط§ط¨ط· ط§ظ„طµظپط­ط© ظ…ط¨ط§ط´ط±ط© ظˆط³ظٹطھظ… طھظ„ظ‚ط§ط¦ظٹط§ظ‹ ط§ط³طھط®ط¯ط§ظ… <code>/reels</code>.\n\n" if is_reels else "")
+            + "ط£ظ…ط«ظ„ط© (ظ‚ط¯ ظٹط®طھظ„ظپ ط§ظ„ط¯ط¹ظ… ط­ط³ط¨ ظ†ظˆط¹ ط§ظ„ط±ط§ط¨ط·):\n"
+            + ("â€¢ <code>https://www.facebook.com/&lt;page&gt;</code>\n" if is_reels else "")
+            + ("â€¢ <code>https://www.facebook.com/&lt;page&gt;/reels</code>\n" if is_reels else "")
+            + "â€¢ <code>https://www.facebook.com/watch/?v=...</code>\n"
+            + "â€¢ <code>https://www.facebook.com/reel/...</code>\n\n"
+            + "ًں’، ط§ظ„ط£ظپط¶ظ„ ط¹ط§ط¯ط©ظ‹ ط¥ط±ط³ط§ظ„ ط±ط§ط¨ط· ط±ظٹظ„ ظ…ط¨ط§ط´ط± ظ„ط¶ظ…ط§ظ† ظ†ط¬ط§ط­ ط§ظ„ط¬ظ„ط¨.\n"
+            "âڑ ï¸ڈ ط¥ط°ط§ ظپط´ظ„ ط§ظ„ط¬ظ„ط¨طŒ ط¬ط±ظ‘ط¨ طھط²ظˆظٹط¯ Cookies ط¹ط¨ط± ظ…طھط؛ظٹط± ط§ظ„ط¨ظٹط¦ط© <code>YTDLP_COOKIES_PATH</code>."
         )
     else:
         if platform == "google_drive":
             text = (
-                "☁️ <b>أدخل Folder ID لمجلد Google Drive:</b>\n\n"
-                "مثال: <code>1AbCDefGhIjKlmNopQRstuVwxyz</code>\n\n"
-                "⚠️ أرسل <b>Folder ID فقط</b> بدون نص إضافي."
+                "âکپï¸ڈ <b>ط£ط¯ط®ظ„ Folder ID ظ„ظ…ط¬ظ„ط¯ Google Drive:</b>\n\n"
+                "ظ…ط«ط§ظ„: <code>1AbCDefGhIjKlmNopQRstuVwxyz</code>\n\n"
+                "âڑ ï¸ڈ ط£ط±ط³ظ„ <b>Folder ID ظپظ‚ط·</b> ط¨ط¯ظˆظ† ظ†طµ ط¥ط¶ط§ظپظٹ."
             )
         else:
             text = (
-                "🔗 <b>أدخل رابط مصدر يوتيوب:</b>\n\n"
-                "أمثلة:\n"
-                "• <code>https://www.youtube.com/@channelname/shorts</code>\n"
-                "• <code>https://www.youtube.com/@channelname/videos</code>\n"
-                "• <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>\n\n"
-                "⚠️ أرسل <b>رابط مصدر واحد فقط</b> في كل رسالة، وليس عدة روابط دفعة واحدة.\n"
-                "💡 يمكن أن يكون الرابط قناة أو تبويب <code>/videos</code> أو <code>/shorts</code> أو Playlist."
+                "ًں”— <b>ط£ط¯ط®ظ„ ط±ط§ط¨ط· ظ…طµط¯ط± ظٹظˆطھظٹظˆط¨:</b>\n\n"
+                "ط£ظ…ط«ظ„ط©:\n"
+                "â€¢ <code>https://www.youtube.com/@channelname/shorts</code>\n"
+                "â€¢ <code>https://www.youtube.com/@channelname/videos</code>\n"
+                "â€¢ <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>\n\n"
+                "âڑ ï¸ڈ ط£ط±ط³ظ„ <b>ط±ط§ط¨ط· ظ…طµط¯ط± ظˆط§ط­ط¯ ظپظ‚ط·</b> ظپظٹ ظƒظ„ ط±ط³ط§ظ„ط©طŒ ظˆظ„ظٹط³ ط¹ط¯ط© ط±ظˆط§ط¨ط· ط¯ظپط¹ط© ظˆط§ط­ط¯ط©.\n"
+                "ًں’، ظٹظ…ظƒظ† ط£ظ† ظٹظƒظˆظ† ط§ظ„ط±ط§ط¨ط· ظ‚ظ†ط§ط© ط£ظˆ طھط¨ظˆظٹط¨ <code>/videos</code> ط£ظˆ <code>/shorts</code> ط£ظˆ Playlist."
             )
-    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     context.user_data["am_new_source"]["awaiting_url"] = True
     return AM_ADD_SOURCE_URL
 
 async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إدخال رابط المصدر"""
+    """ط¥ط¯ط®ط§ظ„ ط±ط§ط¨ط· ط§ظ„ظ…طµط¯ط±"""
     if not context.user_data.get("am_new_source", {}).get("awaiting_url"):
         return AM_ADD_SOURCE_URL
 
@@ -3321,7 +3522,7 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cid.lower().startswith("container:"):
             cid = cid.split(":", 1)[1].strip()
         if not cid or len(cid) < 8:
-            await update.message.reply_text("❌ أدخل معرف حاوية صالح (UUID أو container:UUID).")
+            await update.message.reply_text("â‌Œ ط£ط¯ط®ظ„ ظ…ط¹ط±ظپ ط­ط§ظˆظٹط© طµط§ظ„ط­ (UUID ط£ظˆ container:UUID).")
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"container:{cid}"
     elif platform == "google_drive":
@@ -3331,14 +3532,14 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if m:
                 folder_id = m.group(1).strip()
             else:
-                await update.message.reply_text("❌ لم أستطع استخراج Folder ID من الرابط. أرسل Folder ID أو رابط مجلد صحيح.")
+                await update.message.reply_text("â‌Œ ظ„ظ… ط£ط³طھط·ط¹ ط§ط³طھط®ط±ط§ط¬ Folder ID ظ…ظ† ط§ظ„ط±ط§ط¨ط·. ط£ط±ط³ظ„ Folder ID ط£ظˆ ط±ط§ط¨ط· ظ…ط¬ظ„ط¯ طµط­ظٹط­.")
                 return AM_ADD_SOURCE_URL
         folder_id = re.sub(r"[^a-zA-Z0-9_-]", "", folder_id)
         if not folder_id or len(folder_id) < 10:
-            await update.message.reply_text("❌ Folder ID غير صالح. تحقق منه وأعد الإرسال.")
+            await update.message.reply_text("â‌Œ Folder ID ط؛ظٹط± طµط§ظ„ط­. طھط­ظ‚ظ‚ ظ…ظ†ظ‡ ظˆط£ط¹ط¯ ط§ظ„ط¥ط±ط³ط§ظ„.")
             return AM_ADD_SOURCE_URL
         if len(folder_id) < 20:
-            await update.message.reply_text("⚠️ Folder ID يبدو قصيراً/ناقصاً. تأكد أنك نسخته كاملاً من رابط المجلد (بعد /folders/).")
+            await update.message.reply_text("âڑ ï¸ڈ Folder ID ظٹط¨ط¯ظˆ ظ‚طµظٹط±ط§ظ‹/ظ†ط§ظ‚طµط§ظ‹. طھط£ظƒط¯ ط£ظ†ظƒ ظ†ط³ط®طھظ‡ ظƒط§ظ…ظ„ط§ظ‹ ظ…ظ† ط±ط§ط¨ط· ط§ظ„ظ…ط¬ظ„ط¯ (ط¨ط¹ط¯ /folders/).")
             return AM_ADD_SOURCE_URL
         context.user_data["am_new_source"]["source_url"] = f"gdrive:folder:{folder_id}"
         context.user_data["am_new_source"]["platform"] = "google_drive"
@@ -3346,13 +3547,13 @@ async def add_source_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = raw
         url_matches = re.findall(r"https?://\S+", raw)
         if len(url_matches) > 1:
-            await update.message.reply_text("⚠️ أرسل رابط مصدر واحد فقط في كل مرة، ثم أضف المصدر التالي بشكل منفصل.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ط±ط§ط¨ط· ظ…طµط¯ط± ظˆط§ط­ط¯ ظپظ‚ط· ظپظٹ ظƒظ„ ظ…ط±ط©طŒ ط«ظ… ط£ط¶ظپ ط§ظ„ظ…طµط¯ط± ط§ظ„طھط§ظ„ظٹ ط¨ط´ظƒظ„ ظ…ظ†ظپطµظ„.")
             return AM_ADD_SOURCE_URL
         if len(url_matches) == 1 and url_matches[0] != raw:
-            await update.message.reply_text("⚠️ أرسل الرابط فقط بدون أي نص إضافي، وبمصدر واحد في الرسالة.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ط§ظ„ط±ط§ط¨ط· ظپظ‚ط· ط¨ط¯ظˆظ† ط£ظٹ ظ†طµ ط¥ط¶ط§ظپظٹطŒ ظˆط¨ظ…طµط¯ط± ظˆط§ط­ط¯ ظپظٹ ط§ظ„ط±ط³ط§ظ„ط©.")
             return AM_ADD_SOURCE_URL
         if not url.startswith("http"):
-            await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
+            await update.message.reply_text("â‌Œ ط£ط¯ط®ظ„ ط±ط§ط¨ط·ظ‹ط§ طµط§ظ„ط­ظ‹ط§ ظٹط¨ط¯ط£ ط¨ظ€ http")
             return AM_ADD_SOURCE_URL
 
         # Facebook UX: user may paste a video link instead of page/profile.
@@ -3386,7 +3587,7 @@ async def add_source_choose_tail_trim(update: Update, context: ContextTypes.DEFA
         try:
             seconds = float(choice)
         except Exception:
-            await query.answer("❌ قيمة القص غير صالحة", show_alert=True)
+            await query.answer("â‌Œ ظ‚ظٹظ…ط© ط§ظ„ظ‚طµ ط؛ظٹط± طµط§ظ„ط­ط©", show_alert=True)
             return await _ask_source_tail_trim(update, context)
         _update_draft_source_settings(context, {"tail_trim": {"enabled": True, "seconds": seconds}})
 
@@ -3429,7 +3630,7 @@ async def add_source_choose_video_effect_duration(update: Update, context: Conte
     try:
         duration = float(raw_duration)
     except Exception:
-        await query.answer("❌ مدة التأثير غير صالحة", show_alert=True)
+        await query.answer("â‌Œ ظ…ط¯ط© ط§ظ„طھط£ط«ظٹط± ط؛ظٹط± طµط§ظ„ط­ط©", show_alert=True)
         return await _ask_source_video_effect_duration(update, context, target, effect_type)
 
     _update_draft_source_settings(context, {"video_effects": {target: _build_video_effect_config(effect_type, duration)}})
@@ -3441,16 +3642,16 @@ async def _ask_source_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE
     settings = _draft_source_settings(context)
     privacy_status = _source_privacy_status(settings)
     text = (
-        "🔒 <b>اختر خصوصية النشر لهذا المصدر</b> <i>(اختياري)</i>\n\n"
-        f"الحالة الحالية: <code>{html.escape(privacy_status)}</code>\n\n"
-        "سيتم استخدام هذا الخيار عند نشر الفيديوهات المجلوبة من هذا المصدر."
+        "ًں”’ <b>ط§ط®طھط± ط®طµظˆطµظٹط© ط§ظ„ظ†ط´ط± ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±</b> <i>(ط§ط®طھظٹط§ط±ظٹ)</i>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(privacy_status)}</code>\n\n"
+        "ط³ظٹطھظ… ط§ط³طھط®ط¯ط§ظ… ظ‡ط°ط§ ط§ظ„ط®ظٹط§ط± ط¹ظ†ط¯ ظ†ط´ط± ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظ…ط¬ظ„ظˆط¨ط© ظ…ظ† ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±."
     )
     keyboard = [
-        [InlineKeyboardButton("🌍 علني (Public)", callback_data="am_src_privacy:public")],
-        [InlineKeyboardButton("🔗 غير مدرج (Unlisted)", callback_data="am_src_privacy:unlisted")],
-        [InlineKeyboardButton("🔒 خاص (Private)", callback_data="am_src_privacy:private")],
-        [InlineKeyboardButton("⚙️ حسب خصوصية القناة", callback_data="am_src_privacy:default")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("ًںŒچ ط¹ظ„ظ†ظٹ (Public)", callback_data="am_src_privacy:public")],
+        [InlineKeyboardButton("ًں”— ط؛ظٹط± ظ…ط¯ط±ط¬ (Unlisted)", callback_data="am_src_privacy:unlisted")],
+        [InlineKeyboardButton("ًں”’ ط®ط§طµ (Private)", callback_data="am_src_privacy:private")],
+        [InlineKeyboardButton("âڑ™ï¸ڈ ط­ط³ط¨ ط®طµظˆطµظٹط© ط§ظ„ظ‚ظ†ط§ط©", callback_data="am_src_privacy:default")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     query = update.callback_query
     if query:
@@ -3464,15 +3665,15 @@ async def _ask_source_hflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = _draft_source_settings(context)
     hflip_status = _source_hflip_status(settings)
     text = (
-        "↔️ <b>قلب الفيديو أفقيًا (Mirror)</b> <i>(اختياري)</i>\n\n"
-        f"الحالة الحالية: <code>{html.escape(hflip_status)}</code>\n\n"
-        "عند التفعيل سيتم قلب الفيديو من اليمين إلى اليسار لهذا المصدر فقط."
+        "â†”ï¸ڈ <b>ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ ط£ظپظ‚ظٹظ‹ط§ (Mirror)</b> <i>(ط§ط®طھظٹط§ط±ظٹ)</i>\n\n"
+        f"ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©: <code>{html.escape(hflip_status)}</code>\n\n"
+        "ط¹ظ†ط¯ ط§ظ„طھظپط¹ظٹظ„ ط³ظٹطھظ… ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ ظ…ظ† ط§ظ„ظٹظ…ظٹظ† ط¥ظ„ظ‰ ط§ظ„ظٹط³ط§ط± ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط± ظپظ‚ط·."
     )
     keyboard = [
-        [InlineKeyboardButton("✅ تفعيل للمصدر", callback_data="am_src_hflip:on")],
-        [InlineKeyboardButton("❌ تعطيل للمصدر", callback_data="am_src_hflip:off")],
-        [InlineKeyboardButton("⚙️ حسب الإعدادات العامة", callback_data="am_src_hflip:default")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+        [InlineKeyboardButton("âœ… طھظپط¹ظٹظ„ ظ„ظ„ظ…طµط¯ط±", callback_data="am_src_hflip:on")],
+        [InlineKeyboardButton("â‌Œ طھط¹ط·ظٹظ„ ظ„ظ„ظ…طµط¯ط±", callback_data="am_src_hflip:off")],
+        [InlineKeyboardButton("âڑ™ï¸ڈ ط­ط³ط¨ ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ط¹ط§ظ…ط©", callback_data="am_src_hflip:default")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_sources")],
     ]
     query = update.callback_query
     if query:
@@ -3511,7 +3712,7 @@ async def add_source_choose_privacy(update: Update, context: ContextTypes.DEFAUL
 
 
 async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إدخال اسم المصدر وحفظه"""
+    """ط¥ط¯ط®ط§ظ„ ط§ط³ظ… ط§ظ„ظ…طµط¯ط± ظˆط­ظپط¸ظ‡"""
     name = update.message.text.strip()
     source_data = context.user_data.get("am_new_source", {})
 
@@ -3559,28 +3760,28 @@ async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         facecam_status = _facecam_status(source_settings)
         privacy_status = _source_privacy_status(source_settings)
         text = (
-            f"✅ <b>تم إضافة المصدر بنجاح!</b>\n\n"
-            f"📛 الاسم: <code>{html.escape(name)}</code>\n"
-            f"📦 النوع: <code>{html.escape(source_data.get('content_type', 'minecraft_mods'))}</code>\n"
-            f"🔗 الرابط: <code>{html.escape(source_data.get('source_url', '')[:50])}</code>\n"
-            f"🔒 الخصوصية: <code>{html.escape(privacy_status)}</code>\n"
-            f"📝 نص الشورتس: <code>{html.escape(overlay_status)}</code>\n"
-            f"🎬 Facecam: <code>{html.escape(facecam_status)}</code>\n"
-            f"↔️ قلب الفيديو: <code>{html.escape(hflip_status)}</code>\n"
-            f"📄 نص الوصف: <code>{html.escape(desc_status)}</code>\n"
-            f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
-            f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
-            f"🏁 تأثير النهاية: <code>{html.escape(outro_effect_status)}</code>\n"
-            f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>\n\n"
-            f"⏱ <b>إعداد الأتمتة التلقائية:</b>\n"
-            f"يرجى تحديد الفترة الزمنية للنشر التلقائي لهذا المصدر، أو الضغط على تخطي للعودة."
+            f"âœ… <b>طھظ… ط¥ط¶ط§ظپط© ط§ظ„ظ…طµط¯ط± ط¨ظ†ط¬ط§ط­!</b>\n\n"
+            f"ًں“› ط§ظ„ط§ط³ظ…: <code>{html.escape(name)}</code>\n"
+            f"ًں“¦ ط§ظ„ظ†ظˆط¹: <code>{html.escape(source_data.get('content_type', 'minecraft_mods'))}</code>\n"
+            f"ًں”— ط§ظ„ط±ط§ط¨ط·: <code>{html.escape(source_data.get('source_url', '')[:50])}</code>\n"
+            f"ًں”’ ط§ظ„ط®طµظˆطµظٹط©: <code>{html.escape(privacy_status)}</code>\n"
+            f"ًں“‌ ظ†طµ ط§ظ„ط´ظˆط±طھط³: <code>{html.escape(overlay_status)}</code>\n"
+            f"ًںژ¬ Facecam: <code>{html.escape(facecam_status)}</code>\n"
+            f"â†”ï¸ڈ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ: <code>{html.escape(hflip_status)}</code>\n"
+            f"ًں“„ ظ†طµ ط§ظ„ظˆطµظپ: <code>{html.escape(desc_status)}</code>\n"
+            f"âœ‚ï¸ڈ ظ‚طµ ط§ظ„ظ†ظ‡ط§ظٹط©: <code>{html.escape(tail_trim_status)}</code>\n"
+            f"âœ¨ طھط£ط«ظٹط± ط§ظ„ط¨ط¯ط§ظٹط©: <code>{html.escape(intro_effect_status)}</code>\n"
+            f"ًںڈپ طھط£ط«ظٹط± ط§ظ„ظ†ظ‡ط§ظٹط©: <code>{html.escape(outro_effect_status)}</code>\n"
+            f"ًں§ھ ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط®ط§ظ…: <code>{html.escape(raw_review_status)}</code>\n\n"
+            f"âڈ± <b>ط¥ط¹ط¯ط§ط¯ ط§ظ„ط£طھظ…طھط© ط§ظ„طھظ„ظ‚ط§ط¦ظٹط©:</b>\n"
+            f"ظٹط±ط¬ظ‰ طھط­ط¯ظٹط¯ ط§ظ„ظپطھط±ط© ط§ظ„ط²ظ…ظ†ظٹط© ظ„ظ„ظ†ط´ط± ط§ظ„طھظ„ظ‚ط§ط¦ظٹ ظ„ظ‡ط°ط§ ط§ظ„ظ…طµط¯ط±طŒ ط£ظˆ ط§ظ„ط¶ط؛ط· ط¹ظ„ظ‰ طھط®ط·ظٹ ظ„ظ„ط¹ظˆط¯ط©."
         )
 
         intervals = [
-            ("⚡ 1د", 1), ("⚡ 5د", 5), ("🕙 10د", 10), ("🕙 15د", 15),
-            ("🕒 30د", 30), ("🕓 1س", 60), ("🕓 2س", 120), ("🕓 3س", 180),
-            ("🕘 4س", 240), ("🕘 6س", 360), ("🕗 8س", 480), ("🕗 12س", 720),
-            ("📅 1يوم", 1440), ("📅 2يوم", 2880), ("📅 3يوم", 4320), ("📅 1أسبوع", 10080),
+            ("âڑ، 1ط¯", 1), ("âڑ، 5ط¯", 5), ("ًں•™ 10ط¯", 10), ("ًں•™ 15ط¯", 15),
+            ("ًں•’ 30ط¯", 30), ("ًں•“ 1ط³", 60), ("ًں•“ 2ط³", 120), ("ًں•“ 3ط³", 180),
+            ("ًں•ک 4ط³", 240), ("ًں•ک 6ط³", 360), ("ًں•— 8ط³", 480), ("ًں•— 12ط³", 720),
+            ("ًں“… 1ظٹظˆظ…", 1440), ("ًں“… 2ظٹظˆظ…", 2880), ("ًں“… 3ظٹظˆظ…", 4320), ("ًں“… 1ط£ط³ط¨ظˆط¹", 10080),
         ]
 
         keyboard = []
@@ -3590,7 +3791,7 @@ async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 row.append(InlineKeyboardButton(label, callback_data=f"am_sch_int:{mins}"))
             keyboard.append(row)
 
-        keyboard.append([InlineKeyboardButton("⏭️ تخطي / للمصادر", callback_data="am_sources")])
+        keyboard.append([InlineKeyboardButton("âڈ­ï¸ڈ طھط®ط·ظٹ / ظ„ظ„ظ…طµط§ط¯ط±", callback_data="am_sources")])
 
         context.user_data["am_new_schedule"] = {
             "channel_id": source_data.get("channel_id", ""),
@@ -3603,11 +3804,11 @@ async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return AM_SCHEDULE_LIMIT
 
     else:
-        text = "❌ فشل إضافة المصدر. قد يكون مكررًا."
+        text = "â‌Œ ظپط´ظ„ ط¥ط¶ط§ظپط© ط§ظ„ظ…طµط¯ط±. ظ‚ط¯ ظٹظƒظˆظ† ظ…ظƒط±ط±ظ‹ط§."
 
         keyboard = [
-            [InlineKeyboardButton("➕ إضافة مصدر آخر", callback_data="am_add_source")],
-            [InlineKeyboardButton("🔙 المصادر", callback_data="am_sources")],
+            [InlineKeyboardButton("â‍• ط¥ط¶ط§ظپط© ظ…طµط¯ط± ط¢ط®ط±", callback_data="am_add_source")],
+            [InlineKeyboardButton("ًں”™ ط§ظ„ظ…طµط§ط¯ط±", callback_data="am_sources")],
         ]
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         context.user_data.pop("am_new_source", None)
@@ -3616,9 +3817,12 @@ async def add_source_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get("am_text_input_mode")
+    if mode in {"add_overlay_image", "edit_overlay_image"}:
+        await update.message.reply_text("⚠️ هذه المرحلة مخصصة لرفع صورة. أرسل صورة أو استخدم زر المتابعة بدون صورة.")
+        return AM_SOURCE_TEXT_INPUT
     raw_text = (update.message.text or "").strip()
     if not raw_text:
-        await update.message.reply_text("⚠️ أرسل نصًا واحدًا على الأقل.")
+        await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ظ†طµظ‹ط§ ظˆط§ط­ط¯ظ‹ط§ ط¹ظ„ظ‰ ط§ظ„ط£ظ‚ظ„.")
         return AM_SOURCE_TEXT_INPUT
 
     if context.user_data.get("am_gdrive_awaiting_url"):
@@ -3629,35 +3833,36 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "add_overlay_texts":
         texts = _split_overlay_texts(raw_text)
         if not texts:
-            await update.message.reply_text("⚠️ أرسل سطرًا واحدًا على الأقل.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ط³ط·ط±ظ‹ط§ ظˆط§ط­ط¯ظ‹ط§ ط¹ظ„ظ‰ ط§ظ„ط£ظ‚ظ„.")
             return AM_SOURCE_TEXT_INPUT
         _update_draft_source_settings(context, {"shorts_overlay": {"texts": texts, "enabled": True}})
-        context.user_data.pop("am_text_input_mode", None)
+        context.user_data["am_text_input_mode"] = "add_overlay_image"
         keyboard = [
-            [InlineKeyboardButton("ثابت", callback_data="am_src_ov_mode:fixed")],
-            [InlineKeyboardButton("عشوائي", callback_data="am_src_ov_mode:random")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")],
+            [InlineKeyboardButton("⏭️ متابعة بدون صورة", callback_data="am_src_ov_img_skip")],
+            [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_overlay_menu")],
         ]
         await update.message.reply_text(
-            "✅ تم حفظ نصوص الشورتس.\n\nالآن اختر طريقة الاختيار:",
+            "✅ تم حفظ نصوص الشورتس.\n\n"
+            "الآن أرسل صورة لتظهر على يمين النص داخل الفيديو.\n"
+            "النص سيظهر على يسار الصورة بنفس الأنيميشن.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        return AM_ADD_SOURCE_CUSTOMIZE
+        return AM_SOURCE_TEXT_INPUT
 
     if mode == "add_desc_texts":
         texts = _split_description_texts(raw_text)
         if not texts:
-            await update.message.reply_text("⚠️ أرسل نصًا أو فقرة واحدة على الأقل.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ظ†طµظ‹ط§ ط£ظˆ ظپظ‚ط±ط© ظˆط§ط­ط¯ط© ط¹ظ„ظ‰ ط§ظ„ط£ظ‚ظ„.")
             return AM_SOURCE_TEXT_INPUT
         _update_draft_source_settings(context, {"extra_description": {"texts": texts, "enabled": True}})
         context.user_data.pop("am_text_input_mode", None)
         keyboard = [
-            [InlineKeyboardButton("ثابت", callback_data="am_src_desc_mode:fixed")],
-            [InlineKeyboardButton("عشوائي", callback_data="am_src_desc_mode:random")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
+            [InlineKeyboardButton("ط«ط§ط¨طھ", callback_data="am_src_desc_mode:fixed")],
+            [InlineKeyboardButton("ط¹ط´ظˆط§ط¦ظٹ", callback_data="am_src_desc_mode:random")],
+            [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_add_desc_menu")],
         ]
         await update.message.reply_text(
-            "✅ تم حفظ نصوص الوصف.\n\nالآن اختر طريقة الاختيار:",
+            "âœ… طھظ… ط­ظپط¸ ظ†طµظˆطµ ط§ظ„ظˆطµظپ.\n\nط§ظ„ط¢ظ† ط§ط®طھط± ط·ط±ظٹظ‚ط© ط§ظ„ط§ط®طھظٹط§ط±:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return AM_ADD_SOURCE_CUSTOMIZE
@@ -3665,32 +3870,44 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "edit_overlay_texts":
         texts = _split_overlay_texts(raw_text)
         if not texts:
-            await update.message.reply_text("⚠️ أرسل سطرًا واحدًا على الأقل.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ط³ط·ط±ظ‹ط§ ظˆط§ط­ط¯ظ‹ط§ ط¹ظ„ظ‰ ط§ظ„ط£ظ‚ظ„.")
             return AM_SOURCE_TEXT_INPUT
         success = await _update_edit_source_settings(context, {"shorts_overlay": {"texts": texts, "enabled": True}})
-        context.user_data.pop("am_text_input_mode", None)
-        await update.message.reply_text("✅ تم حفظ نصوص الشورتس الجديدة." if success else "❌ تعذر حفظ النصوص.")
-        return await _show_overlay_editor(update, context)
+        if not success:
+            context.user_data.pop("am_text_input_mode", None)
+            await update.message.reply_text("❌ تعذر حفظ نصوص الشورتس.")
+            return await _show_overlay_editor(update, context)
+        context.user_data["am_text_input_mode"] = "edit_overlay_image"
+        keyboard = [
+            [InlineKeyboardButton("⏭️ متابعة بدون تغيير الصورة", callback_data="am_edit_ov_img_skip")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_ov_menu")],
+        ]
+        await update.message.reply_text(
+            "✅ تم حفظ نصوص الشورتس الجديدة.\n\n"
+            "أرسل الآن صورة جديدة (اختياري) لتظهر يمين النص.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return AM_SOURCE_TEXT_INPUT
 
     if mode == "edit_desc_texts":
         texts = _split_description_texts(raw_text)
         if not texts:
-            await update.message.reply_text("⚠️ أرسل نصًا أو فقرة واحدة على الأقل.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ظ†طµظ‹ط§ ط£ظˆ ظپظ‚ط±ط© ظˆط§ط­ط¯ط© ط¹ظ„ظ‰ ط§ظ„ط£ظ‚ظ„.")
             return AM_SOURCE_TEXT_INPUT
         success = await _update_edit_source_settings(context, {"extra_description": {"texts": texts, "enabled": True}})
         context.user_data.pop("am_text_input_mode", None)
-        await update.message.reply_text("✅ تم حفظ نصوص الوصف الجديدة." if success else "❌ تعذر حفظ النصوص.")
+        await update.message.reply_text("âœ… طھظ… ط­ظپط¸ ظ†طµظˆطµ ط§ظ„ظˆطµظپ ط§ظ„ط¬ط¯ظٹط¯ط©." if success else "â‌Œ طھط¹ط°ط± ط­ظپط¸ ط§ظ„ظ†طµظˆطµ.")
         return await _show_description_editor(update, context)
 
     if mode == "edit_fetch_add":
         url_matches = re.findall(r"https?://\S+", raw_text)
         if len(url_matches) > 1:
-            await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
+            await update.message.reply_text("âڑ ï¸ڈ ط£ط±ط³ظ„ ط±ط§ط¨ط· ظˆط§ط­ط¯ ظپظ‚ط· ظپظٹ ط§ظ„ط±ط³ط§ظ„ط©.")
             return AM_SOURCE_TEXT_INPUT
         url = url_matches[0] if url_matches else raw_text
         url = url.strip()
         if not url.startswith("http"):
-            await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
+            await update.message.reply_text("â‌Œ ط£ط¯ط®ظ„ ط±ط§ط¨ط·ظ‹ط§ طµط§ظ„ط­ظ‹ط§ ظٹط¨ط¯ط£ ط¨ظ€ http")
             return AM_SOURCE_TEXT_INPUT
 
         src = await _get_edit_source(context)
@@ -3702,7 +3919,7 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         existing_urls = {str((x or {}).get("url") or "").strip().rstrip("/") for x in items}
         if normalized_url in existing_urls:
             context.user_data.pop("am_text_input_mode", None)
-            await update.message.reply_text("ℹ️ هذا الرابط موجود بالفعل ضمن قنوات الجلب.")
+            await update.message.reply_text("â„¹ï¸ڈ ظ‡ط°ط§ ط§ظ„ط±ط§ط¨ط· ظ…ظˆط¬ظˆط¯ ط¨ط§ظ„ظپط¹ظ„ ط¶ظ…ظ† ظ‚ظ†ظˆط§طھ ط§ظ„ط¬ظ„ط¨.")
             return await edit_source_fetch_sources_menu(update, context)
         items.append({
             "url": url,
@@ -3712,17 +3929,17 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         success = await _update_edit_source_settings(context, {"fetch_sources": items})
         context.user_data.pop("am_text_input_mode", None)
-        await update.message.reply_text("✅ تم إضافة قناة الجلب." if success else "❌ تعذر إضافة القناة.")
+        await update.message.reply_text("âœ… طھظ… ط¥ط¶ط§ظپط© ظ‚ظ†ط§ط© ط§ظ„ط¬ظ„ط¨." if success else "â‌Œ طھط¹ط°ط± ط¥ط¶ط§ظپط© ط§ظ„ظ‚ظ†ط§ط©.")
         return await edit_source_fetch_sources_menu(update, context)
 
-    await update.message.reply_text("⚠️ لا يوجد حقل نصي نشط حالياً.")
+    await update.message.reply_text("âڑ ï¸ڈ ظ„ط§ ظٹظˆط¬ط¯ ط­ظ‚ظ„ ظ†طµظٹ ظ†ط´ط· ط­ط§ظ„ظٹط§ظ‹.")
     return AM_SOURCES
 
 
-# ==================== إدارة الجدولة ====================
+# ==================== ط¥ط¯ط§ط±ط© ط§ظ„ط¬ط¯ظˆظ„ط© ====================
 
 async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة الجداول + المصادر المتاحة لإضافة جدول جديد"""
+    """ط¹ط±ط¶ ظ‚ط§ط¦ظ…ط© ط§ظ„ط¬ط¯ط§ظˆظ„ + ط§ظ„ظ…طµط§ط¯ط± ط§ظ„ظ…طھط§ط­ط© ظ„ط¥ط¶ط§ظپط© ط¬ط¯ظˆظ„ ط¬ط¯ظٹط¯"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -3732,14 +3949,14 @@ async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = db.get_sources()
 
     keyboard = []
-    text = "⏰ *إدارة جداول النشر التلقائي*\n\n"
+    text = "âڈ° *ط¥ط¯ط§ط±ط© ط¬ط¯ط§ظˆظ„ ط§ظ„ظ†ط´ط± ط§ظ„طھظ„ظ‚ط§ط¦ظٹ*\n\n"
 
-    # --- 1. عرض المصادر المتاحة (هي المدخل الأساسي الآن كما طلب المستخدم) ---
+    # --- 1. ط¹ط±ط¶ ط§ظ„ظ…طµط§ط¯ط± ط§ظ„ظ…طھط§ط­ط© (ظ‡ظٹ ط§ظ„ظ…ط¯ط®ظ„ ط§ظ„ط£ط³ط§ط³ظٹ ط§ظ„ط¢ظ† ظƒظ…ط§ ط·ظ„ط¨ ط§ظ„ظ…ط³طھط®ط¯ظ…) ---
     if sources:
-        text += "📡 *اختر مصدرًا لضبط جدولته:* (قائمة المصادر الحالية)\n"
+        text += "ًں“، *ط§ط®طھط± ظ…طµط¯ط±ظ‹ط§ ظ„ط¶ط¨ط· ط¬ط¯ظˆظ„طھظ‡:* (ظ‚ط§ط¦ظ…ط© ط§ظ„ظ…طµط§ط¯ط± ط§ظ„ط­ط§ظ„ظٹط©)\n"
         for src in sources[:15]:
             src_id = src.get("id", "")
-            src_name = src.get("source_name", "مصدر")[:25]
+            src_name = src.get("source_name", "ظ…طµط¯ط±")[:25]
 
             sch = next(
                 (
@@ -3751,21 +3968,21 @@ async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 None,
             )
             has_sch = bool(sch)
-            status_icon = "📅" if has_sch else "➕"
+            status_icon = "ًں“…" if has_sch else "â‍•"
 
             remaining_label = ""
             if sch:
                 if not sch.get("enabled", True):
-                    remaining_label = "متوقف"
+                    remaining_label = "ظ…طھظˆظ‚ظپ"
                 else:
                     now = datetime.now(timezone.utc)
                     next_dt = _am_parse_datetime_utc(sch.get("next_publish_at"))
                     if next_dt:
                         remaining_label = _am_format_remaining(next_dt - now)
                     else:
-                        remaining_label = "الآن"
+                        remaining_label = "ط§ظ„ط¢ظ†"
 
-            label = f"{status_icon} {src_name}" if not remaining_label else f"{status_icon} {src_name} ⏳ {remaining_label}"
+            label = f"{status_icon} {src_name}" if not remaining_label else f"{status_icon} {src_name} âڈ³ {remaining_label}"
             keyboard.append([
                 InlineKeyboardButton(
                     label,
@@ -3773,36 +3990,36 @@ async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             ])
     else:
-        text += "⚠️ لا توجد مصادر مضافة. أضف مصدرًا أولاً من 'إدارة المصادر'.\n"
+        text += "âڑ ï¸ڈ ظ„ط§ طھظˆط¬ط¯ ظ…طµط§ط¯ط± ظ…ط¶ط§ظپط©. ط£ط¶ظپ ظ…طµط¯ط±ظ‹ط§ ط£ظˆظ„ط§ظ‹ ظ…ظ† 'ط¥ط¯ط§ط±ط© ط§ظ„ظ…طµط§ط¯ط±'.\n"
 
-    # --- 2. عرض الجداول الموجودة حالياً (للمراجعة السريعة) ---
+    # --- 2. ط¹ط±ط¶ ط§ظ„ط¬ط¯ط§ظˆظ„ ط§ظ„ظ…ظˆط¬ظˆط¯ط© ط­ط§ظ„ظٹط§ظ‹ (ظ„ظ„ظ…ط±ط§ط¬ط¹ط© ط§ظ„ط³ط±ظٹط¹ط©) ---
     if schedules:
-        text += "\n━━━━━━━━━━━━━━━━━━━\n📋 *الجداول النشطة حالياً:*\n"
+        text += "\nâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پâ”پ\nًں“‹ *ط§ظ„ط¬ط¯ط§ظˆظ„ ط§ظ„ظ†ط´ط·ط© ط­ط§ظ„ظٹط§ظ‹:*\n"
         for i, sch in enumerate(schedules, 1):
-            status = "✅" if sch.get("enabled") else "❌"
+            status = "âœ…" if sch.get("enabled") else "â‌Œ"
             interval = sch.get("publish_interval_minutes", 120)
             
-            # تحويل الدقائق لنص بسيط
-            if interval < 60: interval_text = f"{interval}د"
-            elif interval == 60: interval_text = "ساعة"
-            else: interval_text = f"{interval/60:g}س"
+            # طھط­ظˆظٹظ„ ط§ظ„ط¯ظ‚ط§ط¦ظ‚ ظ„ظ†طµ ط¨ط³ظٹط·
+            if interval < 60: interval_text = f"{interval}ط¯"
+            elif interval == 60: interval_text = "ط³ط§ط¹ط©"
+            else: interval_text = f"{interval/60:g}ط³"
 
-            text += f"{i}. {status} `{sch.get('content_type', '')[:10]}` -> كل {interval_text}\n"
+            text += f"{i}. {status} `{sch.get('content_type', '')[:10]}` -> ظƒظ„ {interval_text}\n"
 
-        # أزرار تحكم سريعة للجداول
+        # ط£ط²ط±ط§ط± طھط­ظƒظ… ط³ط±ظٹط¹ط© ظ„ظ„ط¬ط¯ط§ظˆظ„
         for sch in schedules[:4]:
             sch_id = sch.get("id", "")
             enabled = sch.get("enabled", True)
-            toggle = "⏸" if enabled else "▶️"
+            toggle = "âڈ¸" if enabled else "â–¶ï¸ڈ"
             keyboard.append([
                 InlineKeyboardButton(
                     f"{toggle} {sch.get('content_type', '')[:10]}",
                     callback_data=f"am_toggle_sch:{sch_id}"
                 ),
-                InlineKeyboardButton("🗑", callback_data=f"am_del_sch:{sch_id}"),
+                InlineKeyboardButton("ًں—‘", callback_data=f"am_del_sch:{sch_id}"),
             ])
 
-    keyboard.append([InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="am_menu")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط±ط¦ظٹط³ظٹط©", callback_data="am_menu")])
 
     if query:
         try:
@@ -3815,7 +4032,7 @@ async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AM_SCHEDULE
 
 async def schedule_pick_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """المستخدم اختار مصدرًا → عرض القناة المرتبطة"""
+    """ط§ظ„ظ…ط³طھط®ط¯ظ… ط§ط®طھط§ط± ظ…طµط¯ط±ظ‹ط§ â†’ ط¹ط±ط¶ ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط±طھط¨ط·ط©"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -3825,13 +4042,13 @@ async def schedule_pick_source(update: Update, context: ContextTypes.DEFAULT_TYP
     src = next((s for s in sources if s.get("id") == src_id), None)
 
     if not src:
-        await query.answer("❌ المصدر غير موجود", show_alert=True)
+        await query.answer("â‌Œ ط§ظ„ظ…طµط¯ط± ط؛ظٹط± ظ…ظˆط¬ظˆط¯", show_alert=True)
         return await schedule_menu(update, context)
 
-    # حفظ بيانات المصدر المختار
+    # ط­ظپط¸ ط¨ظٹط§ظ†ط§طھ ط§ظ„ظ…طµط¯ط± ط§ظ„ظ…ط®طھط§ط±
     context.user_data["am_new_schedule"] = {
         "source_id": src_id,
-        "source_name": src.get("source_name", "مصدر"),
+        "source_name": src.get("source_name", "ظ…طµط¯ط±"),
         "channel_id": src.get("channel_id", ""),
         "content_type": src.get("content_type", "minecraft_mods"),
     }
@@ -3839,7 +4056,7 @@ async def schedule_pick_source(update: Update, context: ContextTypes.DEFAULT_TYP
     channel_id = src.get("channel_id", "")
     ch_name = channel_id[:20]
 
-    # محاولة جلب اسم القناة
+    # ظ…ط­ط§ظˆظ„ط© ط¬ظ„ط¨ ط§ط³ظ… ط§ظ„ظ‚ظ†ط§ط©
     try:
         from ..channel_manager import ChannelManager
         cm = ChannelManager()
@@ -3851,19 +4068,19 @@ async def schedule_pick_source(update: Update, context: ContextTypes.DEFAULT_TYP
         pass
 
     text = (
-        f"📡 <b>المصدر:</b> <code>{html.escape(src.get('source_name', ''))}</code>\n"
-        f"📦 <b>النوع:</b> <code>{html.escape(src.get('content_type', 'minecraft_mods'))}</code>\n"
-        f"🔗 <b>الرابط:</b> <code>{html.escape(src.get('source_url', '')[:50])}</code>\n\n"
-        f"📺 <b>القناة المستهدفة:</b>\n"
-        f"اضغط على القناة لإعداد جدول النشر لها."
+        f"ًں“، <b>ط§ظ„ظ…طµط¯ط±:</b> <code>{html.escape(src.get('source_name', ''))}</code>\n"
+        f"ًں“¦ <b>ط§ظ„ظ†ظˆط¹:</b> <code>{html.escape(src.get('content_type', 'minecraft_mods'))}</code>\n"
+        f"ًں”— <b>ط§ظ„ط±ط§ط¨ط·:</b> <code>{html.escape(src.get('source_url', '')[:50])}</code>\n\n"
+        f"ًں“؛ <b>ط§ظ„ظ‚ظ†ط§ط© ط§ظ„ظ…ط³طھظ‡ط¯ظپط©:</b>\n"
+        f"ط§ط¶ط؛ط· ط¹ظ„ظ‰ ط§ظ„ظ‚ظ†ط§ط© ظ„ط¥ط¹ط¯ط§ط¯ ط¬ط¯ظˆظ„ ط§ظ„ظ†ط´ط± ظ„ظ‡ط§."
     )
 
     keyboard = [
         [InlineKeyboardButton(
-            f"📺 {html.escape(ch_name)}",
+            f"ًں“؛ {html.escape(ch_name)}",
             callback_data=f"am_sch_ch:{channel_id}"
         )],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_schedule")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_schedule")],
     ]
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -3871,7 +4088,7 @@ async def schedule_pick_source(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def schedule_pick_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """المستخدم اختار القناة → عرض أزرار فترات النشر"""
+    """ط§ظ„ظ…ط³طھط®ط¯ظ… ط§ط®طھط§ط± ط§ظ„ظ‚ظ†ط§ط© â†’ ط¹ط±ط¶ ط£ط²ط±ط§ط± ظپطھط±ط§طھ ط§ظ„ظ†ط´ط±"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -3879,36 +4096,36 @@ async def schedule_pick_interval(update: Update, context: ContextTypes.DEFAULT_T
     sch_data = context.user_data.get("am_new_schedule", {})
     sch_data["channel_id"] = channel_id
 
-    src_name = sch_data.get("source_name", "مصدر")
+    src_name = sch_data.get("source_name", "ظ…طµط¯ط±")
 
     text = (
-        f"⏱ <b>تحديد فترة النشر لنظام الأتمتة</b>\n\n"
-        f"المصدر: <code>{html.escape(src_name)}</code>\n\n"
-        "ما هي المدة التي تريدها بين كل عملية نشر تلقائية؟"
+        f"âڈ± <b>طھط­ط¯ظٹط¯ ظپطھط±ط© ط§ظ„ظ†ط´ط± ظ„ظ†ط¸ط§ظ… ط§ظ„ط£طھظ…طھط©</b>\n\n"
+        f"ط§ظ„ظ…طµط¯ط±: <code>{html.escape(src_name)}</code>\n\n"
+        "ظ…ط§ ظ‡ظٹ ط§ظ„ظ…ط¯ط© ط§ظ„طھظٹ طھط±ظٹط¯ظ‡ط§ ط¨ظٹظ† ظƒظ„ ط¹ظ…ظ„ظٹط© ظ†ط´ط± طھظ„ظ‚ط§ط¦ظٹط©طں"
     )
 
     intervals = [
-        ("⚡ 1د", 1), ("⚡ 5د", 5), ("🕙 10د", 10), ("🕙 15د", 15),
-        ("🕒 30د", 30), ("🕓 1س", 60), ("🕓 2س", 120), ("🕓 3س", 180),
-        ("🕘 4س", 240), ("🕘 6س", 360), ("🕗 8س", 480), ("🕗 12س", 720),
-        ("📅 1يوم", 1440), ("📅 2يوم", 2880), ("📅 3يوم", 4320), ("📅 1أسبوع", 10080),
+        ("âڑ، 1ط¯", 1), ("âڑ، 5ط¯", 5), ("ًں•™ 10ط¯", 10), ("ًں•™ 15ط¯", 15),
+        ("ًں•’ 30ط¯", 30), ("ًں•“ 1ط³", 60), ("ًں•“ 2ط³", 120), ("ًں•“ 3ط³", 180),
+        ("ًں•ک 4ط³", 240), ("ًں•ک 6ط³", 360), ("ًں•— 8ط³", 480), ("ًں•— 12ط³", 720),
+        ("ًں“… 1ظٹظˆظ…", 1440), ("ًں“… 2ظٹظˆظ…", 2880), ("ًں“… 3ظٹظˆظ…", 4320), ("ًں“… 1ط£ط³ط¨ظˆط¹", 10080),
     ]
 
     keyboard = []
-    # ترتيب 4 أزرار في كل صف
+    # طھط±طھظٹط¨ 4 ط£ط²ط±ط§ط± ظپظٹ ظƒظ„ طµظپ
     for i in range(0, len(intervals), 4):
         row = []
         for label, mins in intervals[i:i+4]:
             row.append(InlineKeyboardButton(label, callback_data=f"am_sch_int:{mins}"))
         keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="am_schedule")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ‚ط§ط¦ظ…ط©", callback_data="am_schedule")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SCHEDULE_LIMIT
 
 async def schedule_pick_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """المستخدم اختار الفترة → عرض أزرار الحد اليومي"""
+    """ط§ظ„ظ…ط³طھط®ط¯ظ… ط§ط®طھط§ط± ط§ظ„ظپطھط±ط© â†’ ط¹ط±ط¶ ط£ط²ط±ط§ط± ط§ظ„ط­ط¯ ط§ظ„ظٹظˆظ…ظٹ"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -3916,26 +4133,26 @@ async def schedule_pick_limit(update: Update, context: ContextTypes.DEFAULT_TYPE
     sch_data = context.user_data.get("am_new_schedule", {})
     sch_data["interval"] = interval
 
-    # تحويل الفترة لنص مقروء
+    # طھط­ظˆظٹظ„ ط§ظ„ظپطھط±ط© ظ„ظ†طµ ظ…ظ‚ط±ظˆط،
     interval_labels = {
-        1: "كل دقيقة", 5: "كل 5 دقائق", 10: "كل 10 دقائق", 15: "كل 15 دقيقة",
-        30: "كل 30 دقيقة", 60: "كل ساعة", 120: "كل ساعتين",
-        180: "كل 3 ساعات", 240: "كل 4 ساعات", 360: "كل 6 ساعات",
-        480: "كل 8 ساعات", 720: "كل 12 ساعة", 1440: "مرة يوميًا",
-        2880: "كل يومين", 4320: "كل 3 أيام", 10080: "كل أسبوع"
+        1: "ظƒظ„ ط¯ظ‚ظٹظ‚ط©", 5: "ظƒظ„ 5 ط¯ظ‚ط§ط¦ظ‚", 10: "ظƒظ„ 10 ط¯ظ‚ط§ط¦ظ‚", 15: "ظƒظ„ 15 ط¯ظ‚ظٹظ‚ط©",
+        30: "ظƒظ„ 30 ط¯ظ‚ظٹظ‚ط©", 60: "ظƒظ„ ط³ط§ط¹ط©", 120: "ظƒظ„ ط³ط§ط¹طھظٹظ†",
+        180: "ظƒظ„ 3 ط³ط§ط¹ط§طھ", 240: "ظƒظ„ 4 ط³ط§ط¹ط§طھ", 360: "ظƒظ„ 6 ط³ط§ط¹ط§طھ",
+        480: "ظƒظ„ 8 ط³ط§ط¹ط§طھ", 720: "ظƒظ„ 12 ط³ط§ط¹ط©", 1440: "ظ…ط±ط© ظٹظˆظ…ظٹظ‹ط§",
+        2880: "ظƒظ„ ظٹظˆظ…ظٹظ†", 4320: "ظƒظ„ 3 ط£ظٹط§ظ…", 10080: "ظƒظ„ ط£ط³ط¨ظˆط¹"
     }
-    interval_text = interval_labels.get(interval, f"كل {interval} دقيقة")
+    interval_text = interval_labels.get(interval, f"ظƒظ„ {interval} ط¯ظ‚ظٹظ‚ط©")
 
     text = (
-        f"✅ <b>الفترة:</b> {html.escape(interval_text)}\n\n"
-        f"🔢 <b>اختر الحد الأقصى للنشر يوميًا:</b>\n\n"
-        "كم فيديو كحد أقصى يُنشر في اليوم الواحد؟"
+        f"âœ… <b>ط§ظ„ظپطھط±ط©:</b> {html.escape(interval_text)}\n\n"
+        f"ًں”¢ <b>ط§ط®طھط± ط§ظ„ط­ط¯ ط§ظ„ط£ظ‚طµظ‰ ظ„ظ„ظ†ط´ط± ظٹظˆظ…ظٹظ‹ط§:</b>\n\n"
+        "ظƒظ… ظپظٹط¯ظٹظˆ ظƒط­ط¯ ط£ظ‚طµظ‰ ظٹظڈظ†ط´ط± ظپظٹ ط§ظ„ظٹظˆظ… ط§ظ„ظˆط§ط­ط¯طں"
     )
 
     limits = [
-        ("1️⃣", 1), ("2️⃣", 2), ("3️⃣", 3),
-        ("5️⃣", 5), ("🔟", 10), ("1️⃣5️⃣", 15),
-        ("2️⃣0️⃣", 20), ("3️⃣0️⃣", 30), ("♾ بلا حد", 999),
+        ("1ï¸ڈâƒ£", 1), ("2ï¸ڈâƒ£", 2), ("3ï¸ڈâƒ£", 3),
+        ("5ï¸ڈâƒ£", 5), ("ًں”ں", 10), ("1ï¸ڈâƒ£5ï¸ڈâƒ£", 15),
+        ("2ï¸ڈâƒ£0ï¸ڈâƒ£", 20), ("3ï¸ڈâƒ£0ï¸ڈâƒ£", 30), ("â™¾ ط¨ظ„ط§ ط­ط¯", 999),
     ]
 
     keyboard = []
@@ -3945,14 +4162,14 @@ async def schedule_pick_limit(update: Update, context: ContextTypes.DEFAULT_TYPE
             row.append(InlineKeyboardButton(label, callback_data=f"am_sch_lim:{val}"))
         keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_schedule")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_schedule")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SCHEDULE_HOURS
 
 
 async def schedule_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حفظ الجدول الجديد"""
+    """ط­ظپط¸ ط§ظ„ط¬ط¯ظˆظ„ ط§ظ„ط¬ط¯ظٹط¯"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -3968,32 +4185,32 @@ async def schedule_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         daily_limit=daily_limit,
     )
 
-    # تحويل الفترة لنص مقروء
+    # طھط­ظˆظٹظ„ ط§ظ„ظپطھط±ط© ظ„ظ†طµ ظ…ظ‚ط±ظˆط،
     interval = sch_data.get("interval", 120)
     interval_labels = {
-        1: "كل دقيقة", 5: "كل 5 دقائق", 15: "كل 15 دقيقة",
-        30: "كل 30 دقيقة", 60: "كل ساعة", 120: "كل ساعتين",
-        180: "كل 3 ساعات", 240: "كل 4 ساعات", 360: "كل 6 ساعات",
-        480: "كل 8 ساعات", 720: "كل 12 ساعة", 1440: "مرة يوميًا",
+        1: "ظƒظ„ ط¯ظ‚ظٹظ‚ط©", 5: "ظƒظ„ 5 ط¯ظ‚ط§ط¦ظ‚", 15: "ظƒظ„ 15 ط¯ظ‚ظٹظ‚ط©",
+        30: "ظƒظ„ 30 ط¯ظ‚ظٹظ‚ط©", 60: "ظƒظ„ ط³ط§ط¹ط©", 120: "ظƒظ„ ط³ط§ط¹طھظٹظ†",
+        180: "ظƒظ„ 3 ط³ط§ط¹ط§طھ", 240: "ظƒظ„ 4 ط³ط§ط¹ط§طھ", 360: "ظƒظ„ 6 ط³ط§ط¹ط§طھ",
+        480: "ظƒظ„ 8 ط³ط§ط¹ط§طھ", 720: "ظƒظ„ 12 ط³ط§ط¹ط©", 1440: "ظ…ط±ط© ظٹظˆظ…ظٹظ‹ط§",
     }
-    interval_text = interval_labels.get(interval, f"كل {interval} دقيقة")
-    limit_text = "بلا حد" if daily_limit >= 999 else f"{daily_limit} فيديو"
+    interval_text = interval_labels.get(interval, f"ظƒظ„ {interval} ط¯ظ‚ظٹظ‚ط©")
+    limit_text = "ط¨ظ„ط§ ط­ط¯" if daily_limit >= 999 else f"{daily_limit} ظپظٹط¯ظٹظˆ"
 
     if success:
         text = (
-            "✅ <b>تم إنشاء جدول النشر!</b>\n\n"
-            f"📡 المصدر: <code>{html.escape(sch_data.get('source_name', ''))}</code>\n"
-            f"📦 النوع: <code>{html.escape(sch_data.get('content_type', 'minecraft_mods'))}</code>\n"
-            f"⏱ الفترة: {html.escape(interval_text)}\n"
-            f"🔢 الحد اليومي: {html.escape(limit_text)}\n"
-            f"🕐 ساعات النشر: 8:00 - 22:00"
+            "âœ… <b>طھظ… ط¥ظ†ط´ط§ط، ط¬ط¯ظˆظ„ ط§ظ„ظ†ط´ط±!</b>\n\n"
+            f"ًں“، ط§ظ„ظ…طµط¯ط±: <code>{html.escape(sch_data.get('source_name', ''))}</code>\n"
+            f"ًں“¦ ط§ظ„ظ†ظˆط¹: <code>{html.escape(sch_data.get('content_type', 'minecraft_mods'))}</code>\n"
+            f"âڈ± ط§ظ„ظپطھط±ط©: {html.escape(interval_text)}\n"
+            f"ًں”¢ ط§ظ„ط­ط¯ ط§ظ„ظٹظˆظ…ظٹ: {html.escape(limit_text)}\n"
+            f"ًں•گ ط³ط§ط¹ط§طھ ط§ظ„ظ†ط´ط±: 8:00 - 22:00"
         )
     else:
-        text = "❌ فشل إنشاء الجدول."
+        text = "â‌Œ ظپط´ظ„ ط¥ظ†ط´ط§ط، ط§ظ„ط¬ط¯ظˆظ„."
 
     keyboard = [
-        [InlineKeyboardButton("🔙 الجداول", callback_data="am_schedule")],
-        [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="am_menu")],
+        [InlineKeyboardButton("ًں”™ ط§ظ„ط¬ط¯ط§ظˆظ„", callback_data="am_schedule")],
+        [InlineKeyboardButton("ًں”™ ط§ظ„ظ‚ط§ط¦ظ…ط© ط§ظ„ط±ط¦ظٹط³ظٹط©", callback_data="am_menu")],
     ]
 
     try:
@@ -4006,14 +4223,14 @@ async def schedule_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def toggle_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تبديل حالة جدول"""
+    """طھط¨ط¯ظٹظ„ ط­ط§ظ„ط© ط¬ط¯ظˆظ„"""
     query = update.callback_query
     await _safe_answer(query)
     sch_id = query.data.split(":", 1)[1]
     db = _get_db()
 
     try:
-        # جلب الجدول أولاً لمعرفة الحالة الحالية
+        # ط¬ظ„ط¨ ط§ظ„ط¬ط¯ظˆظ„ ط£ظˆظ„ط§ظ‹ ظ„ظ…ط¹ط±ظپط© ط§ظ„ط­ط§ظ„ط© ط§ظ„ط­ط§ظ„ظٹط©
         from ...agent.supabase_client import supabase_select
         records = await asyncio.to_thread(supabase_select, "auto_mod_schedule", {"id": sch_id})
         if records:
@@ -4021,17 +4238,17 @@ async def toggle_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_state = not rec.get("enabled", True)
             success = await asyncio.to_thread(db.toggle_schedule, sch_id, new_state)
             if success:
-                await query.answer("✅ تم التبديل")
+                await query.answer("âœ… طھظ… ط§ظ„طھط¨ط¯ظٹظ„")
             else:
-                await query.answer("❌ فشل التحديث")
+                await query.answer("â‌Œ ظپط´ظ„ ط§ظ„طھط­ط¯ظٹط«")
     except Exception as e:
-        await query.answer(f"❌ خطأ: {str(e)[:50]}")
+        await query.answer(f"â‌Œ ط®ط·ط£: {str(e)[:50]}")
 
     return await schedule_menu(update, context)
 
 
 async def delete_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف جدول"""
+    """ط­ط°ظپ ط¬ط¯ظˆظ„"""
     query = update.callback_query
     await _safe_answer(query)
     sch_id = query.data.split(":", 1)[1]
@@ -4040,19 +4257,19 @@ async def delete_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         success = await asyncio.to_thread(db.delete_schedule, sch_id)
         if success:
-            await query.answer("🗑 تم الحذف")
+            await query.answer("ًں—‘ طھظ… ط§ظ„ط­ط°ظپ")
         else:
-            await query.answer("❌ فشل الحذف")
+            await query.answer("â‌Œ ظپط´ظ„ ط§ظ„ط­ط°ظپ")
     except Exception as e:
-        await query.answer(f"❌ خطأ: {str(e)[:50]}")
+        await query.answer(f"â‌Œ ط®ط·ط£: {str(e)[:50]}")
 
     return await schedule_menu(update, context)
 
 
-# ==================== الحالة التفصيلية ====================
+# ==================== ط§ظ„ط­ط§ظ„ط© ط§ظ„طھظپطµظٹظ„ظٹط© ====================
 
 async def status_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض الحالة التفصيلية"""
+    """ط¹ط±ط¶ ط§ظ„ط­ط§ظ„ط© ط§ظ„طھظپطµظٹظ„ظٹط©"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -4062,26 +4279,26 @@ async def status_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = db.get_config()
 
     text = (
-        "📊 <b>الحالة التفصيلية</b>\n\n"
-        f"🆔 النسخة: <code>{html.escape(get_instance_id()[:25])}</code>\n"
-        f"📊 الجلب: {'✅ مفعل' if config.get('auto_fetch_enabled') else '❌ معطل'}\n\n"
-        f"📡 المصادر: {stats.get('total_sources', 0)}\n"
-        f"⏰ الجداول: {stats.get('total_schedules', 0)}\n\n"
-        f"📈 <b>إحصائيات المعالجة:</b>\n"
-        f"• إجمالي: {stats.get('total_processed', 0)}\n"
-        f"• منشور: {stats.get('published', 0)} ✅\n"
-        f"• فاشل: {stats.get('failed', 0)} ❌\n"
-        f"• قيد المعالجة: {stats.get('processing', 0)} ⏳\n\n"
-        f"⚙️ <b>الإعدادات:</b>\n"
-        f"• نمط الشورتس: <code>{html.escape(config.get('shorts_format', 'crop'))}</code>\n"
-        f"• التحسين: {'✅' if config.get('enhance_enabled') else '❌'}\n"
-        f"• قلب أفقياً (Mirror): {'✅' if config.get('hflip_enabled') else '❌'}\n"
-        f"• CTA: {'✅' if config.get('add_cta') else '❌'}\n"
+        "ًں“ٹ <b>ط§ظ„ط­ط§ظ„ط© ط§ظ„طھظپطµظٹظ„ظٹط©</b>\n\n"
+        f"ًں†” ط§ظ„ظ†ط³ط®ط©: <code>{html.escape(get_instance_id()[:25])}</code>\n"
+        f"ًں“ٹ ط§ظ„ط¬ظ„ط¨: {'âœ… ظ…ظپط¹ظ„' if config.get('auto_fetch_enabled') else 'â‌Œ ظ…ط¹ط·ظ„'}\n\n"
+        f"ًں“، ط§ظ„ظ…طµط§ط¯ط±: {stats.get('total_sources', 0)}\n"
+        f"âڈ° ط§ظ„ط¬ط¯ط§ظˆظ„: {stats.get('total_schedules', 0)}\n\n"
+        f"ًں“ˆ <b>ط¥ط­طµط§ط¦ظٹط§طھ ط§ظ„ظ…ط¹ط§ظ„ط¬ط©:</b>\n"
+        f"â€¢ ط¥ط¬ظ…ط§ظ„ظٹ: {stats.get('total_processed', 0)}\n"
+        f"â€¢ ظ…ظ†ط´ظˆط±: {stats.get('published', 0)} âœ…\n"
+        f"â€¢ ظپط§ط´ظ„: {stats.get('failed', 0)} â‌Œ\n"
+        f"â€¢ ظ‚ظٹط¯ ط§ظ„ظ…ط¹ط§ظ„ط¬ط©: {stats.get('processing', 0)} âڈ³\n\n"
+        f"âڑ™ï¸ڈ <b>ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ:</b>\n"
+        f"â€¢ ظ†ظ…ط· ط§ظ„ط´ظˆط±طھط³: <code>{html.escape(config.get('shorts_format', 'crop'))}</code>\n"
+        f"â€¢ ط§ظ„طھط­ط³ظٹظ†: {'âœ…' if config.get('enhance_enabled') else 'â‌Œ'}\n"
+        f"â€¢ ظ‚ظ„ط¨ ط£ظپظ‚ظٹط§ظ‹ (Mirror): {'âœ…' if config.get('hflip_enabled') else 'â‌Œ'}\n"
+        f"â€¢ CTA: {'âœ…' if config.get('add_cta') else 'â‌Œ'}\n"
     )
 
     keyboard = [
-        [InlineKeyboardButton("🔄 تحديث", callback_data="am_status")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+        [InlineKeyboardButton("ًں”„ طھط­ط¯ظٹط«", callback_data="am_status")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")],
     ]
 
     if query:
@@ -4095,10 +4312,10 @@ async def status_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AM_STATUS
 
 
-# ==================== الإعدادات ====================
+# ==================== ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ====================
 
 async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض وتعديل الإعدادات"""
+    """ط¹ط±ط¶ ظˆطھط¹ط¯ظٹظ„ ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -4107,44 +4324,44 @@ async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = db.get_config()
 
     text = (
-        "⚙️ <b>إعدادات الجلب التلقائي</b>\n\n"
-        f"📏 تردد الفحص: <code>{config.get('auto_fetch_interval_seconds', 60)} ثانية</code>\n"
-        f"⏳ ترتيب الجلب: <code>{html.escape(config.get('settings', {}).get('fetch_order', 'newest'))}</code>\n"
-        f"📐 نمط الشورتس: <code>{html.escape(config.get('shorts_format', 'crop'))}</code>\n"
-        f"🎨 تحسين الألوان: {'✅' if config.get('enhance_enabled') else '❌'}\n"
-        f"↔️ قلب أفقياً (Mirror): {'✅' if config.get('hflip_enabled') else '❌'}\n"
-        f"📱 CTA (دعوة التطبيق): {'✅' if config.get('add_cta') else '❌'}\n"
+        "âڑ™ï¸ڈ <b>ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ</b>\n\n"
+        f"ًں“ڈ طھط±ط¯ط¯ ط§ظ„ظپط­طµ: <code>{config.get('auto_fetch_interval_seconds', 60)} ط«ط§ظ†ظٹط©</code>\n"
+        f"âڈ³ طھط±طھظٹط¨ ط§ظ„ط¬ظ„ط¨: <code>{html.escape(config.get('settings', {}).get('fetch_order', 'newest'))}</code>\n"
+        f"ًں“گ ظ†ظ…ط· ط§ظ„ط´ظˆط±طھط³: <code>{html.escape(config.get('shorts_format', 'crop'))}</code>\n"
+        f"ًںژ¨ طھط­ط³ظٹظ† ط§ظ„ط£ظ„ظˆط§ظ†: {'âœ…' if config.get('enhance_enabled') else 'â‌Œ'}\n"
+        f"â†”ï¸ڈ ظ‚ظ„ط¨ ط£ظپظ‚ظٹط§ظ‹ (Mirror): {'âœ…' if config.get('hflip_enabled') else 'â‌Œ'}\n"
+        f"ًں“± CTA (ط¯ط¹ظˆط© ط§ظ„طھط·ط¨ظٹظ‚): {'âœ…' if config.get('add_cta') else 'â‌Œ'}\n"
     )
 
     keyboard = [
         [InlineKeyboardButton(
-            f"📐 الشورتس: {config.get('shorts_format', 'crop')}",
+            f"ًں“گ ط§ظ„ط´ظˆط±طھط³: {config.get('shorts_format', 'crop')}",
             callback_data="am_cfg_shorts_fmt"
         )],
         [InlineKeyboardButton(
-            f"🎨 التحسين: {'✅' if config.get('enhance_enabled') else '❌'}",
+            f"ًںژ¨ ط§ظ„طھط­ط³ظٹظ†: {'âœ…' if config.get('enhance_enabled') else 'â‌Œ'}",
             callback_data="am_cfg_enhance"
         )],
         [InlineKeyboardButton(
-            f"↔️ قلب الفيديو: {'✅' if config.get('hflip_enabled') else '❌'}",
+            f"â†”ï¸ڈ ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ: {'âœ…' if config.get('hflip_enabled') else 'â‌Œ'}",
             callback_data="am_cfg_hflip"
         )],
         [InlineKeyboardButton(
-            f"📱 CTA: {'✅' if config.get('add_cta') else '❌'}",
+            f"ًں“± CTA: {'âœ…' if config.get('add_cta') else 'â‌Œ'}",
             callback_data="am_cfg_cta"
         )],
         [InlineKeyboardButton(
-            f"⏳ الترتيب: {config.get('settings', {}).get('fetch_order', 'newest').title()}",
+            f"âڈ³ ط§ظ„طھط±طھظٹط¨: {config.get('settings', {}).get('fetch_order', 'newest').title()}",
             callback_data="am_cfg_fetch_order"
         )],
         [InlineKeyboardButton(
-            f"📏 تردد الفحص: {config.get('auto_fetch_interval_seconds', 60)}s",
+            f"ًں“ڈ طھط±ط¯ط¯ ط§ظ„ظپط­طµ: {config.get('auto_fetch_interval_seconds', 60)}s",
             callback_data="am_cfg_loop_interval"
         )],
-        [InlineKeyboardButton("📂 رفع ملف المصادقة (client_secret.json)", callback_data="am_client_secret_start")],
-        [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
-        [InlineKeyboardButton("🍪 تحديث ملف الكوكيز (cookies.txt)", callback_data="am_cookies_start")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+        [InlineKeyboardButton("ًں“‚ ط±ظپط¹ ظ…ظ„ظپ ط§ظ„ظ…طµط§ط¯ظ‚ط© (client_secret.json)", callback_data="am_client_secret_start")],
+        [InlineKeyboardButton("âکپï¸ڈ ط±ط¨ط· Google Drive", callback_data="am_gdrive_connect")],
+        [InlineKeyboardButton("ًںچھ طھط­ط¯ظٹط« ظ…ظ„ظپ ط§ظ„ظƒظˆظƒظٹط² (cookies.txt)", callback_data="am_cookies_start")],
+        [InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")],
     ]
 
     if query:
@@ -4159,7 +4376,7 @@ async def config_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def config_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تبديل إعدادات"""
+    """طھط¨ط¯ظٹظ„ ط¥ط¹ط¯ط§ط¯ط§طھ"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -4172,22 +4389,22 @@ async def config_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config["hflip_enabled"] = not config.get("hflip_enabled", False)
     elif query.data == "am_cfg_toggle_fetch":
         config["auto_fetch_enabled"] = not config.get("auto_fetch_enabled", False)
-        logger.info(f"⚙️ [AutoMod] Global fetch toggled to: {config['auto_fetch_enabled']}")
+        logger.info(f"âڑ™ï¸ڈ [AutoMod] Global fetch toggled to: {config['auto_fetch_enabled']}")
     elif query.data == "am_cfg_cta":
         config["add_cta"] = not config.get("add_cta", True)
     elif query.data == "am_cfg_shorts_fmt":
-        # تبديل بين الأنماط الثلاثة
+        # طھط¨ط¯ظٹظ„ ط¨ظٹظ† ط§ظ„ط£ظ†ظ…ط§ط· ط§ظ„ط«ظ„ط§ط«ط©
         current = config.get("shorts_format", "crop")
         cycle = {"crop": "fit_blur", "fit_blur": "partial_blur", "partial_blur": "crop"}
         config["shorts_format"] = cycle.get(current, "crop")
     elif query.data == "am_cfg_loop_interval":
-        # تبديل تردد الفحص (30ث، 60ث، 5د)
+        # طھط¨ط¯ظٹظ„ طھط±ط¯ط¯ ط§ظ„ظپط­طµ (30ط«طŒ 60ط«طŒ 5ط¯)
         intervals = [30, 60, 300]
         current = config.get("auto_fetch_interval_seconds", 60)
         try:
             next_idx = (intervals.index(current) + 1) % len(intervals)
         except ValueError:
-            next_idx = 1 # دقيقة كافتراضي
+            next_idx = 1 # ط¯ظ‚ظٹظ‚ط© ظƒط§ظپطھط±ط§ط¶ظٹ
         config["auto_fetch_interval_seconds"] = intervals[next_idx]
     elif query.data == "am_cfg_fetch_order":
         if "settings" not in config: config["settings"] = {}
@@ -4198,28 +4415,28 @@ async def config_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             next_idx = 0
         config["settings"]["fetch_order"] = orders[next_idx]
-        logger.info(f"⚙️ [AutoMod] Fetch order changed to: {config['settings']['fetch_order']}")
+        logger.info(f"âڑ™ï¸ڈ [AutoMod] Fetch order changed to: {config['settings']['fetch_order']}")
 
     db.save_config(config)
     return await config_menu(update, context)
 
 
 async def cookies_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بدء عملية رفع ملف الكوكيز"""
+    """ط¨ط¯ط، ط¹ظ…ظ„ظٹط© ط±ظپط¹ ظ…ظ„ظپ ط§ظ„ظƒظˆظƒظٹط²"""
     query = update.callback_query
     await _safe_answer(query)
 
     text = (
-        "🍪 <b>تحديث ملف الكوكيز (YouTube Cookies)</b>\n\n"
-        "لتجنب حظر يوتيوب (Bot-check)، يرجى رفع ملف <code>cookies.txt</code> الخاص بحسابك.\n\n"
-        "<b>كيفية الحصول على الملف:</b>\n"
-        "1. استخدم إضافة متصفح مثل 'Get cookies.txt LOCALLY'.\n"
-        "2. قم بتصدير الكوكيز بصيغة Netscape/Wget.\n"
-        "3. أرسل الملف هنا مباشرة.\n\n"
-        "<i>سيتم استبدال الملف القديم فوراً.</i>"
+        "ًںچھ <b>طھط­ط¯ظٹط« ظ…ظ„ظپ ط§ظ„ظƒظˆظƒظٹط² (YouTube Cookies)</b>\n\n"
+        "ظ„طھط¬ظ†ط¨ ط­ط¸ط± ظٹظˆطھظٹظˆط¨ (Bot-check)طŒ ظٹط±ط¬ظ‰ ط±ظپط¹ ظ…ظ„ظپ <code>cookies.txt</code> ط§ظ„ط®ط§طµ ط¨ط­ط³ط§ط¨ظƒ.\n\n"
+        "<b>ظƒظٹظپظٹط© ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظ„ظپ:</b>\n"
+        "1. ط§ط³طھط®ط¯ظ… ط¥ط¶ط§ظپط© ظ…طھطµظپط­ ظ…ط«ظ„ 'Get cookies.txt LOCALLY'.\n"
+        "2. ظ‚ظ… ط¨طھطµط¯ظٹط± ط§ظ„ظƒظˆظƒظٹط² ط¨طµظٹط؛ط© Netscape/Wget.\n"
+        "3. ط£ط±ط³ظ„ ط§ظ„ظ…ظ„ظپ ظ‡ظ†ط§ ظ…ط¨ط§ط´ط±ط©.\n\n"
+        "<i>ط³ظٹطھظ… ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظ…ظ„ظپ ط§ظ„ظ‚ط¯ظٹظ… ظپظˆط±ط§ظ‹.</i>"
     )
 
-    keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="am_config")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط¥ظ„ط؛ط§ط،", callback_data="am_config")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_COOKIES_UPLOAD
 
@@ -4229,24 +4446,24 @@ async def client_secret_upload_start(update: Update, context: ContextTypes.DEFAU
     await _safe_answer(query)
 
     text = (
-        "📂 <b>رفع ملف المصادقة (client_secret.json)</b>\n\n"
-        "يرجى إرسال ملف <code>client_secret.json</code> الآن (كمستند).\n\n"
-        "سيتم حفظه واستخدامه لربط Google Drive و YouTube OAuth.\n\n"
-        "<i>سيتم استبدال الملف القديم فوراً إن وجد.</i>"
+        "ًں“‚ <b>ط±ظپط¹ ظ…ظ„ظپ ط§ظ„ظ…طµط§ط¯ظ‚ط© (client_secret.json)</b>\n\n"
+        "ظٹط±ط¬ظ‰ ط¥ط±ط³ط§ظ„ ظ…ظ„ظپ <code>client_secret.json</code> ط§ظ„ط¢ظ† (ظƒظ…ط³طھظ†ط¯).\n\n"
+        "ط³ظٹطھظ… ط­ظپط¸ظ‡ ظˆط§ط³طھط®ط¯ط§ظ…ظ‡ ظ„ط±ط¨ط· Google Drive ظˆ YouTube OAuth.\n\n"
+        "<i>ط³ظٹطھظ… ط§ط³طھط¨ط¯ط§ظ„ ط§ظ„ظ…ظ„ظپ ط§ظ„ظ‚ط¯ظٹظ… ظپظˆط±ط§ظ‹ ط¥ظ† ظˆط¬ط¯.</i>"
     )
-    keyboard = [[InlineKeyboardButton("🔙 إلغاء", callback_data="am_config")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط¥ظ„ط؛ط§ط،", callback_data="am_config")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_CLIENT_SECRET_UPLOAD
 
 
 async def receive_client_secret_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.document:
-        await update.message.reply_text("⚠️ يرجى إرسال ملف <code>client_secret.json</code> بصيغة مستند.", parse_mode="HTML")
+        await update.message.reply_text("âڑ ï¸ڈ ظٹط±ط¬ظ‰ ط¥ط±ط³ط§ظ„ ظ…ظ„ظپ <code>client_secret.json</code> ط¨طµظٹط؛ط© ظ…ط³طھظ†ط¯.", parse_mode="HTML")
         return AM_CLIENT_SECRET_UPLOAD
 
     doc = update.message.document
     if not str(doc.file_name or "").lower().endswith(".json"):
-        await update.message.reply_text("⚠️ يجب أن يكون الملف بصيغة <code>.json</code> (client_secret.json).", parse_mode="HTML")
+        await update.message.reply_text("âڑ ï¸ڈ ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط§ظ„ظ…ظ„ظپ ط¨طµظٹط؛ط© <code>.json</code> (client_secret.json).", parse_mode="HTML")
         return AM_CLIENT_SECRET_UPLOAD
 
     try:
@@ -4261,65 +4478,65 @@ async def receive_client_secret_file(update: Update, context: ContextTypes.DEFAU
         await tg_file.download_to_drive(custom_path=target_path)
 
         await update.message.reply_text(
-            "✅ تم حفظ ملف <code>client_secret.json</code> بنجاح. يمكنك الآن ربط Google Drive.",
+            "âœ… طھظ… ط­ظپط¸ ظ…ظ„ظپ <code>client_secret.json</code> ط¨ظ†ط¬ط§ط­. ظٹظ…ظƒظ†ظƒ ط§ظ„ط¢ظ† ط±ط¨ط· Google Drive.",
             parse_mode="HTML",
         )
         return await config_menu(update, context)
     except Exception as e:
         logger.error(f"Error saving client_secret.json: {e}")
         await update.message.reply_text(
-            f"❌ حدث خطأ أثناء حفظ الملف: <code>{html.escape(str(e))}</code>",
+            f"â‌Œ ط­ط¯ط« ط®ط·ط£ ط£ط«ظ†ط§ط، ط­ظپط¸ ط§ظ„ظ…ظ„ظپ: <code>{html.escape(str(e))}</code>",
             parse_mode="HTML",
         )
         return AM_CLIENT_SECRET_UPLOAD
 
 
 async def receive_cookies_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استلام وحفظ ملف الكوكيز"""
+    """ط§ط³طھظ„ط§ظ… ظˆط­ظپط¸ ظ…ظ„ظپ ط§ظ„ظƒظˆظƒظٹط²"""
     if not update.message.document:
-        await update.message.reply_text("⚠️ يرجى إرسال ملف <code>cookies.txt</code> بصيغة مستند.")
+        await update.message.reply_text("âڑ ï¸ڈ ظٹط±ط¬ظ‰ ط¥ط±ط³ط§ظ„ ظ…ظ„ظپ <code>cookies.txt</code> ط¨طµظٹط؛ط© ظ…ط³طھظ†ط¯.")
         return AM_COOKIES_UPLOAD
 
     doc = update.message.document
     if not doc.file_name.endswith(".txt"):
-        await update.message.reply_text("⚠️ يجب أن يكون الملف بصيغة <code>.txt</code> (مثل cookies.txt).")
+        await update.message.reply_text("âڑ ï¸ڈ ظٹط¬ط¨ ط£ظ† ظٹظƒظˆظ† ط§ظ„ظ…ظ„ظپ ط¨طµظٹط؛ط© <code>.txt</code> (ظ…ط«ظ„ cookies.txt).")
         return AM_COOKIES_UPLOAD
 
     try:
-        # تحميل الملف
+        # طھط­ظ…ظٹظ„ ط§ظ„ظ…ظ„ظپ
         file = await context.bot.get_file(doc.file_id)
         
-        # إنشاء مسار الحفظ
+        # ط¥ظ†ط´ط§ط، ظ…ط³ط§ط± ط§ظ„ط­ظپط¸
         from ...agent.auto_mod_fetcher import project_root
         data_dir = os.path.join(project_root, ".data")
         os.makedirs(data_dir, exist_ok=True)
         out_path = os.path.join(data_dir, "yt_cookies.txt")
 
-        # حفظ الملف
+        # ط­ظپط¸ ط§ظ„ظ…ظ„ظپ
         await file.download_to_drive(out_path)
         
-        # تحديث المتغير البيئي محلياً لهذه الجلسة
+        # طھط­ط¯ظٹط« ط§ظ„ظ…طھط؛ظٹط± ط§ظ„ط¨ظٹط¦ظٹ ظ…ط­ظ„ظٹط§ظ‹ ظ„ظ‡ط°ظ‡ ط§ظ„ط¬ظ„ط³ط©
         os.environ["YT_COOKIES_PATH"] = out_path
         os.environ["YTDLP_COOKIES_PATH"] = out_path
 
         await update.message.reply_text(
-            "✅ <b>تم تحديث ملف الكوكيز بنجاح!</b>\n\n"
-            "سيستخدم البوت هذا الملف الآن في دورات الجلب القادمة لتجنب الحظر.",
+            "âœ… <b>طھظ… طھط­ط¯ظٹط« ظ…ظ„ظپ ط§ظ„ظƒظˆظƒظٹط² ط¨ظ†ط¬ط§ط­!</b>\n\n"
+            "ط³ظٹط³طھط®ط¯ظ… ط§ظ„ط¨ظˆطھ ظ‡ط°ط§ ط§ظ„ظ…ظ„ظپ ط§ظ„ط¢ظ† ظپظٹ ط¯ظˆط±ط§طھ ط§ظ„ط¬ظ„ط¨ ط§ظ„ظ‚ط§ط¯ظ…ط© ظ„طھط¬ظ†ط¨ ط§ظ„ط­ط¸ط±.",
             parse_mode="HTML"
         )
         return await config_menu(update, context)
 
     except Exception as e:
         logger.error(f"Error saving cookies file: {e}")
-        await update.message.reply_text(f"❌ حدث خطأ أثناء حفظ الملف: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        await update.message.reply_text(f"â‌Œ ط­ط¯ط« ط®ط·ط£ ط£ط«ظ†ط§ط، ط­ظپط¸ ط§ظ„ظ…ظ„ظپ: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
         return AM_COOKIES_UPLOAD
 
 
 
-# ==================== عرض الحاويات والفيديوهات ====================
+# ==================== ط¹ط±ط¶ ط§ظ„ط­ط§ظˆظٹط§طھ ظˆط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ====================
 
 async def containers_viewer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض قائمة بجميع حاويات الفيديوهات في قاعدة البيانات"""
+    """ط¹ط±ط¶ ظ‚ط§ط¦ظ…ط© ط¨ط¬ظ…ظٹط¹ ط­ط§ظˆظٹط§طھ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظپظٹ ظ‚ط§ط¹ط¯ط© ط§ظ„ط¨ظٹط§ظ†ط§طھ"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -4332,22 +4549,22 @@ async def containers_viewer_menu(update: Update, context: ContextTypes.DEFAULT_T
         containers = []
 
     if not containers:
-        text = "⚠️ لا توجد حاويات متاحة في قاعدة البيانات حالياً."
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+        text = "âڑ ï¸ڈ ظ„ط§ طھظˆط¬ط¯ ط­ط§ظˆظٹط§طھ ظ…طھط§ط­ط© ظپظٹ ظ‚ط§ط¹ط¯ط© ط§ظ„ط¨ظٹط§ظ†ط§طھ ط­ط§ظ„ظٹط§ظ‹."
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")]]
         if query:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return AM_MENU
 
-    text = "📦 <b>قائمة حاويات الفيديوهات:</b>\nاختر حاوية لاستعراض محتوياتها:"
+    text = "ًں“¦ <b>ظ‚ط§ط¦ظ…ط© ط­ط§ظˆظٹط§طھ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ:</b>\nط§ط®طھط± ط­ط§ظˆظٹط© ظ„ط§ط³طھط¹ط±ط§ط¶ ظ…ط­طھظˆظٹط§طھظ‡ط§:"
     keyboard = []
     for c in containers:
-        name = c.get("name", "بدون اسم")
+        name = c.get("name", "ط¨ط¯ظˆظ† ط§ط³ظ…")
         cid = c.get("id")
-        keyboard.append([InlineKeyboardButton(f"📦 {name}", callback_data=f"am_cont_view:{cid}")])
+        keyboard.append([InlineKeyboardButton(f"ًں“¦ {name}", callback_data=f"am_cont_view:{cid}")])
     
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")])
 
     if query:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -4357,7 +4574,7 @@ async def containers_viewer_menu(update: Update, context: ContextTypes.DEFAULT_T
     return AM_VIEW_CONTAINERS
 
 async def container_videos_viewer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض الفيديوهات داخل حاوية محددة"""
+    """ط¹ط±ط¶ ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ط¯ط§ط®ظ„ ط­ط§ظˆظٹط© ظ…ط­ط¯ط¯ط©"""
     query = update.callback_query
     if not query:
         return AM_MENU
@@ -4374,40 +4591,40 @@ async def container_videos_viewer(update: Update, context: ContextTypes.DEFAULT_
         videos = []
         container = None
 
-    c_name = container.get("name", "الحاوية") if container else "الحاوية"
+    c_name = container.get("name", "ط§ظ„ط­ط§ظˆظٹط©") if container else "ط§ظ„ط­ط§ظˆظٹط©"
     
     if not videos:
-        text = f"📦 <b>{html.escape(c_name)}:</b>\n\n⚠️ هذه الحاوية فارغة حالياً."
-        keyboard = [[InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="am_view_containers")]]
+        text = f"ًں“¦ <b>{html.escape(c_name)}:</b>\n\nâڑ ï¸ڈ ظ‡ط°ظ‡ ط§ظ„ط­ط§ظˆظٹط© ظپط§ط±ط؛ط© ط­ط§ظ„ظٹط§ظ‹."
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ‚ط§ط¦ظ…ط©", callback_data="am_view_containers")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_VIEW_CONTAINER_VIDEOS
 
-    text = f"📦 <b>{html.escape(c_name)}:</b>\nيوجد {len(videos)} فيديو:\n\n"
+    text = f"ًں“¦ <b>{html.escape(c_name)}:</b>\nظٹظˆط¬ط¯ {len(videos)} ظپظٹط¯ظٹظˆ:\n\n"
     
     from datetime import datetime
     
-    # عرض أول 15 فيديو فقط للتبسيط
+    # ط¹ط±ط¶ ط£ظˆظ„ 15 ظپظٹط¯ظٹظˆ ظپظ‚ط· ظ„ظ„طھط¨ط³ظٹط·
     for i, v in enumerate(videos[:15], 1):
-        title = v.get("title") or v.get("original_name") or "فيديو"
+        title = v.get("title") or v.get("original_name") or "ظپظٹط¯ظٹظˆ"
         date = ""
         if v.get("created_at"):
             try:
                 dt = datetime.fromisoformat(v.get("created_at").replace("Z", "+00:00"))
                 date = dt.strftime("%Y-%m-%d")
             except: pass
-        text += f"{i}. 🎬 {html.escape(title[:40])} ({date})\n"
+        text += f"{i}. ًںژ¬ {html.escape(title[:40])} ({date})\n"
 
     if len(videos) > 15:
-        text += f"\n<i>... وهناك {len(videos)-15} فيديوهات أخرى</i>"
+        text += f"\n<i>... ظˆظ‡ظ†ط§ظƒ {len(videos)-15} ظپظٹط¯ظٹظˆظ‡ط§طھ ط£ط®ط±ظ‰</i>"
 
-    keyboard = [[InlineKeyboardButton("🔙 رجوع للقائمة", callback_data="am_view_containers")]]
+    keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹ ظ„ظ„ظ‚ط§ط¦ظ…ط©", callback_data="am_view_containers")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_VIEW_CONTAINER_VIDEOS
 
-# ==================== عرض وإدارة فيديوهات الفيس كام ====================
+# ==================== ط¹ط±ط¶ ظˆط¥ط¯ط§ط±ط© ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ… ====================
 
 async def facecam_videos_viewer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض جميع فيديوهات الفيس كام المخزنة في قاعدة البيانات"""
+    """ط¹ط±ط¶ ط¬ظ…ظٹط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ… ط§ظ„ظ…ط®ط²ظ†ط© ظپظٹ ظ‚ط§ط¹ط¯ط© ط§ظ„ط¨ظٹط§ظ†ط§طھ"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -4425,15 +4642,15 @@ async def facecam_videos_viewer_menu(update: Update, context: ContextTypes.DEFAU
         rows = []
 
     if not rows:
-        text = "🎬 <b>فيديوهات الفيس كام</b>\n\n⚠️ لا توجد فيديوهات فيس كام مخزنة حالياً."
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+        text = "ًںژ¬ <b>ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…</b>\n\nâڑ ï¸ڈ ظ„ط§ طھظˆط¬ط¯ ظپظٹط¯ظٹظˆظ‡ط§طھ ظپظٹط³ ظƒط§ظ… ظ…ط®ط²ظ†ط© ط­ط§ظ„ظٹط§ظ‹."
+        keyboard = [[InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")]]
         if query:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         else:
             await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return AM_MENU
 
-    text = f"🎬 <b>فيديوهات الفيس كام</b>\n\nإجمالي: <code>{len(rows)}</code> فيديو\n\n"
+    text = f"ًںژ¬ <b>ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…</b>\n\nط¥ط¬ظ…ط§ظ„ظٹ: <code>{len(rows)}</code> ظپظٹط¯ظٹظˆ\n\n"
     keyboard: List[List[InlineKeyboardButton]] = []
 
     for i, row in enumerate(rows[:20], 1):
@@ -4446,17 +4663,17 @@ async def facecam_videos_viewer_menu(update: Update, context: ContextTypes.DEFAU
                 created = dt.strftime("%Y-%m-%d")
             except Exception:
                 pass
-        text += f"{i}. 🎬 <code>{clip_id}</code> | مصدر: <code>{source_id}</code> | {created}\n"
+        text += f"{i}. ًںژ¬ <code>{clip_id}</code> | ظ…طµط¯ط±: <code>{source_id}</code> | {created}\n"
         keyboard.append([
-            InlineKeyboardButton(f"🗑 حذف {clip_id}", callback_data=f"am_fc_del:{row.get('id')}")
+            InlineKeyboardButton(f"ًں—‘ ط­ط°ظپ {clip_id}", callback_data=f"am_fc_del:{row.get('id')}")
         ])
 
     if len(rows) > 20:
-        text += f"\n<i>... وعندك {len(rows) - 20} فيديو آخر</i>"
+        text += f"\n<i>... ظˆط¹ظ†ط¯ظƒ {len(rows) - 20} ظپظٹط¯ظٹظˆ ط¢ط®ط±</i>"
 
-    keyboard.append([InlineKeyboardButton("🗑 حذف الكل", callback_data="am_fc_del_all_confirm")])
-    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="am_fc_viewer")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+    keyboard.append([InlineKeyboardButton("ًں—‘ ط­ط°ظپ ط§ظ„ظƒظ„", callback_data="am_fc_del_all_confirm")])
+    keyboard.append([InlineKeyboardButton("ًں”„ طھط­ط¯ظٹط«", callback_data="am_fc_viewer")])
+    keyboard.append([InlineKeyboardButton("ًں”™ ط±ط¬ظˆط¹", callback_data="am_menu")])
 
     if query:
         try:
@@ -4470,49 +4687,49 @@ async def facecam_videos_viewer_menu(update: Update, context: ContextTypes.DEFAU
 
 
 async def facecam_video_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف فيديو فيس كام واحد"""
+    """ط­ط°ظپ ظپظٹط¯ظٹظˆ ظپظٹط³ ظƒط§ظ… ظˆط§ط­ط¯"""
     query = update.callback_query
     await _safe_answer(query)
 
     clip_id = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
     if not clip_id:
-        await query.answer("❌ معرف الفيديو غير صالح", show_alert=True)
+        await query.answer("â‌Œ ظ…ط¹ط±ظپ ط§ظ„ظپظٹط¯ظٹظˆ ط؛ظٹط± طµط§ظ„ط­", show_alert=True)
         return await facecam_videos_viewer_menu(update, context)
 
     try:
         from ...agent.supabase_storage import delete_facecam_from_storage
         success = await asyncio.to_thread(delete_facecam_from_storage, clip_id)
         if success:
-            await query.answer("🗑 تم حذف الفيديو بنجاح", show_alert=False)
+            await query.answer("ًں—‘ طھظ… ط­ط°ظپ ط§ظ„ظپظٹط¯ظٹظˆ ط¨ظ†ط¬ط§ط­", show_alert=False)
         else:
-            await query.answer("❌ فشل حذف الفيديو", show_alert=True)
+            await query.answer("â‌Œ ظپط´ظ„ ط­ط°ظپ ط§ظ„ظپظٹط¯ظٹظˆ", show_alert=True)
     except Exception as e:
         logger.error(f"Error deleting facecam video: {e}")
-        await query.answer(f"❌ خطأ: {str(e)[:50]}", show_alert=True)
+        await query.answer(f"â‌Œ ط®ط·ط£: {str(e)[:50]}", show_alert=True)
 
     return await facecam_videos_viewer_menu(update, context)
 
 
 async def facecam_delete_all_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تأكيد حذف جميع فيديوهات الفيس كام"""
+    """طھط£ظƒظٹط¯ ط­ط°ظپ ط¬ظ…ظٹط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…"""
     query = update.callback_query
     await _safe_answer(query)
 
     text = (
-        "⚠️ <b>تأكيد حذف جميع فيديوهات الفيس كام</b>\n\n"
-        "هل أنت متأكد من حذف جميع فيديوهات الفيس كام من قاعدة البيانات؟\n"
-        "هذا الإجراء لا يمكن التراجع عنه!"
+        "âڑ ï¸ڈ <b>طھط£ظƒظٹط¯ ط­ط°ظپ ط¬ظ…ظٹط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…</b>\n\n"
+        "ظ‡ظ„ ط£ظ†طھ ظ…طھط£ظƒط¯ ظ…ظ† ط­ط°ظپ ط¬ظ…ظٹط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ… ظ…ظ† ظ‚ط§ط¹ط¯ط© ط§ظ„ط¨ظٹط§ظ†ط§طھطں\n"
+        "ظ‡ط°ط§ ط§ظ„ط¥ط¬ط±ط§ط، ظ„ط§ ظٹظ…ظƒظ† ط§ظ„طھط±ط§ط¬ط¹ ط¹ظ†ظ‡!"
     )
     keyboard = [
-        [InlineKeyboardButton("✅ نعم، احذف الكل", callback_data="am_fc_del_all_yes")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data="am_fc_viewer")],
+        [InlineKeyboardButton("âœ… ظ†ط¹ظ…طŒ ط§ط­ط°ظپ ط§ظ„ظƒظ„", callback_data="am_fc_del_all_yes")],
+        [InlineKeyboardButton("â‌Œ ط¥ظ„ط؛ط§ط،", callback_data="am_fc_viewer")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_VIEW_FACECAM_VIDEOS
 
 
 async def facecam_delete_all_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنفيذ حذف جميع فيديوهات الفيس كام"""
+    """طھظ†ظپظٹط° ط­ط°ظپ ط¬ظ…ظٹط¹ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظپظٹط³ ظƒط§ظ…"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -4555,25 +4772,25 @@ async def facecam_delete_all_execute(update: Update, context: ContextTypes.DEFAU
                 count += 1
             _save_local_list(FACECAM_STORAGE_LOCAL_PATH, [])
 
-        await query.answer(f"🗑 تم حذف {count} فيديو", show_alert=True)
+        await query.answer(f"ًں—‘ طھظ… ط­ط°ظپ {count} ظپظٹط¯ظٹظˆ", show_alert=True)
     except Exception as e:
         logger.error(f"Error deleting all facecam videos: {e}")
-        await query.answer(f"❌ خطأ: {str(e)[:50]}", show_alert=True)
+        await query.answer(f"â‌Œ ط®ط·ط£: {str(e)[:50]}", show_alert=True)
 
     return await facecam_videos_viewer_menu(update, context)
 
 
-# ==================== تسجيل المعالجات ====================
+# ==================== طھط³ط¬ظٹظ„ ط§ظ„ظ…ط¹ط§ظ„ط¬ط§طھ ====================
 
 async def _end_auto_mod_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
 def _auto_mod_common_nav_handlers() -> list:
-    """أزرار التنقل الأساسية داخل نظام الأوتو مود.
+    """ط£ط²ط±ط§ط± ط§ظ„طھظ†ظ‚ظ„ ط§ظ„ط£ط³ط§ط³ظٹط© ط¯ط§ط®ظ„ ظ†ط¸ط§ظ… ط§ظ„ط£ظˆطھظˆ ظ…ظˆط¯.
 
-    هذه الأزرار قد تظهر أحياناً في رسائل أقدم ما زالت تحتوي على لوحة أزرار.
-    لذا نُبقيها فعّالة من أي حالة داخل المحادثة حتى لا يبدو الزر وكأنه لا يستجيب.
+    ظ‡ط°ظ‡ ط§ظ„ط£ط²ط±ط§ط± ظ‚ط¯ طھط¸ظ‡ط± ط£ط­ظٹط§ظ†ط§ظ‹ ظپظٹ ط±ط³ط§ط¦ظ„ ط£ظ‚ط¯ظ… ظ…ط§ ط²ط§ظ„طھ طھط­طھظˆظٹ ط¹ظ„ظ‰ ظ„ظˆط­ط© ط£ط²ط±ط§ط±.
+    ظ„ط°ط§ ظ†ظڈط¨ظ‚ظٹظ‡ط§ ظپط¹ظ‘ط§ظ„ط© ظ…ظ† ط£ظٹ ط­ط§ظ„ط© ط¯ط§ط®ظ„ ط§ظ„ظ…ط­ط§ط¯ط«ط© ط­طھظ‰ ظ„ط§ ظٹط¨ط¯ظˆ ط§ظ„ط²ط± ظˆظƒط£ظ†ظ‡ ظ„ط§ ظٹط³طھط¬ظٹط¨.
     """
     return [
         CallbackQueryHandler(sources_menu, pattern=r"^am_sources$"),
@@ -4595,7 +4812,7 @@ def _auto_mod_common_nav_handlers() -> list:
 
 
 def get_auto_mod_conversation_handler() -> ConversationHandler:
-    """إنشاء ConversationHandler لنظام الجلب التلقائي"""
+    """ط¥ظ†ط´ط§ط، ConversationHandler ظ„ظ†ط¸ط§ظ… ط§ظ„ط¬ظ„ط¨ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ"""
     import warnings
     from telegram.warnings import PTBUserWarning
     warnings.filterwarnings("ignore", category=PTBUserWarning, message=r"If 'per_message=False'.*")
@@ -4655,6 +4872,8 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(edit_source_overlay_animation_duration, pattern=r"^am_edit_ov_anim_dur:"),
                 CallbackQueryHandler(edit_source_overlay_toggle, pattern=r"^am_edit_ov_toggle$"),
                 CallbackQueryHandler(edit_source_overlay_text_prompt, pattern=r"^am_edit_ov_text$"),
+                CallbackQueryHandler(edit_source_overlay_image_prompt, pattern=r"^am_edit_ov_img_prompt$"),
+                CallbackQueryHandler(edit_source_overlay_image_delete, pattern=r"^am_edit_ov_img_del$"),
                 CallbackQueryHandler(edit_source_overlay_mode, pattern=r"^am_edit_ov_mode:"),
                 CallbackQueryHandler(edit_source_overlay_timing, pattern=r"^am_edit_ov_time:"),
                 CallbackQueryHandler(edit_source_overlay_duration, pattern=r"^am_edit_ov_dur:"),
@@ -4734,7 +4953,11 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 *_auto_mod_common_nav_handlers(),
             ],
             AM_SOURCE_TEXT_INPUT: [
+                MessageHandler(OVERLAY_IMAGE_UPLOAD_FILTER, source_overlay_image_input),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, source_text_input),
+                CallbackQueryHandler(add_source_overlay_image_skip, pattern=r"^am_src_ov_img_skip$"),
+                CallbackQueryHandler(edit_source_overlay_image_skip, pattern=r"^am_edit_ov_img_skip$"),
+                CallbackQueryHandler(edit_source_overlay_image_delete, pattern=r"^am_edit_ov_img_del$"),
                 CallbackQueryHandler(add_source_overlay_menu, pattern=r"^am_add_overlay_menu$"),
                 CallbackQueryHandler(add_source_description_menu, pattern=r"^am_add_desc_menu$"),
                 CallbackQueryHandler(edit_source_overlay_menu, pattern=r"^am_edit_ov_menu$"),
@@ -4792,3 +5015,4 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
         allow_reentry=True,
         per_message=False
     )
+

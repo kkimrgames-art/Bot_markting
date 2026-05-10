@@ -941,6 +941,11 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     overlay_mode = str(overlay_raw.get("selection_mode") or "fixed").strip().lower()
     if overlay_mode not in {"fixed", "random"}:
         overlay_mode = "fixed"
+    overlay_image_path = str(overlay_raw.get("image_path") or overlay_raw.get("image") or "").strip()
+    if overlay_image_path:
+        overlay_image_path = overlay_image_path.replace("\\", "/")
+    else:
+        overlay_image_path = None
     normalized["shorts_overlay"] = {
         "enabled": bool(overlay_raw.get("enabled", False)) and bool(overlay_texts),
         "texts": overlay_texts,
@@ -948,6 +953,7 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
         "timing": overlay_timing,
         "duration": overlay_duration,
         "screen_position": overlay_position,
+        "image_path": overlay_image_path,
         "intro_animation": _normalize_overlay_animation_config(overlay_raw.get("intro_animation") or settings.get("overlay_intro_animation")),
         "outro_animation": _normalize_overlay_animation_config(overlay_raw.get("outro_animation") or settings.get("overlay_outro_animation")),
     }
@@ -1172,6 +1178,7 @@ def pick_source_overlay_config(raw_settings: Any) -> Optional[Dict[str, Any]]:
         "timing": overlay.get("timing", "full"),
         "duration": float(overlay.get("duration", 2.0) or 2.0),
         "screen_position": overlay.get("screen_position", "top"),
+        "image_path": overlay.get("image_path"),
         "intro_animation": dict(overlay.get("intro_animation") or {"enabled": False, "type": "none", "duration": 0.0}),
         "outro_animation": dict(overlay.get("outro_animation") or {"enabled": False, "type": "none", "duration": 0.0}),
     }
@@ -8304,6 +8311,7 @@ class AutoModFetcher:
                                                 timing=overlay_cfg.get("timing", "full"),
                                                 duration=float(overlay_cfg.get("duration", 2.0)),
                                                 screen_position=overlay_cfg.get("screen_position", "top"),
+                                                overlay_image_path=overlay_cfg.get("image_path"),
                                                 intro_animation=overlay_cfg.get("intro_animation"),
                                                 outro_animation=overlay_cfg.get("outro_animation"),
                                             )

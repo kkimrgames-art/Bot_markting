@@ -1,6 +1,6 @@
-"""
-معالج فيديوهات المودات - نظام منفصل عن المحتوى الحالي
-يتضمن: قص الثواني الأولى والأخيرة، إضافة نص دعوة، تحويل لشورتس
+﻿"""
+ظ…ط¹ط§ظ„ط¬ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظ…ظˆط¯ط§طھ - ظ†ط¸ط§ظ… ظ…ظ†ظپطµظ„ ط¹ظ† ط§ظ„ظ…ط­طھظˆظ‰ ط§ظ„ط­ط§ظ„ظٹ
+ظٹطھط¶ظ…ظ†: ظ‚طµ ط§ظ„ط«ظˆط§ظ†ظٹ ط§ظ„ط£ظˆظ„ظ‰ ظˆط§ظ„ط£ط®ظٹط±ط©طŒ ط¥ط¶ط§ظپط© ظ†طµ ط¯ط¹ظˆط©طŒ طھط­ظˆظٹظ„ ظ„ط´ظˆط±طھط³
 """
 import os
 import subprocess
@@ -24,7 +24,7 @@ except Exception:
     TTFont = None
     HAS_FONTTOOLS = False
 
-# مكتبات معالجة اللغة العربية 🆕
+# ظ…ظƒطھط¨ط§طھ ظ…ط¹ط§ظ„ط¬ط© ط§ظ„ظ„ط؛ط© ط§ظ„ط¹ط±ط¨ظٹط© ًں†•
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
@@ -135,7 +135,7 @@ def _run_ffmpeg_with_idle_timeout(
 
         # Hard timeout
         if timeout_s > 0 and (now - start_ts) >= timeout_s:
-            logger.warning(f"⏰ [{label}] Hard timeout after {int(now - start_ts)}s — killing FFmpeg")
+            logger.warning(f"âڈ° [{label}] Hard timeout after {int(now - start_ts)}s â€” killing FFmpeg")
             _terminate_subprocess_tree(proc)
             drain_done.wait(timeout=5)
             stderr_text = _stderr_tail_text()
@@ -149,7 +149,7 @@ def _run_ffmpeg_with_idle_timeout(
             last_activity_ts = now
         elif idle_timeout_s > 0 and (now - last_activity_ts) >= idle_timeout_s:
             logger.warning(
-                f"⏰ [{label}] Idle timeout — no output for {int(now - last_activity_ts)}s — killing FFmpeg"
+                f"âڈ° [{label}] Idle timeout â€” no output for {int(now - last_activity_ts)}s â€” killing FFmpeg"
             )
             _terminate_subprocess_tree(proc)
             drain_done.wait(timeout=5)
@@ -274,7 +274,7 @@ def _run_ffmpeg_command_with_progress(
             last_progress_ts = last_activity_ts
             if (last_activity_ts - last_log_ts) >= 20:
                 suffix = f" | out_time={current_out_time}" if current_out_time else ""
-                logger.info(f"⏱️ {progress_label}: state={state}{suffix}")
+                logger.info(f"âڈ±ï¸ڈ {progress_label}: state={state}{suffix}")
                 last_log_ts = last_activity_ts
         elif payload:
             with stderr_tail_lock:
@@ -301,9 +301,9 @@ def _parse_volume_ratio(raw: str, default_ratio: float) -> float:
 
 def _get_random_volume_level(min_percent: int = 90, max_percent: int = 100) -> float:
     """
-    الحصول على مستوى صوت عشوائي بين الحد الأدنى والأقصى
+    ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ظ…ط³طھظˆظ‰ طµظˆطھ ط¹ط´ظˆط§ط¦ظٹ ط¨ظٹظ† ط§ظ„ط­ط¯ ط§ظ„ط£ط¯ظ†ظ‰ ظˆط§ظ„ط£ظ‚طµظ‰
     
-    يستخدم لتنويع مستوى الصوت بين الفيديوهات لتجنب التكرار
+    ظٹط³طھط®ط¯ظ… ظ„طھظ†ظˆظٹط¹ ظ…ط³طھظˆظ‰ ط§ظ„طµظˆطھ ط¨ظٹظ† ط§ظ„ظپظٹط¯ظٹظˆظ‡ط§طھ ظ„طھط¬ظ†ط¨ ط§ظ„طھظƒط±ط§ط±
     """
     import random
     percent = random.randint(min_percent, max_percent)
@@ -362,13 +362,13 @@ def _safe_processing_fps(raw_fps: Optional[float]) -> float:
     return min(fps, max_fps)
 
 
-"""معالج فيديوهات المودات"""
+"""ظ…ط¹ط§ظ„ط¬ ظپظٹط¯ظٹظˆظ‡ط§طھ ط§ظ„ظ…ظˆط¯ط§طھ"""
 
 
 def _ffmpeg_memory_guard_args() -> list:
-    """إرجاع وسيطات حماية الذاكرة لـ FFmpeg في بيئات الموارد المحدودة (Render).
+    """ط¥ط±ط¬ط§ط¹ ظˆط³ظٹط·ط§طھ ط­ظ…ط§ظٹط© ط§ظ„ط°ط§ظƒط±ط© ظ„ظ€ FFmpeg ظپظٹ ط¨ظٹط¦ط§طھ ط§ظ„ظ…ظˆط§ط±ط¯ ط§ظ„ظ…ط­ط¯ظˆط¯ط© (Render).
     
-    يحد من تخصيص الذاكرة لمنع OOM kill أثناء الترميز الثقيل.
+    ظٹط­ط¯ ظ…ظ† طھط®طµظٹطµ ط§ظ„ط°ط§ظƒط±ط© ظ„ظ…ظ†ط¹ OOM kill ط£ط«ظ†ط§ط، ط§ظ„طھط±ظ…ظٹط² ط§ظ„ط«ظ‚ظٹظ„.
     """
     if not _is_low_resource_env():
         return []
@@ -461,7 +461,7 @@ def _get_shorts_encoder_settings() -> dict:
     is_low_res = _is_low_resource_env()
     # YouTube-optimized settings for shorts
     if is_low_res:
-        # 🔧 FORCE lightweight settings on Render — env vars CANNOT override
+        # ًں”§ FORCE lightweight settings on Render â€” env vars CANNOT override
         settings = {
             "encoder": "libx264",
             "preset": "ultrafast",
@@ -534,7 +534,7 @@ def _get_shorts_encoder_settings() -> dict:
                 "-map_metadata", "-1",
             ]
             settings["is_gpu"] = True
-            logger.info("✅ Shorts Hardware Accel: Android MediaCodec (h264_mediacodec)")
+            logger.info("âœ… Shorts Hardware Accel: Android MediaCodec (h264_mediacodec)")
             return settings
 
         # 2. NVIDIA NVENC
@@ -556,9 +556,9 @@ def _get_shorts_encoder_settings() -> dict:
                 settings["crf"] = None
                 settings["extra_args"] = nvenc_args
                 settings["is_gpu"] = True
-                logger.info("✅ Shorts GPU: NVIDIA NVENC")
+                logger.info("âœ… Shorts GPU: NVIDIA NVENC")
                 return settings
-            logger.warning("⚠️ Shorts NVENC listed but self-test failed; falling back to CPU encoder")
+            logger.warning("âڑ ï¸ڈ Shorts NVENC listed but self-test failed; falling back to CPU encoder")
         
         # 3. Intel QuickSync
         if "h264_qsv" in out:
@@ -575,9 +575,9 @@ def _get_shorts_encoder_settings() -> dict:
                 settings["extra_args"] = qsv_args
                 settings["crf"] = None
                 settings["is_gpu"] = True
-                logger.info("✅ Shorts GPU: Intel QuickSync")
+                logger.info("âœ… Shorts GPU: Intel QuickSync")
                 return settings
-            logger.warning("⚠️ Shorts Intel QuickSync listed but self-test failed; falling back to CPU encoder")
+            logger.warning("âڑ ï¸ڈ Shorts Intel QuickSync listed but self-test failed; falling back to CPU encoder")
             
         # 4. Apple VideoToolbox (Mac)
         if "h264_videotoolbox" in out:
@@ -591,7 +591,7 @@ def _get_shorts_encoder_settings() -> dict:
                  "-map_metadata", "-1",
             ]
             settings["is_gpu"] = True
-            logger.info("✅ Shorts GPU: Apple VideoToolbox")
+            logger.info("âœ… Shorts GPU: Apple VideoToolbox")
             return settings
 
     except Exception as e:
@@ -617,7 +617,7 @@ class ModVideoProcessor:
         trim_start: float = 1.0,
         trim_end: float = 1.0,
         add_cta: bool = True,
-        cta_text: str = "لتحميل التطبيق المستخدم في الشرح\nحمل تطبيقنا الآن من الرابط في الوصف",
+        cta_text: str = "ظ„طھط­ظ…ظٹظ„ ط§ظ„طھط·ط¨ظٹظ‚ ط§ظ„ظ…ط³طھط®ط¯ظ… ظپظٹ ط§ظ„ط´ط±ط­\nط­ظ…ظ„ طھط·ط¨ظٹظ‚ظ†ط§ ط§ظ„ط¢ظ† ظ…ظ† ط§ظ„ط±ط§ط¨ط· ظپظٹ ط§ظ„ظˆطµظپ",
         top_text: Optional[str] = None,
         convert_to_shorts: bool = True,
         custom_font: Optional[str] = None,
@@ -632,38 +632,38 @@ class ModVideoProcessor:
         progress_callback: Optional[callable] = None,
     ) -> Tuple[str, dict]:
         """
-        معالجة فيديو مود
+        ظ…ط¹ط§ظ„ط¬ط© ظپظٹط¯ظٹظˆ ظ…ظˆط¯
         
         Args:
-            input_video: مسار الفيديو المدخل
-            output_dir: مجلد الإخراج
-            video_id: معرف الفيديو
-            trim_start: عدد الثواني المراد قصها من البداية
-            trim_end: عدد الثواني المراد قصها من النهاية
-            add_cta: إضافة نص الدعوة في النهاية
-            cta_text: نص الدعوة
-            top_text: نص يظهر في أعلى الفيديو طوال الوقت
-            convert_to_shorts: تحويل الفيديو لصيغة شورتس
-            custom_font: مسار ملف خط مخصص
-            top_text_size: حجم خط النص العلوي
-            top_text_y: موقع النص العلوي (Y)
-            is_custom: هل هذا هو النمط المخصص (لتغيير شكل النص)
-            video_effects: إعدادات تأثيرات البداية/النهاية الخاصة بالمصدر
-            hflip: هل يتم قلب الفيديو أفقياً (Mirror)
+            input_video: ظ…ط³ط§ط± ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ظ…ط¯ط®ظ„
+            output_dir: ظ…ط¬ظ„ط¯ ط§ظ„ط¥ط®ط±ط§ط¬
+            video_id: ظ…ط¹ط±ظپ ط§ظ„ظپظٹط¯ظٹظˆ
+            trim_start: ط¹ط¯ط¯ ط§ظ„ط«ظˆط§ظ†ظٹ ط§ظ„ظ…ط±ط§ط¯ ظ‚طµظ‡ط§ ظ…ظ† ط§ظ„ط¨ط¯ط§ظٹط©
+            trim_end: ط¹ط¯ط¯ ط§ظ„ط«ظˆط§ظ†ظٹ ط§ظ„ظ…ط±ط§ط¯ ظ‚طµظ‡ط§ ظ…ظ† ط§ظ„ظ†ظ‡ط§ظٹط©
+            add_cta: ط¥ط¶ط§ظپط© ظ†طµ ط§ظ„ط¯ط¹ظˆط© ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©
+            cta_text: ظ†طµ ط§ظ„ط¯ط¹ظˆط©
+            top_text: ظ†طµ ظٹط¸ظ‡ط± ظپظٹ ط£ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ ط·ظˆط§ظ„ ط§ظ„ظˆظ‚طھ
+            convert_to_shorts: طھط­ظˆظٹظ„ ط§ظ„ظپظٹط¯ظٹظˆ ظ„طµظٹط؛ط© ط´ظˆط±طھط³
+            custom_font: ظ…ط³ط§ط± ظ…ظ„ظپ ط®ط· ظ…ط®طµطµ
+            top_text_size: ط­ط¬ظ… ط®ط· ط§ظ„ظ†طµ ط§ظ„ط¹ظ„ظˆظٹ
+            top_text_y: ظ…ظˆظ‚ط¹ ط§ظ„ظ†طµ ط§ظ„ط¹ظ„ظˆظٹ (Y)
+            is_custom: ظ‡ظ„ ظ‡ط°ط§ ظ‡ظˆ ط§ظ„ظ†ظ…ط· ط§ظ„ظ…ط®طµطµ (ظ„طھط؛ظٹظٹط± ط´ظƒظ„ ط§ظ„ظ†طµ)
+            video_effects: ط¥ط¹ط¯ط§ط¯ط§طھ طھط£ط«ظٹط±ط§طھ ط§ظ„ط¨ط¯ط§ظٹط©/ط§ظ„ظ†ظ‡ط§ظٹط© ط§ظ„ط®ط§طµط© ط¨ط§ظ„ظ…طµط¯ط±
+            hflip: ظ‡ظ„ ظٹطھظ… ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ ط£ظپظ‚ظٹط§ظ‹ (Mirror)
         
         Returns:
-            tuple: (مسار الفيديو المعالج, معلومات إضافية)
+            tuple: (ظ…ط³ط§ط± ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ظ…ط¹ط§ظ„ط¬, ظ…ط¹ظ„ظˆظ…ط§طھ ط¥ط¶ط§ظپظٹط©)
         """
         os.makedirs(output_dir, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         
-        # التأكد من وجود البرامج اللازمة
+        # ط§ظ„طھط£ظƒط¯ ظ…ظ† ظˆط¬ظˆط¯ ط§ظ„ط¨ط±ط§ظ…ط¬ ط§ظ„ظ„ط§ط²ظ…ط©
         if not ffmpeg_bin() or not ffprobe_bin():
-             logger.warning("⚠️ FFmpeg or FFprobe not found. Returning original video without processing.")
+             logger.warning("âڑ ï¸ڈ FFmpeg or FFprobe not found. Returning original video without processing.")
              return input_video, {"status": "skipped_no_ffmpeg", "original_path": input_video}
         
         
-        # الحصول على معلومات الفيديو
+        # ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ظ…ط¹ظ„ظˆظ…ط§طھ ط§ظ„ظپظٹط¯ظٹظˆ
         duration = self._get_video_duration(input_video)
         width, height = self._get_video_dimensions(input_video)
         final_width, final_height = width, height
@@ -683,13 +683,13 @@ class ModVideoProcessor:
             "encode": None
         }
         
-        # حساب المدة الجديدة
+        # ط­ط³ط§ط¨ ط§ظ„ظ…ط¯ط© ط§ظ„ط¬ط¯ظٹط¯ط©
         new_duration = duration - trim_start - trim_end
         
         if new_duration <= 0:
             raise ValueError(f"Video too short after trimming: {new_duration}s")
         
-        # المسارات المؤقتة
+        # ط§ظ„ظ…ط³ط§ط±ط§طھ ط§ظ„ظ…ط¤ظ‚طھط©
         trimmed_path = self.temp_dir / f"{video_id}_trimmed.mp4"
         flipped_path = self.temp_dir / f"{video_id}_flipped.mp4"
         resized_path = self.temp_dir / f"{video_id}_resized.mp4"
@@ -715,21 +715,21 @@ class ModVideoProcessor:
             )
             skip_final_encode = False
             
-            # الخطوة 1: قص البداية والنهاية (فقط إذا كانت القيم أكبر من 0)
-            # 🔧 استخدام stream copy للحفاظ على الجودة الأصلية
-            # سيتم الترميز لاحقاً في convert_to_shorts أو الترميز النهائي
+            # ط§ظ„ط®ط·ظˆط© 1: ظ‚طµ ط§ظ„ط¨ط¯ط§ظٹط© ظˆط§ظ„ظ†ظ‡ط§ظٹط© (ظپظ‚ط· ط¥ط°ط§ ظƒط§ظ†طھ ط§ظ„ظ‚ظٹظ… ط£ظƒط¨ط± ظ…ظ† 0)
+            # ًں”§ ط§ط³طھط®ط¯ط§ظ… stream copy ظ„ظ„ط­ظپط§ط¸ ط¹ظ„ظ‰ ط§ظ„ط¬ظˆط¯ط© ط§ظ„ط£طµظ„ظٹط©
+            # ط³ظٹطھظ… ط§ظ„طھط±ظ…ظٹط² ظ„ط§ط­ظ‚ط§ظ‹ ظپظٹ convert_to_shorts ط£ظˆ ط§ظ„طھط±ظ…ظٹط² ط§ظ„ظ†ظ‡ط§ط¦ظٹ
             if trim_start > 0 or trim_end > 0:
                 step_start = time.time()
-                logger.info("✂️ Step 1/5: Trimming video...")
+                logger.info("âœ‚ï¸ڈ Step 1/5: Trimming video...")
                 if progress_callback:
-                    try: progress_callback("1/5 ✂️ قص الفيديو...")
+                    try: progress_callback("1/5 âœ‚ï¸ڈ ظ‚طµ ط§ظ„ظپظٹط¯ظٹظˆ...")
                     except Exception: pass
                 self._trim_video(current_path, trimmed_path, trim_start, trim_end, force_encode=False)
                 current_path = str(trimmed_path)
                 step_timings["trim"] = time.time() - step_start
-                logger.info(f"✅ Step 1/5 completed in {step_timings['trim']:.2f}s")
+                logger.info(f"âœ… Step 1/5 completed in {step_timings['trim']:.2f}s")
             
-            # التحقق المبكر: هل سيتم تحويل الفيديو فعلاً إلى صيغة Shorts بترميز كامل؟
+            # ط§ظ„طھط­ظ‚ظ‚ ط§ظ„ظ…ط¨ظƒط±: ظ‡ظ„ ط³ظٹطھظ… طھط­ظˆظٹظ„ ط§ظ„ظپظٹط¯ظٹظˆ ظپط¹ظ„ط§ظ‹ ط¥ظ„ظ‰ طµظٹط؛ط© Shorts ط¨طھط±ظ…ظٹط² ظƒط§ظ…ظ„طں
             will_convert_to_shorts = False
             if convert_to_shorts:
                 fmt = (shorts_format or "crop").strip().lower()
@@ -748,51 +748,51 @@ class ModVideoProcessor:
                 if not should_skip_conversion:
                     will_convert_to_shorts = True
 
-            # الخطوة 1.5: قلب الفيديو أفقياً (إذا تم طلبه)
-            # 🔧 تحسين: إذا كنا سنقوم بترجميز الفيديو لتحويله إلى Shorts، سنمرر طلب القلب له هناك لتجنب ترميز مزدوج.
+            # ط§ظ„ط®ط·ظˆط© 1.5: ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ ط£ظپظ‚ظٹط§ظ‹ (ط¥ط°ط§ طھظ… ط·ظ„ط¨ظ‡)
+            # ًں”§ طھط­ط³ظٹظ†: ط¥ط°ط§ ظƒظ†ط§ ط³ظ†ظ‚ظˆظ… ط¨طھط±ط¬ظ…ظٹط² ط§ظ„ظپظٹط¯ظٹظˆ ظ„طھط­ظˆظٹظ„ظ‡ ط¥ظ„ظ‰ ShortsطŒ ط³ظ†ظ…ط±ط± ط·ظ„ط¨ ط§ظ„ظ‚ظ„ط¨ ظ„ظ‡ ظ‡ظ†ط§ظƒ ظ„طھط¬ظ†ط¨ طھط±ظ…ظٹط² ظ…ط²ط¯ظˆط¬.
             if hflip and not will_convert_to_shorts:
-                logger.info("↔️ Flipping video horizontally (separate encode)...")
+                logger.info("â†”ï¸ڈ Flipping video horizontally (separate encode)...")
                 self._flip_video(current_path, flipped_path)
                 current_path = str(flipped_path)
             
-            # الخطوة 2: تحويل لصيغة شورتس (9:16)
+            # ط§ظ„ط®ط·ظˆط© 2: طھط­ظˆظٹظ„ ظ„طµظٹط؛ط© ط´ظˆط±طھط³ (9:16)
             if convert_to_shorts:
                 if not will_convert_to_shorts:
-                    logger.info(f"📐 Step 2/5: Skipping shorts conversion (already 9:16: {width}x{height})")
+                    logger.info(f"ًں“گ Step 2/5: Skipping shorts conversion (already 9:16: {width}x{height})")
                     if progress_callback:
-                        try: progress_callback("2/5 📐 تخطي التحويل (الفيديو عمودي 9:16 مسبقاً)...")
+                        try: progress_callback("2/5 ًں“گ طھط®ط·ظٹ ط§ظ„طھط­ظˆظٹظ„ (ط§ظ„ظپظٹط¯ظٹظˆ ط¹ظ…ظˆط¯ظٹ 9:16 ظ…ط³ط¨ظ‚ط§ظ‹)...")
                         except Exception: pass
                     step_timings["convert"] = 0.0
                 else:
                     step_start = time.time()
                     if hflip:
-                        logger.info("📐 Step 2/5: Converting to shorts format (incl. horizontal flip)...")
+                        logger.info("ًں“گ Step 2/5: Converting to shorts format (incl. horizontal flip)...")
                     else:
-                        logger.info("📐 Step 2/5: Converting to shorts format...")
+                        logger.info("ًں“گ Step 2/5: Converting to shorts format...")
                     if progress_callback:
-                        try: progress_callback("2/5 📐 تحويل لصيغة شورتس...")
+                        try: progress_callback("2/5 ًں“گ طھط­ظˆظٹظ„ ظ„طµظٹط؛ط© ط´ظˆط±طھط³...")
                         except Exception: pass
                     self._convert_to_shorts(current_path, resized_path, width, height, shorts_format=shorts_format, hflip=hflip)
                     current_path = str(resized_path)
                     final_width, final_height = _shorts_target_resolution()
                     step_timings["convert"] = time.time() - step_start
-                    logger.info(f"✅ Step 2/5 completed in {step_timings['convert']:.2f}s")
+                    logger.info(f"âœ… Step 2/5 completed in {step_timings['convert']:.2f}s")
                     if not has_post_convert_processing:
                         skip_final_encode = True
             
-            # الخطوة 3: إضافة نص علوي (اختياري)
+            # ط§ظ„ط®ط·ظˆط© 3: ط¥ط¶ط§ظپط© ظ†طµ ط¹ظ„ظˆظٹ (ط§ط®طھظٹط§ط±ظٹ)
             if top_text:
                 step_start = time.time()
-                logger.info("📝 Step 3/5: Adding text overlay...")
+                logger.info("ًں“‌ Step 3/5: Adding text overlay...")
                 if progress_callback:
-                    try: progress_callback("3/5 📝 إضافة نص...")
+                    try: progress_callback("3/5 ًں“‌ ط¥ط¶ط§ظپط© ظ†طµ...")
                     except Exception: pass
                 self._add_top_overlay_text(current_path, overlay_path, top_text, custom_font, top_text_size, top_text_y, is_custom)
                 current_path = str(overlay_path)
                 step_timings["overlay"] = time.time() - step_start
-                logger.info(f"✅ Step 3/5 completed in {step_timings['overlay']:.2f}s")
+                logger.info(f"âœ… Step 3/5 completed in {step_timings['overlay']:.2f}s")
 
-            # الخطوة 4: إضافة تأثيرات البداية/النهاية
+            # ط§ظ„ط®ط·ظˆط© 4: ط¥ط¶ط§ظپط© طھط£ط«ظٹط±ط§طھ ط§ظ„ط¨ط¯ط§ظٹط©/ط§ظ„ظ†ظ‡ط§ظٹط©
             effects_start = time.time()
             if convert_to_shorts:
                 explicit_effects = video_effects if isinstance(video_effects, dict) else None
@@ -819,9 +819,9 @@ class ModVideoProcessor:
                         logger.warning(f"Default effects failed and will be skipped: {effects_err}")
             step_timings["effects"] = time.time() - effects_start
             if step_timings["effects"] > 0.1:
-                logger.info(f"✅ Step 4/5 (effects) completed in {step_timings['effects']:.2f}s")
+                logger.info(f"âœ… Step 4/5 (effects) completed in {step_timings['effects']:.2f}s")
             
-            # الخطوة 5: تحسين سينمائي (اختياري)
+            # ط§ظ„ط®ط·ظˆط© 5: طھط­ط³ظٹظ† ط³ظٹظ†ظ…ط§ط¦ظٹ (ط§ط®طھظٹط§ط±ظٹ)
             if enhance:
                 step_start = time.time()
                 enhance_path = self.temp_dir / f"{video_id}_enhanced.mp4"
@@ -829,14 +829,14 @@ class ModVideoProcessor:
                 if ok:
                     current_path = str(enhance_path)
                 step_timings["enhance"] = time.time() - step_start
-                logger.info(f"✅ Step 5/5 (enhance) completed in {step_timings['enhance']:.2f}s")
+                logger.info(f"âœ… Step 5/5 (enhance) completed in {step_timings['enhance']:.2f}s")
             
-            # الخطوة 6: الترميز النهائي
+            # ط§ظ„ط®ط·ظˆط© 6: ط§ظ„طھط±ظ…ظٹط² ط§ظ„ظ†ظ‡ط§ط¦ظٹ
             encode_start = time.time()
             if convert_to_shorts and skip_final_encode:
-                logger.info("⏭️ Step 6/6: Skipping final encoding and reusing the shorts-converted file directly...")
+                logger.info("âڈ­ï¸ڈ Step 6/6: Skipping final encoding and reusing the shorts-converted file directly...")
                 if progress_callback:
-                    try: progress_callback("6/6 ⏭️ تخطي الترميز النهائي...")
+                    try: progress_callback("6/6 âڈ­ï¸ڈ طھط®ط·ظٹ ط§ظ„طھط±ظ…ظٹط² ط§ظ„ظ†ظ‡ط§ط¦ظٹ...")
                     except Exception: pass
                 try:
                     if os.path.exists(str(final_path)):
@@ -850,11 +850,11 @@ class ModVideoProcessor:
                     shutil.copy2(current_path, str(final_path))
                 current_path = str(final_path)
                 step_timings["encode"] = time.time() - encode_start
-                logger.info(f"✅ Step 6/6 skipped in {step_timings['encode']:.2f}s")
+                logger.info(f"âœ… Step 6/6 skipped in {step_timings['encode']:.2f}s")
             else:
-                logger.info("🎬 Step 6/6: Final encoding...")
+                logger.info("ًںژ¬ Step 6/6: Final encoding...")
                 if progress_callback:
-                    try: progress_callback("6/6 🎬 الترميز النهائي...")
+                    try: progress_callback("6/6 ًںژ¬ ط§ظ„طھط±ظ…ظٹط² ط§ظ„ظ†ظ‡ط§ط¦ظٹ...")
                     except Exception: pass
                 if convert_to_shorts:
                     ok_final = self._encode_final_shorts(current_path, str(final_path), target_fps)
@@ -863,9 +863,9 @@ class ModVideoProcessor:
                 else:
                     self._optimize_for_youtube(current_path, str(final_path))
                 step_timings["encode"] = time.time() - encode_start
-                logger.info(f"✅ Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
+                logger.info(f"âœ… Step 6/6 (final encode) completed in {step_timings['encode']:.2f}s")
             
-            # معلومات الفيديو المعالج
+            # ظ…ط¹ظ„ظˆظ…ط§طھ ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ظ…ط¹ط§ظ„ط¬
             info = {
                 "original_duration": duration,
                 "new_duration": new_duration,
@@ -877,7 +877,7 @@ class ModVideoProcessor:
 
             
         finally:
-            # تنظيف الملفات المؤقتة
+            # طھظ†ط¸ظٹظپ ط§ظ„ظ…ظ„ظپط§طھ ط§ظ„ظ…ط¤ظ‚طھط©
             for temp_file in [trimmed_path, flipped_path, resized_path, overlay_path, self.temp_dir / f"{video_id}_effects.mp4", self.temp_dir / f"{video_id}_outro.mp4", self.temp_dir / f"{video_id}_enhanced.mp4"]:
                 if temp_file.exists():
                     try:
@@ -949,7 +949,7 @@ class ModVideoProcessor:
         vf_parts = ["setpts=PTS-STARTPTS"]
         is_low = _is_low_resource_env()
 
-        # 🔧 On low-resource envs: use lighter blur radius, skip eq filter
+        # ًں”§ On low-resource envs: use lighter blur radius, skip eq filter
         blur_radius_heavy = 6 if is_low else 12
         blur_radius_light = 4 if is_low else 8
 
@@ -958,7 +958,7 @@ class ModVideoProcessor:
             radius = blur_radius_heavy if intro_cfg.get('type') == 'black_blur' else blur_radius_light
             vf_parts.append(f"boxblur=luma_radius={radius}:enable='between(t,0,{intro_d:.3f})'")
             if intro_cfg.get("type") == "black_blur" and not is_low:
-                # eq filter is expensive — skip on low-resource environments
+                # eq filter is expensive â€” skip on low-resource environments
                 vf_parts.append(f"eq=brightness=-0.18:saturation=0.92:enable='between(t,0,{intro_d:.3f})'")
 
         if outro_cfg.get("enabled") and outro_d > 0:
@@ -973,11 +973,11 @@ class ModVideoProcessor:
         ff_threads, base_preset, base_crf = self._shorts_x264_settings()
 
         if is_low:
-            # 🔧 FORCE lightweight encoding on Render — env vars cannot override
+            # ًں”§ FORCE lightweight encoding on Render â€” env vars cannot override
             preset = "ultrafast"
             crf = 30
             ff_threads = 1
-            logger.info(f"🔧 [Effects] Low-resource mode: preset={preset}, crf={crf}, threads={ff_threads}")
+            logger.info(f"ًں”§ [Effects] Low-resource mode: preset={preset}, crf={crf}, threads={ff_threads}")
         else:
             default_effects_preset = base_preset
             preset = str(os.getenv("SHORTS_EFFECTS_PRESET", default_effects_preset) or default_effects_preset).strip() or default_effects_preset
@@ -1026,7 +1026,7 @@ class ModVideoProcessor:
             extra_seconds=120,
         )
         idle_timeout_s = min(90, max(30, timeout_s // 4))
-        logger.info(f"🎬 [Effects] Running FFmpeg effects (timeout={timeout_s}s, idle={idle_timeout_s}s): {' '.join(cmd[-6:])}")
+        logger.info(f"ًںژ¬ [Effects] Running FFmpeg effects (timeout={timeout_s}s, idle={idle_timeout_s}s): {' '.join(cmd[-6:])}")
         rc, stderr_text = _run_ffmpeg_with_idle_timeout(
             cmd, timeout_s=timeout_s, idle_timeout_s=idle_timeout_s, label="Effects"
         )
@@ -1045,7 +1045,7 @@ class ModVideoProcessor:
         - Ensures clean container without re-encoding
         """
         try:
-            logger.info("🚀 Running final YouTube optimization pass...")
+            logger.info("ًںڑ€ Running final YouTube optimization pass...")
             cmd = [
                 ffmpeg_bin(), "-y",
                 "-i", input_path,
@@ -1064,7 +1064,7 @@ class ModVideoProcessor:
                 cmd, timeout_s=_opt_timeout, idle_timeout_s=60, label="YouTubeOpt"
             )
             if rc == 0 and os.path.exists(output_path):
-                logger.debug("✅ YouTube optimization successful")
+                logger.debug("âœ… YouTube optimization successful")
                 return True
             else:
                 logger.warning(f"Optimization failed: {result.stderr.decode()[:200]}")
@@ -1185,7 +1185,7 @@ class ModVideoProcessor:
                     extra_seconds=90,
                 )
                 _idle_timeout = min(120, max(45, _timeout // 4))
-                logger.info(f"🎬 [FinalEncode] timeout={_timeout}s idle={_idle_timeout}s encoder={enc_settings.get('encoder')}")
+                logger.info(f"ًںژ¬ [FinalEncode] timeout={_timeout}s idle={_idle_timeout}s encoder={enc_settings.get('encoder')}")
                 rc, stderr = _run_ffmpeg_with_idle_timeout(
                     cmd, timeout_s=_timeout, idle_timeout_s=_idle_timeout, label="FinalEncode"
                 )
@@ -1244,7 +1244,7 @@ class ModVideoProcessor:
             return False
 
     def _apply_cinematic_teal_boost(self, input_path: str, output_path: Path) -> bool:
-        """تحسين بسيط قابل للتعديل: تشبع + تباين + تعريض + هايلايت مع مزج بنسبة كثافة"""
+        """طھط­ط³ظٹظ† ط¨ط³ظٹط· ظ‚ط§ط¨ظ„ ظ„ظ„طھط¹ط¯ظٹظ„: طھط´ط¨ط¹ + طھط¨ط§ظٹظ† + طھط¹ط±ظٹط¶ + ظ‡ط§ظٹظ„ط§ظٹطھ ظ…ط¹ ظ…ط²ط¬ ط¨ظ†ط³ط¨ط© ظƒط«ط§ظپط©"""
         try:
             def _env_float(name: str, default: float) -> float:
                 try:
@@ -1274,7 +1274,7 @@ class ModVideoProcessor:
             def _run_filter(filter_complex: str, map_out: bool = True) -> Tuple[bool, str]:
                 ff_threads, preset, crf = self._shorts_x264_settings()
                 has_audio = self._has_audio(input_path)
-                # 🔧 استخدام نفس إعدادات الوسيط المحسّنة
+                # ًں”§ ط§ط³طھط®ط¯ط§ظ… ظ†ظپط³ ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ظˆط³ظٹط· ط§ظ„ظ…ط­ط³ظ‘ظ†ط©
                 try:
                     lossless_intermediate = str(os.getenv("SHORTS_INTERMEDIATE_LOSSLESS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
                 except Exception:
@@ -1291,7 +1291,7 @@ class ModVideoProcessor:
                     v_profile = "high444"
                     v_pix_fmt = "yuv444p"
                 else:
-                    # 🔧 Use _shorts_x264_settings() directly — already respects RENDER
+                    # ًں”§ Use _shorts_x264_settings() directly â€” already respects RENDER
                     _, base_preset, base_crf = self._shorts_x264_settings()
                     if _is_low_resource_env():
                         preset = base_preset  # Already forced to ultrafast
@@ -1301,7 +1301,7 @@ class ModVideoProcessor:
                         crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
                     v_profile = None
                     v_pix_fmt = "yuv420p"
-                # 🆕 استخدام مستوى صوت عشوائي (90-100%) لتنويع المحتوى
+                # ًں†• ط§ط³طھط®ط¯ط§ظ… ظ…ط³طھظˆظ‰ طµظˆطھ ط¹ط´ظˆط§ط¦ظٹ (90-100%) ظ„طھظ†ظˆظٹط¹ ط§ظ„ظ…ط­طھظˆظ‰
                 shorts_vol = _get_random_volume_level(90, 100)
 
                 cmd = [
@@ -1380,7 +1380,7 @@ class ModVideoProcessor:
             return False
     
     def _get_best_font(self, text: str, custom_font: Optional[str] = None) -> str:
-        """اختيار أفضل خط بناءً على النص واللغة والإعدادات العالمية"""
+        """ط§ط®طھظٹط§ط± ط£ظپط¶ظ„ ط®ط· ط¨ظ†ط§ط،ظ‹ ط¹ظ„ظ‰ ط§ظ„ظ†طµ ظˆط§ظ„ظ„ط؛ط© ظˆط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ ط§ظ„ط¹ط§ظ„ظ…ظٹط©"""
 
         def _is_arabicish(s: str) -> bool:
             return bool(
@@ -1453,7 +1453,7 @@ class ModVideoProcessor:
             return out
 
         required_cps = _iter_required_codepoints(text)
-        # 1. الأولوية القصوى للخط المخصص (إذا تم رفعه للقناة أو الجلسة)
+        # 1. ط§ظ„ط£ظˆظ„ظˆظٹط© ط§ظ„ظ‚طµظˆظ‰ ظ„ظ„ط®ط· ط§ظ„ظ…ط®طµطµ (ط¥ط°ط§ طھظ… ط±ظپط¹ظ‡ ظ„ظ„ظ‚ظ†ط§ط© ط£ظˆ ط§ظ„ط¬ظ„ط³ط©)
         if custom_font:
             # Normalize path to handle both forward and backward slashes
             custom_font_norm = os.path.normpath(custom_font)
@@ -1471,12 +1471,12 @@ class ModVideoProcessor:
                         return cand
                     logger.warning(f"Custom font does not support required characters, skipping: {cand}")
 
-        # 2. اكتشاف اللغة (يشمل Arabic Presentation Forms)
+        # 2. ط§ظƒطھط´ط§ظپ ط§ظ„ظ„ط؛ط© (ظٹط´ظ…ظ„ Arabic Presentation Forms)
         is_ar = _is_arabicish(text)
         is_thai = _is_thai(text)
         cfg = load_config()
 
-        # 3. الأولوية الثانية للخطوط العالمية المحددة في الإعدادات
+        # 3. ط§ظ„ط£ظˆظ„ظˆظٹط© ط§ظ„ط«ط§ظ†ظٹط© ظ„ظ„ط®ط·ظˆط· ط§ظ„ط¹ط§ظ„ظ…ظٹط© ط§ظ„ظ…ط­ط¯ط¯ط© ظپظٹ ط§ظ„ط¥ط¹ط¯ط§ط¯ط§طھ
         if is_ar and cfg.GLOBAL_FONT_AR:
             global_ar_norm = os.path.normpath(cfg.GLOBAL_FONT_AR)
             if os.path.exists(global_ar_norm):
@@ -1502,18 +1502,18 @@ class ModVideoProcessor:
                 if os.path.exists(global_en_abs):
                     return global_en_abs
 
-        # 4. الأولوية الثالثة للخط المحلي الموثوق (تجنباً لمشاكل النظام)
+        # 4. ط§ظ„ط£ظˆظ„ظˆظٹط© ط§ظ„ط«ط§ظ„ط«ط© ظ„ظ„ط®ط· ط§ظ„ظ…ط­ظ„ظٹ ط§ظ„ظ…ظˆط«ظˆظ‚ (طھط¬ظ†ط¨ط§ظ‹ ظ„ظ…ط´ط§ظƒظ„ ط§ظ„ظ†ط¸ط§ظ…)
         local_ar_font = os.path.join(".data", "fonts", "fallback_ar.ttf")
         if is_ar and os.path.exists(local_ar_font):
             cand = os.path.abspath(local_ar_font)
             if _font_supports_required_chars(cand, required_cps):
                 return cand
 
-        # 5. قائمة الخطوط الاحتياطية للنظام
+        # 5. ظ‚ط§ط¦ظ…ط© ط§ظ„ط®ط·ظˆط· ط§ظ„ط§ط­طھظٹط§ط·ظٹط© ظ„ظ„ظ†ط¸ط§ظ…
         if is_ar:
             font_candidates = []
 
-            # خطوط المستخدم (أولوية عالية)
+            # ط®ط·ظˆط· ط§ظ„ظ…ط³طھط®ط¯ظ… (ط£ظˆظ„ظˆظٹط© ط¹ط§ظ„ظٹط©)
             for user_font_dir in (
                 os.path.join("font", "arabic"),
                 os.path.join("fonts", "arabic"),
@@ -1522,7 +1522,7 @@ class ModVideoProcessor:
             ):
                 font_candidates.extend(_iter_font_files(user_font_dir))
 
-            # خطوط النظام
+            # ط®ط·ظˆط· ط§ظ„ظ†ط¸ط§ظ…
             font_candidates.extend(
                 [
                     "C:/Windows/Fonts/arialuni.ttf",
@@ -1556,7 +1556,7 @@ class ModVideoProcessor:
                 )
             font_candidates.extend(
                 [
-                    "C:/Windows/Fonts/tahoma.ttf",       # يدعم التايلاندية والعربية بشكل جيد
+                    "C:/Windows/Fonts/tahoma.ttf",       # ظٹط¯ط¹ظ… ط§ظ„طھط§ظٹظ„ط§ظ†ط¯ظٹط© ظˆط§ظ„ط¹ط±ط¨ظٹط© ط¨ط´ظƒظ„ ط¬ظٹط¯
                     "C:/Windows/Fonts/arial.ttf",
                     "C:/Windows/Fonts/segoeui.ttf",
                     "/system/fonts/Roboto-Regular.ttf", # Android
@@ -1573,7 +1573,7 @@ class ModVideoProcessor:
                 fontfile = cand
                 break
         
-        # 6. خط احتياطي نهائي شامل
+        # 6. ط®ط· ط§ط­طھظٹط§ط·ظٹ ظ†ظ‡ط§ط¦ظٹ ط´ط§ظ…ظ„
         if not fontfile:
             for global_fallback in (
                 os.path.join(".data", "fonts", "overlay_fallback.ttf"),
@@ -1586,7 +1586,7 @@ class ModVideoProcessor:
                         fontfile = cand
                         break
 
-        # 7. التنزيل التلقائي لخط احتياطي إذا لم يتم العثور على أي خط
+        # 7. ط§ظ„طھظ†ط²ظٹظ„ ط§ظ„طھظ„ظ‚ط§ط¦ظٹ ظ„ط®ط· ط§ط­طھظٹط§ط·ظٹ ط¥ط°ط§ ظ„ظ… ظٹطھظ… ط§ظ„ط¹ط«ظˆط± ط¹ظ„ظ‰ ط£ظٹ ط®ط·
         if not fontfile:
             try:
                 import urllib.request
@@ -1597,7 +1597,7 @@ class ModVideoProcessor:
                 downloaded_font_path = os.path.join(fallback_dir, "Cairo-Regular.ttf")
                 
                 if not os.path.exists(downloaded_font_path):
-                    logger.info("⬇️ Downloading fallback font 'Cairo-Regular.ttf' from Google Fonts...")
+                    logger.info("â¬‡ï¸ڈ Downloading fallback font 'Cairo-Regular.ttf' from Google Fonts...")
                     font_urls = [
                         "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo-Regular.ttf",
                         "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/static/Cairo-Regular.ttf",
@@ -1608,7 +1608,7 @@ class ModVideoProcessor:
                         try:
                             urllib.request.urlretrieve(font_url, downloaded_font_path)
                             last_download_error = None
-                            logger.info("✅ Fallback font downloaded successfully.")
+                            logger.info("âœ… Fallback font downloaded successfully.")
                             break
                         except Exception as download_err:
                             last_download_error = download_err
@@ -1639,7 +1639,7 @@ class ModVideoProcessor:
         return os.path.abspath(fontfile)
 
     def _add_top_overlay_text(self, input_path: str, output_path: str, text: str, custom_font: Optional[str] = None, top_text_size: int = 64, top_text_y: int = 150, is_custom: bool = False):
-        """إضافة نص في أعلى الفيديو طوال الوقت"""
+        """ط¥ط¶ط§ظپط© ظ†طµ ظپظٹ ط£ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ ط·ظˆط§ظ„ ط§ظ„ظˆظ‚طھ"""
         is_ar = bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", text or ""))
         use_text_shaping = (os.getenv("FFMPEG_DRAWTEXT_TEXT_SHAPING", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
         
@@ -1655,14 +1655,14 @@ class ModVideoProcessor:
         else:
             display_text = text
 
-        # استخدام UTF-8 (بدون BOM) لضمان أقصى توافق مع FFmpeg 
+        # ط§ط³طھط®ط¯ط§ظ… UTF-8 (ط¨ط¯ظˆظ† BOM) ظ„ط¶ظ…ط§ظ† ط£ظ‚طµظ‰ طھظˆط§ظپظ‚ ظ…ط¹ FFmpeg 
         text_file = self.temp_dir / f"text_{uuid.uuid4().hex}.txt"
         try:
-            # كتابة النص بتشفير UTF-8 عادي
+            # ظƒطھط§ط¨ط© ط§ظ„ظ†طµ ط¨طھط´ظپظٹط± UTF-8 ط¹ط§ط¯ظٹ
             with open(text_file, "w", encoding="utf-8") as f:
                 f.write(display_text)
             
-            # وظيفة مساعدة لهروب المسارات في ويندوز لـ FFmpeg filters
+            # ظˆط¸ظٹظپط© ظ…ط³ط§ط¹ط¯ط© ظ„ظ‡ط±ظˆط¨ ط§ظ„ظ…ط³ط§ط±ط§طھ ظپظٹ ظˆظٹظ†ط¯ظˆط² ظ„ظ€ FFmpeg filters
             def ffmpeg_escape_path(path_str):
                 p = str(path_str).replace("\\", "/")
                 p = p.replace(":", "\\:")
@@ -1674,16 +1674,16 @@ class ModVideoProcessor:
 
             logger.info(f"FFmpeg Path Escaped - Text: {text_file_esc}, Font: {font_esc}")
 
-            # الألوان والنمط (بناء على طلب المستخدم: نص أبيض مع خلفية سوداء شبه شفافة)
+            # ط§ظ„ط£ظ„ظˆط§ظ† ظˆط§ظ„ظ†ظ…ط· (ط¨ظ†ط§ط، ط¹ظ„ظ‰ ط·ظ„ط¨ ط§ظ„ظ…ط³طھط®ط¯ظ…: ظ†طµ ط£ط¨ظٹط¶ ظ…ط¹ ط®ظ„ظپظٹط© ط³ظˆط¯ط§ط، ط´ط¨ظ‡ ط´ظپط§ظپط©)
             if is_custom:
-                # في النمط المخصص، نكبر الخط قليلاً ليكون أوضح
+                # ظپظٹ ط§ظ„ظ†ظ…ط· ط§ظ„ظ…ط®طµطµطŒ ظ†ظƒط¨ط± ط§ظ„ط®ط· ظ‚ظ„ظٹظ„ط§ظ‹ ظ„ظٹظƒظˆظ† ط£ظˆط¶ط­
                 top_text_size = int(top_text_size * 1.2) if top_text_size == 64 else top_text_size
             
             font_color = "white"
             box_opt = "box=1:boxcolor=black@0.6:boxborderw=15:"
 
-            # بناء الفلتر
-            # نستخدم : بدلاً من ' ' للمسارات لأننا قمنا بالهروب يدوياً
+            # ط¨ظ†ط§ط، ط§ظ„ظپظ„طھط±
+            # ظ†ط³طھط®ط¯ظ… : ط¨ط¯ظ„ط§ظ‹ ظ…ظ† ' ' ظ„ظ„ظ…ط³ط§ط±ط§طھ ظ„ط£ظ†ظ†ط§ ظ‚ظ…ظ†ط§ ط¨ط§ظ„ظ‡ط±ظˆط¨ ظٹط¯ظˆظٹط§ظ‹
             shaping_opt = "text_shaping=1:" if (is_ar and use_text_shaping) else ""
 
             drawtext_filter = (
@@ -1696,12 +1696,12 @@ class ModVideoProcessor:
                 f"fontcolor={font_color}:"
                 f"x=(w-text_w)/2:"
                 f"y={top_text_y}:"
-                f"fix_bounds=1" # ضمان عدم خروج النص عن الشاشة
+                f"fix_bounds=1" # ط¶ظ…ط§ظ† ط¹ط¯ظ… ط®ط±ظˆط¬ ط§ظ„ظ†طµ ط¹ظ† ط§ظ„ط´ط§ط´ط©
             )
             
             logger.debug(f"Applying VF filter: {drawtext_filter}")
 
-            # 🔧 استخدام إعدادات وسيط محسّنة (تحترم RENDER / LOW_RESOURCE_MODE)
+            # ًں”§ ط§ط³طھط®ط¯ط§ظ… ط¥ط¹ط¯ط§ط¯ط§طھ ظˆط³ظٹط· ظ…ط­ط³ظ‘ظ†ط© (طھط­طھط±ظ… RENDER / LOW_RESOURCE_MODE)
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
             if _is_low_resource_env():
                 preset = base_preset  # Already forced to ultrafast
@@ -1774,14 +1774,14 @@ class ModVideoProcessor:
                 logger.debug(f"Applying VF filter: {vf}")
                 rc, stderr_text = _run_filter(vf)
                 if rc == 0:
-                    logger.info("✅ Top overlay text added to video")
+                    logger.info("âœ… Top overlay text added to video")
                     return
                 last_stderr = (stderr_text or "")[-2500:]
                 logger.error(f"FFmpeg failed to add top overlay text: {last_stderr}")
 
             raise RuntimeError(f"Failed to add top overlay text via FFmpeg drawtext. Last error: {last_stderr}")
         finally:
-            # حذف ملف النص المؤقت
+            # ط­ط°ظپ ظ…ظ„ظپ ط§ظ„ظ†طµ ط§ظ„ظ…ط¤ظ‚طھ
             if text_file.exists():
                 try:
                     text_file.unlink()
@@ -1793,6 +1793,7 @@ class ModVideoProcessor:
         timing: str = "full",
         duration: float = 2.0,
         screen_position: str = "top",
+        overlay_image_path: Optional[str] = None,
         intro_animation: Optional[Dict[str, Any]] = None,
         outro_animation: Optional[Dict[str, Any]] = None,
         custom_font: Optional[str] = None,
@@ -1802,11 +1803,11 @@ class ModVideoProcessor:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         if os.path.dirname(output_path):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        """إضافة نص مخصص على الفيديو بلون أبيض وحدود سوداء سميكة
+        """ط¥ط¶ط§ظپط© ظ†طµ ظ…ط®طµطµ ط¹ظ„ظ‰ ط§ظ„ظپظٹط¯ظٹظˆ ط¨ظ„ظˆظ† ط£ط¨ظٹط¶ ظˆط­ط¯ظˆط¯ ط³ظˆط¯ط§ط، ط³ظ…ظٹظƒط©
 
         Args:
             timing: "start" | "end" | "full"
-            duration: مدة الظهور بالثواني (فقط لـ start/end)
+            duration: ظ…ط¯ط© ط§ظ„ط¸ظ‡ظˆط± ط¨ط§ظ„ط«ظˆط§ظ†ظٹ (ظپظ‚ط· ظ„ظ€ start/end)
             screen_position: "top" | "center" | "bottom"
         """
         def _normalize_animation(raw_animation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1825,7 +1826,8 @@ class ModVideoProcessor:
 
         intro_anim = _normalize_animation(intro_animation)
         outro_anim = _normalize_animation(outro_animation)
-        if intro_anim.get("enabled") or outro_anim.get("enabled"):
+        contains_non_ascii = any(ord(ch) > 127 for ch in (text or ""))
+        if intro_anim.get("enabled") or outro_anim.get("enabled") or overlay_image_path or contains_non_ascii:
             return self._add_custom_overlay_text_via_image_overlay(
                 input_path=input_path,
                 output_path=output_path,
@@ -1833,6 +1835,7 @@ class ModVideoProcessor:
                 timing=timing,
                 duration=duration,
                 screen_position=screen_position,
+                overlay_image_path=overlay_image_path,
                 intro_animation=intro_anim,
                 outro_animation=outro_anim,
                 custom_font=custom_font,
@@ -1863,7 +1866,7 @@ class ModVideoProcessor:
             fontfile = self._get_best_font(display_text, custom_font)
             font_esc = str(fontfile).replace("\\", "/").replace(":", "\\:")
 
-            # — الموضع —
+            # â€” ط§ظ„ظ…ظˆط¶ط¹ â€”
             pos_key = (screen_position or "top").strip().lower()
             if pos_key in {"bottom", "bottom_center", "bottom-center"}:
                 y_expr = "h-text_h-80"
@@ -1872,10 +1875,10 @@ class ModVideoProcessor:
             else:
                 y_expr = "80"
 
-            # — التوقيت (enable) —
+            # â€” ط§ظ„طھظˆظ‚ظٹطھ (enable) â€”
             enable_opt = ""
             if timing in ("start", "end"):
-                # الحصول على مدة الفيديو
+                # ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ظ…ط¯ط© ط§ظ„ظپظٹط¯ظٹظˆ
                 total_dur = None
                 try:
                     prd = subprocess.run(
@@ -1895,11 +1898,11 @@ class ModVideoProcessor:
                     else:  # end
                         start_t = max(0, total_dur - duration)
                         enable_opt = f":enable='between(t,{start_t:.2f},{total_dur:.2f})'"
-                # إذا لم نتمكن من الحصول على المدة، نعرض النص طول الفيديو
+                # ط¥ط°ط§ ظ„ظ… ظ†طھظ…ظƒظ† ظ…ظ† ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ط¯ط©طŒ ظ†ط¹ط±ط¶ ط§ظ„ظ†طµ ط·ظˆظ„ ط§ظ„ظپظٹط¯ظٹظˆ
 
             shaping_opt = "text_shaping=1:" if (is_ar and use_text_shaping) else ""
 
-            # النمط: أبيض مع حدود سوداء سميكة (بدون مربع خلفية)
+            # ط§ظ„ظ†ظ…ط·: ط£ط¨ظٹط¶ ظ…ط¹ ط­ط¯ظˆط¯ ط³ظˆط¯ط§ط، ط³ظ…ظٹظƒط© (ط¨ط¯ظˆظ† ظ…ط±ط¨ط¹ ط®ظ„ظپظٹط©)
             drawtext_filter = (
                 f"drawtext="
                 f"textfile='{text_file_esc}':"
@@ -1969,7 +1972,7 @@ class ModVideoProcessor:
                 logger.debug(f"Custom overlay attempt: {vf}")
                 rc, stderr_text = _run_filter(vf)
                 if rc == 0:
-                    logger.info("✅ Custom overlay text added to video")
+                    logger.info("âœ… Custom overlay text added to video")
                     return
                 last_stderr = (stderr_text or "")[-2500:]
                 logger.error(f"FFmpeg custom overlay failed: {last_stderr}")
@@ -1990,12 +1993,13 @@ class ModVideoProcessor:
         timing: str = "full",
         duration: float = 2.0,
         screen_position: str = "top",
+        overlay_image_path: Optional[str] = None,
         intro_animation: Optional[Dict[str, Any]] = None,
         outro_animation: Optional[Dict[str, Any]] = None,
         custom_font: Optional[str] = None,
         font_size: int = 56,
     ) -> None:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
 
         intro_animation = intro_animation or {"enabled": False, "type": "none", "duration": 0.0}
         outro_animation = outro_animation or {"enabled": False, "type": "none", "duration": 0.0}
@@ -2035,6 +2039,22 @@ class ModVideoProcessor:
                     return value
             return value
 
+        def _resolve_overlay_image(raw_path: Optional[str]) -> Optional[str]:
+            candidate = str(raw_path or "").strip()
+            if not candidate:
+                return None
+            candidate = candidate.replace("\\", "/")
+            probe_paths = [candidate]
+            if not os.path.isabs(candidate):
+                probe_paths.append(os.path.abspath(candidate))
+            for path_value in probe_paths:
+                try:
+                    if path_value and os.path.isfile(path_value):
+                        return path_value
+                except Exception:
+                    continue
+            return None
+
         vw, vh = self._get_video_dimensions(input_path)
         if not vw or not vh:
             vw, vh = 1080, 1920
@@ -2045,16 +2065,27 @@ class ModVideoProcessor:
         except Exception:
             font = ImageFont.load_default()
 
-        max_text_width = max(280, int(vw * 0.82))
+        overlay_image = None
+        resolved_overlay_image = _resolve_overlay_image(overlay_image_path)
+        if resolved_overlay_image:
+            try:
+                with Image.open(resolved_overlay_image) as raw_img:
+                    overlay_image = raw_img.convert("RGBA")
+            except Exception as img_err:
+                logger.warning("Failed to load overlay image '%s': %s", resolved_overlay_image, img_err)
+                overlay_image = None
+
         padding_x = 40
         padding_y = 24
+        gap_x = 26
         stroke_w = 4
         line_spacing = 10
+        max_overlay_w = max(220, int(vw - 80))
         measure = ImageDraw.Draw(Image.new("RGBA", (8, 8), (0, 0, 0, 0)))
 
-        def _wrap_lines(src_text: str, max_w: int) -> list:
+        def _wrap_lines(src_text: str, max_w: int) -> list[str]:
             raw_lines = (src_text or "").splitlines() or [src_text or ""]
-            wrapped = []
+            wrapped: list[str] = []
             for part in raw_lines:
                 words = part.split()
                 if not words:
@@ -2071,33 +2102,67 @@ class ModVideoProcessor:
                         current = word
                 if current:
                     wrapped.append(current)
-            return wrapped[:4] or [src_text.strip() or text]
+            fallback = (src_text or text or "").strip() or " "
+            return wrapped[:5] or [fallback]
 
-        logical_lines = _wrap_lines(text, max(120, max_text_width - padding_x * 2))
-        display_lines = [_shape_line(line) for line in logical_lines]
-        text_width = 0
-        text_height = 0
-        line_heights = []
-        for line in display_lines:
-            bbox = measure.textbbox((0, 0), line or " ", font=font, stroke_width=stroke_w)
-            line_w = max(1, bbox[2] - bbox[0]) if bbox else max(1, int(measure.textlength(line or " ", font=font)))
-            line_h = max(font_size, bbox[3] - bbox[1]) if bbox else font_size
-            text_width = max(text_width, line_w)
-            text_height += line_h
-            line_heights.append(line_h)
-        if len(display_lines) > 1:
-            text_height += line_spacing * (len(display_lines) - 1)
+        def _measure_text(lines: list[str]) -> tuple[int, int, list[int], list[str]]:
+            display_lines = [_shape_line(line) for line in lines]
+            max_w = 1
+            total_h = 0
+            heights: list[int] = []
+            for display_line in display_lines:
+                bbox = measure.textbbox((0, 0), display_line or " ", font=font, stroke_width=stroke_w)
+                line_w = max(1, bbox[2] - bbox[0]) if bbox else max(1, int(measure.textlength(display_line or " ", font=font)))
+                line_h = max(font_size, bbox[3] - bbox[1]) if bbox else font_size
+                max_w = max(max_w, line_w)
+                total_h += line_h
+                heights.append(line_h)
+            if len(display_lines) > 1:
+                total_h += line_spacing * (len(display_lines) - 1)
+            return max_w, max(total_h, font_size), heights, display_lines
 
-        overlay_w = min(vw - 80, max(320, int(text_width + padding_x * 2)))
-        overlay_h = max(120, int(text_height + padding_y * 2))
+        base_text_max = int(vw * (0.62 if overlay_image is not None else 0.82))
+        logical_lines = _wrap_lines(text, max(140, base_text_max))
+        text_width, text_height, line_heights, display_lines = _measure_text(logical_lines)
+
+        image_box_size = 0
+        if overlay_image is not None:
+            desired = max(80, text_height)
+            max_image_size = max(80, min(int(vh * 0.32), int(vw * 0.34)))
+            image_box_size = max(80, min(desired, max_image_size))
+
+            if text_width + image_box_size + gap_x + padding_x * 2 > max_overlay_w:
+                text_limit = max(140, max_overlay_w - (image_box_size + gap_x + padding_x * 2))
+                logical_lines = _wrap_lines(text, text_limit)
+                text_width, text_height, line_heights, display_lines = _measure_text(logical_lines)
+
+            if text_width + image_box_size + gap_x + padding_x * 2 > max_overlay_w:
+                image_box_size = max(64, max_overlay_w - (text_width + gap_x + padding_x * 2))
+
+        content_h = max(text_height, image_box_size if image_box_size > 0 else 0)
+        overlay_w = text_width + padding_x * 2
+        if image_box_size > 0:
+            overlay_w += image_box_size + gap_x
+        overlay_w = min(max_overlay_w, max(240, int(overlay_w)))
+        overlay_h = max(120, int(content_h + padding_y * 2))
+
         img = Image.new("RGBA", (overlay_w, overlay_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        y_cursor = (overlay_h - text_height) // 2
+        text_area_x = padding_x
+        text_area_w = max(1, overlay_w - padding_x * 2)
+        image_box_x = 0
+        image_box_y = 0
+        if image_box_size > 0:
+            text_area_w = max(1, overlay_w - padding_x * 2 - image_box_size - gap_x)
+            image_box_x = overlay_w - padding_x - image_box_size
+            image_box_y = max(0, int((overlay_h - image_box_size) / 2))
+
+        y_cursor = max(0, int((overlay_h - text_height) / 2))
         for idx, line in enumerate(display_lines):
             bbox = draw.textbbox((0, 0), line or " ", font=font, stroke_width=stroke_w)
             line_w = max(1, bbox[2] - bbox[0]) if bbox else max(1, int(draw.textlength(line or " ", font=font)))
-            x = max(padding_x, int((overlay_w - line_w) / 2))
+            x = text_area_x + max(0, int((text_area_w - line_w) / 2))
             draw.text(
                 (x, y_cursor),
                 line,
@@ -2107,6 +2172,21 @@ class ModVideoProcessor:
                 stroke_fill=(0, 0, 0, 255),
             )
             y_cursor += line_heights[idx] + line_spacing
+
+        if overlay_image is not None and image_box_size > 0:
+            try:
+                if hasattr(Image, "Resampling"):
+                    resample_mode = Image.Resampling.LANCZOS
+                else:
+                    resample_mode = Image.LANCZOS
+                fitted = ImageOps.contain(overlay_image, (image_box_size, image_box_size), method=resample_mode)
+                if fitted.mode != "RGBA":
+                    fitted = fitted.convert("RGBA")
+                px = image_box_x + max(0, (image_box_size - fitted.width) // 2)
+                py = image_box_y + max(0, (image_box_size - fitted.height) // 2)
+                img.alpha_composite(fitted, (px, py))
+            except Exception as resize_err:
+                logger.warning("Failed to place overlay image: %s", resize_err)
 
         pos_key = (screen_position or "top").strip().lower()
         y_expr = "80"
@@ -2202,9 +2282,8 @@ class ModVideoProcessor:
                     overlay_path.unlink()
             except Exception:
                 pass
-
     def add_watermark_text(self, input_path: str, output_path: str, text: str, seed: Optional[str] = None, custom_font: Optional[str] = None) -> None:
-        """إضافة Watermark شفاف (اسم القناة) على فيديو الشورتس"""
+        """ط¥ط¶ط§ظپط© Watermark ط´ظپط§ظپ (ط§ط³ظ… ط§ظ„ظ‚ظ†ط§ط©) ط¹ظ„ظ‰ ظپظٹط¯ظٹظˆ ط§ظ„ط´ظˆط±طھط³"""
         is_ar = bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", text or ""))
         use_text_shaping = (os.getenv("FFMPEG_DRAWTEXT_TEXT_SHAPING", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
         
@@ -2251,7 +2330,7 @@ class ModVideoProcessor:
             except Exception:
                 alpha = 0.22
             alpha = max(0.05, min(alpha, 0.9))
-            # تنويع لون اسم القناة لكل فيديو مع الحفاظ على نفس الشفافية
+            # طھظ†ظˆظٹط¹ ظ„ظˆظ† ط§ط³ظ… ط§ظ„ظ‚ظ†ط§ط© ظ„ظƒظ„ ظپظٹط¯ظٹظˆ ظ…ط¹ ط§ظ„ط­ظپط§ط¸ ط¹ظ„ظ‰ ظ†ظپط³ ط§ظ„ط´ظپط§ظپظٹط©
             wm_colors = [
                 "0xFFFFFF",  # white
                 "0x87CEFA",  # light sky blue
@@ -2280,7 +2359,7 @@ class ModVideoProcessor:
                 f"fix_bounds=1"
             )
 
-            # 🔧 استخدام إعدادات وسيط محسّنة
+            # ًں”§ ط§ط³طھط®ط¯ط§ظ… ط¥ط¹ط¯ط§ط¯ط§طھ ظˆط³ظٹط· ظ…ط­ط³ظ‘ظ†ط©
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
             if _is_low_resource_env():
                 base_preset = "ultrafast"
@@ -2338,7 +2417,7 @@ class ModVideoProcessor:
                     pass
 
     def add_simple_intro_outro_effects(self, input_path: str, output_path: str, seed: Optional[str] = None, apply_intro: bool = True, apply_outro: bool = True) -> None:
-        """إضافة تأثيرات ظهور/اختفاء بسيطة للشورتس (بدون انزلاق/اتجاهات)"""
+        """ط¥ط¶ط§ظپط© طھط£ط«ظٹط±ط§طھ ط¸ظ‡ظˆط±/ط§ط®طھظپط§ط، ط¨ط³ظٹط·ط© ظ„ظ„ط´ظˆط±طھط³ (ط¨ط¯ظˆظ† ط§ظ†ط²ظ„ط§ظ‚/ط§طھط¬ط§ظ‡ط§طھ)"""
         try:
             effects_enabled = str(os.getenv("SHORTS_EFFECTS_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
         except Exception:
@@ -2391,8 +2470,8 @@ class ModVideoProcessor:
         outro_types = ["fade", "noise", "blur", "darken", "desat"]
         base_seed = seed or input_path or ""
         
-        # 🔧 إضافة مكون عشوائي إذا كان الـ seed فارغاً أو يساوي مسار الملف فقط
-        # هذا يضمن تأثيرات مختلفة لكل فيديو حتى لو كان نفس الملف الأساسي
+        # ًں”§ ط¥ط¶ط§ظپط© ظ…ظƒظˆظ† ط¹ط´ظˆط§ط¦ظٹ ط¥ط°ط§ ظƒط§ظ† ط§ظ„ظ€ seed ظپط§ط±ط؛ط§ظ‹ ط£ظˆ ظٹط³ط§ظˆظٹ ظ…ط³ط§ط± ط§ظ„ظ…ظ„ظپ ظپظ‚ط·
+        # ظ‡ط°ط§ ظٹط¶ظ…ظ† طھط£ط«ظٹط±ط§طھ ظ…ط®طھظ„ظپط© ظ„ظƒظ„ ظپظٹط¯ظٹظˆ ط­طھظ‰ ظ„ظˆ ظƒط§ظ† ظ†ظپط³ ط§ظ„ظ…ظ„ظپ ط§ظ„ط£ط³ط§ط³ظٹ
         import random
         if not seed or seed == input_path:
             base_seed = f"{base_seed}::{uuid.uuid4().hex}::{random.random()}"
@@ -2448,7 +2527,7 @@ class ModVideoProcessor:
         vf_parts.append("format=yuv420p")
         vf = ",".join(vf_parts) if vf_parts else "null"
 
-        # 🔧 استخدام إعدادات وسيط محسّنة
+        # ًں”§ ط§ط³طھط®ط¯ط§ظ… ط¥ط¹ط¯ط§ط¯ط§طھ ظˆط³ظٹط· ظ…ط­ط³ظ‘ظ†ط©
         ff_threads, base_preset, base_crf = self._shorts_x264_settings()
         if _is_low_resource_env():
             base_preset = "ultrafast"
@@ -2506,7 +2585,7 @@ class ModVideoProcessor:
             raise RuntimeError(stderr_text[-2500:] or f"SimpleEffects FFmpeg exited with code {rc}")
     
     def _get_video_duration(self, video_path: str) -> float:
-        """الحصول على مدة الفيديو"""
+        """ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ظ…ط¯ط© ط§ظ„ظپظٹط¯ظٹظˆ"""
         if not video_path or (not os.path.exists(video_path)) or os.path.getsize(video_path) <= 0:
             raise RuntimeError(f"Failed to get video duration: file missing or empty: {video_path}")
         cmd = [
@@ -2530,7 +2609,7 @@ class ModVideoProcessor:
         _ = self._get_video_duration(video_path)
     
     def _get_video_dimensions(self, video_path: str) -> Tuple[int, int]:
-        """الحصول على أبعاد الفيديو"""
+        """ط§ظ„ط­طµظˆظ„ ط¹ظ„ظ‰ ط£ط¨ط¹ط§ط¯ ط§ظ„ظپظٹط¯ظٹظˆ"""
         cmd = [
             ffprobe_bin(),
             "-v", "error",
@@ -2585,7 +2664,7 @@ class ModVideoProcessor:
             return 30.0
 
     def _has_audio(self, video_path: str) -> bool:
-        """التحقق من وجود مسار صوتي في الفيديو"""
+        """ط§ظ„طھط­ظ‚ظ‚ ظ…ظ† ظˆط¬ظˆط¯ ظ…ط³ط§ط± طµظˆطھظٹ ظپظٹ ط§ظ„ظپظٹط¯ظٹظˆ"""
         try:
             cmd = [
                 ffprobe_bin(),
@@ -2627,8 +2706,8 @@ class ModVideoProcessor:
         crf = max(18, min(28, _env_int("SHORTS_X264_CRF", crf_default)))
 
         if _is_low_resource_env():
-            # 🔧 On Render / low-resource: FORCE lightweight settings
-            # Do NOT read env vars here — they may contain desktop-quality values
+            # ًں”§ On Render / low-resource: FORCE lightweight settings
+            # Do NOT read env vars here â€” they may contain desktop-quality values
             preset = "ultrafast"
             crf = 28
             ff_threads = 1
@@ -2716,7 +2795,7 @@ class ModVideoProcessor:
         return candidates
     
     def _trim_video(self, input_path: str, output_path: str, start: float, end: float, force_encode: bool = False):
-        """قص الفيديو من البداية والنهاية"""
+        """ظ‚طµ ط§ظ„ظپظٹط¯ظٹظˆ ظ…ظ† ط§ظ„ط¨ط¯ط§ظٹط© ظˆط§ظ„ظ†ظ‡ط§ظٹط©"""
         duration = self._get_video_duration(input_path)
         new_duration = duration - start - end
 
@@ -2740,7 +2819,7 @@ class ModVideoProcessor:
         # Ensure temp dir exists right before ffmpeg call
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
-        # 🔧 استخدام _shorts_x264_settings() لاحترام RENDER / LOW_RESOURCE_MODE
+        # ًں”§ ط§ط³طھط®ط¯ط§ظ… _shorts_x264_settings() ظ„ط§ط­طھط±ط§ظ… RENDER / LOW_RESOURCE_MODE
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
         trim_mode = _env_str("FFMPEG_TRIM_MODE", "copy").lower()
         if _env_bool("FFMPEG_LOW_CPU", False) and trim_mode == "encode":
@@ -2771,9 +2850,9 @@ class ModVideoProcessor:
                 ffmpeg_bin(),
                 *_ffmpeg_memory_guard_args(),
                 "-y",
-                "-ss", str(start),  # البداية
+                "-ss", str(start),  # ط§ظ„ط¨ط¯ط§ظٹط©
                 "-i", input_path,
-                "-t", str(new_duration),  # المدة
+                "-t", str(new_duration),  # ط§ظ„ظ…ط¯ط©
                 "-map", "0:v",
                 "-map", "0:a?",
                 "-c:v", "libx264",
@@ -2801,15 +2880,15 @@ class ModVideoProcessor:
         if rc != 0:
             raise RuntimeError(f"Failed to trim video: {_stderr[-500:]}")
         
-        logger.info(f"✅ Video trimmed: {start}s from start, {end}s from end")
+        logger.info(f"âœ… Video trimmed: {start}s from start, {end}s from end")
     
     def _convert_to_shorts(self, input_path: str, output_path: str, orig_width: int, orig_height: int, shorts_format: str = "crop", hflip: bool = False):
-        """تحويل الفيديو لصيغة شورتس (9:16 - 1080x1920)
+        """طھط­ظˆظٹظ„ ط§ظ„ظپظٹط¯ظٹظˆ ظ„طµظٹط؛ط© ط´ظˆط±طھط³ (9:16 - 1080x1920)
 
         shorts_format:
-            - crop: قص/ملء الشاشة (قد يقص أطراف اليمين/اليسار)
-            - fit_blur: عرض كامل + خلفية ضبابية من نفس الفيديو
-            - partial_blur: تكبير متوسط (إظهار جزء أكبر من الأعلى/الأسفل) + خلفية ضبابية
+            - crop: ظ‚طµ/ظ…ظ„ط، ط§ظ„ط´ط§ط´ط© (ظ‚ط¯ ظٹظ‚طµ ط£ط·ط±ط§ظپ ط§ظ„ظٹظ…ظٹظ†/ط§ظ„ظٹط³ط§ط±)
+            - fit_blur: ط¹ط±ط¶ ظƒط§ظ…ظ„ + ط®ظ„ظپظٹط© ط¶ط¨ط§ط¨ظٹط© ظ…ظ† ظ†ظپط³ ط§ظ„ظپظٹط¯ظٹظˆ
+            - partial_blur: طھظƒط¨ظٹط± ظ…طھظˆط³ط· (ط¥ط¸ظ‡ط§ط± ط¬ط²ط، ط£ظƒط¨ط± ظ…ظ† ط§ظ„ط£ط¹ظ„ظ‰/ط§ظ„ط£ط³ظپظ„) + ط®ظ„ظپظٹط© ط¶ط¨ط§ط¨ظٹط©
         """
         if hflip:
             hf_filter = "hflip,"
@@ -2823,9 +2902,9 @@ class ModVideoProcessor:
         ff_threads, x264_preset, x264_crf = self._shorts_x264_settings()
         level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
         
-        # 🔧 تحسين: استخدام CRF منخفض جداً (14) بدلاً من lossless (0)
-        # هذا يقلل حجم الفيديو الوسيط بنسبة 90% مع الحفاظ على جودة شبه lossless
-        # yuv420p متوافق مع جميع المراحل اللاحقة (لا يوجد تحويل مساحة ألوان)
+        # ًں”§ طھط­ط³ظٹظ†: ط§ط³طھط®ط¯ط§ظ… CRF ظ…ظ†ط®ظپط¶ ط¬ط¯ط§ظ‹ (14) ط¨ط¯ظ„ط§ظ‹ ظ…ظ† lossless (0)
+        # ظ‡ط°ط§ ظٹظ‚ظ„ظ„ ط­ط¬ظ… ط§ظ„ظپظٹط¯ظٹظˆ ط§ظ„ظˆط³ظٹط· ط¨ظ†ط³ط¨ط© 90% ظ…ط¹ ط§ظ„ط­ظپط§ط¸ ط¹ظ„ظ‰ ط¬ظˆط¯ط© ط´ط¨ظ‡ lossless
+        # yuv420p ظ…طھظˆط§ظپظ‚ ظ…ط¹ ط¬ظ…ظٹط¹ ط§ظ„ظ…ط±ط§ط­ظ„ ط§ظ„ظ„ط§ط­ظ‚ط© (ظ„ط§ ظٹظˆط¬ط¯ طھط­ظˆظٹظ„ ظ…ط³ط§ط­ط© ط£ظ„ظˆط§ظ†)
         try:
             lossless_intermediate = str(os.getenv("SHORTS_INTERMEDIATE_LOSSLESS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
         except Exception:
@@ -2860,11 +2939,11 @@ class ModVideoProcessor:
         target_width, target_height = _shorts_target_resolution()
         if is_low and (target_width > 720 or target_height > 1280):
             logger.warning(
-                f"⚠️ Shorts target resolution {target_width}x{target_height} is too heavy for low-resource mode; clamping to 720x1280"
+                f"âڑ ï¸ڈ Shorts target resolution {target_width}x{target_height} is too heavy for low-resource mode; clamping to 720x1280"
             )
             target_width, target_height = 720, 1280
         
-        # حساب نسبة العرض للارتفاع
+        # ط­ط³ط§ط¨ ظ†ط³ط¨ط© ط§ظ„ط¹ط±ط¶ ظ„ظ„ط§ط±طھظپط§ط¹
         input_ratio = orig_width / orig_height
         target_ratio = target_width / target_height
         
@@ -2879,7 +2958,7 @@ class ModVideoProcessor:
                 if abs((orig_width / orig_height) - (9.0 / 16.0)) <= 0.02:
                     import shutil
                     shutil.copy2(input_path, output_path)
-                    logger.info(f"✅ Video already 9:16 ({orig_width}x{orig_height}); skipped shorts conversion.")
+                    logger.info(f"âœ… Video already 9:16 ({orig_width}x{orig_height}); skipped shorts conversion.")
                     return
             except Exception:
                 pass
@@ -3129,7 +3208,7 @@ class ModVideoProcessor:
             )
             timeout_s = max(120, int(attempt["timeout"]))
             logger.info(
-                f"🎛️ Shorts conversion attempt {attempt_index}/{len(attempts)} "
+                f"ًںژ›ï¸ڈ Shorts conversion attempt {attempt_index}/{len(attempts)} "
                 f"({attempt['label']}, {attempt['width']}x{attempt['height']}, preset={attempt['preset']}, timeout={timeout_s}s)"
             )
 
@@ -3144,7 +3223,7 @@ class ModVideoProcessor:
                 last_error = stop_reason
                 if stderr_text:
                     last_error = f"{last_error}: {stderr_text}"
-                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} timed out/stalled. {last_error[-1200:]}")
+                logger.warning(f"âڑ ï¸ڈ Shorts conversion attempt {attempt['label']} timed out/stalled. {last_error[-1200:]}")
                 try:
                     if os.path.exists(tmp_out):
                         os.remove(tmp_out)
@@ -3154,7 +3233,7 @@ class ModVideoProcessor:
 
             if returncode != 0:
                 last_error = stderr_text or f"ffmpeg exited with status {returncode}"
-                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} failed. {last_error[-1200:]}")
+                logger.warning(f"âڑ ï¸ڈ Shorts conversion attempt {attempt['label']} failed. {last_error[-1200:]}")
                 try:
                     if os.path.exists(tmp_out):
                         os.remove(tmp_out)
@@ -3166,7 +3245,7 @@ class ModVideoProcessor:
                 self._validate_video_file(str(tmp_out))
             except Exception as e:
                 last_error = f"output invalid: {e}"
-                logger.warning(f"⚠️ Shorts conversion attempt {attempt['label']} produced invalid output. {last_error[-1200:]}")
+                logger.warning(f"âڑ ï¸ڈ Shorts conversion attempt {attempt['label']} produced invalid output. {last_error[-1200:]}")
                 try:
                     if os.path.exists(tmp_out):
                         os.remove(tmp_out)
@@ -3188,13 +3267,13 @@ class ModVideoProcessor:
                     os.remove(str(tmp_out))
                 except Exception:
                     pass
-            logger.info(f"✅ Video converted to shorts format: {attempt['width']}x{attempt['height']}")
+            logger.info(f"âœ… Video converted to shorts format: {attempt['width']}x{attempt['height']}")
             return
         
         raise RuntimeError(f"Failed to convert to shorts after {len(attempts)} attempts: {last_error}")
     
     def _add_cta_text(self, input_path: str, output_path: str, text: str, duration: float, custom_font: Optional[str] = None):
-        """إضافة نص الدعوة في نهاية الفيديو"""
+        """ط¥ط¶ط§ظپط© ظ†طµ ط§ظ„ط¯ط¹ظˆط© ظپظٹ ظ†ظ‡ط§ظٹط© ط§ظ„ظپظٹط¯ظٹظˆ"""
         is_ar = bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", text or ""))
 
         use_text_shaping = (os.getenv("FFMPEG_DRAWTEXT_TEXT_SHAPING", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -3308,23 +3387,23 @@ class ModVideoProcessor:
             shutil.copy2(input_path, output_path)
 
     def _add_cta_text_reliable(self, input_path: str, output_path: str, text: str, duration: float, custom_font: Optional[str] = None):
-        # شريط أسود في المنتصف مع نص + صورة التطبيق - حجم مناسب للمحتوى
+        # ط´ط±ظٹط· ط£ط³ظˆط¯ ظپظٹ ط§ظ„ظ…ظ†طھطµظپ ظ…ط¹ ظ†طµ + طµظˆط±ط© ط§ظ„طھط·ط¨ظٹظ‚ - ط­ط¬ظ… ظ…ظ†ط§ط³ط¨ ظ„ظ„ظ…ط­طھظˆظ‰
         text_start = max(0.0, duration - 2.5)
         try:
             vw, vh = self._get_video_dimensions(input_path)
         except Exception:
             vw, vh = (1080, 1920)
         
-        # 🆕 تصغير الشريط ليناسب المحتوى فقط
-        bar_h = max(180, min(300, int(vh * 0.18)))  # تكبير ضخم للارتفاع (كان 0.14)
-        side_margin = 60  # هامش من الجوانب لعدم الالتصاق بالحواف
+        # ًں†• طھطµط؛ظٹط± ط§ظ„ط´ط±ظٹط· ظ„ظٹظ†ط§ط³ط¨ ط§ظ„ظ…ط­طھظˆظ‰ ظپظ‚ط·
+        bar_h = max(180, min(300, int(vh * 0.18)))  # طھظƒط¨ظٹط± ط¶ط®ظ… ظ„ظ„ط§ط±طھظپط§ط¹ (ظƒط§ظ† 0.14)
+        side_margin = 60  # ظ‡ط§ظ…ط´ ظ…ظ† ط§ظ„ط¬ظˆط§ظ†ط¨ ظ„ط¹ط¯ظ… ط§ظ„ط§ظ„طھطµط§ظ‚ ط¨ط§ظ„ط­ظˆط§ظپ
         margin = 20
         
-        # اختيار الخط وعرض النص
+        # ط§ط®طھظٹط§ط± ط§ظ„ط®ط· ظˆط¹ط±ط¶ ط§ظ„ظ†طµ
         is_ar = bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", text or ""))
         fontfile = self._get_best_font(text, custom_font)
         text_file = self.temp_dir / f"cta_{uuid.uuid4().hex}.txt"
-        # البحث عن صورة التطبيق
+        # ط§ظ„ط¨ط­ط« ط¹ظ† طµظˆط±ط© ط§ظ„طھط·ط¨ظٹظ‚
         def _find_app_photo() -> Optional[str]:
             try:
                 candidates: list[Path] = []
@@ -3358,15 +3437,15 @@ class ModVideoProcessor:
             except Exception:
                 app_photo = None
                 logo_w = logo_h = 0
-        # حساب مساحة النص الفعلية بعد وضع الشعار يميناً
-        # الشعار لن يُكَبَّر أبداً، فقط يُصغَّر إذا تجاوز ارتفاع الشريط
+        # ط­ط³ط§ط¨ ظ…ط³ط§ط­ط© ط§ظ„ظ†طµ ط§ظ„ظپط¹ظ„ظٹط© ط¨ط¹ط¯ ظˆط¶ط¹ ط§ظ„ط´ط¹ط§ط± ظٹظ…ظٹظ†ط§ظ‹
+        # ط§ظ„ط´ط¹ط§ط± ظ„ظ† ظٹظڈظƒظژط¨ظ‘ظژط± ط£ط¨ط¯ط§ظ‹طŒ ظپظ‚ط· ظٹظڈطµط؛ظ‘ظژط± ط¥ط°ط§ طھط¬ط§ظˆط² ط§ط±طھظپط§ط¹ ط§ظ„ط´ط±ظٹط·
         max_logo_h = bar_h - 2 * margin
         scale_factor = 1.0
         if logo_h > 0:
             scale_factor = min(1.0, max_logo_h / float(logo_h))
         logo_w_scaled = int(logo_w * scale_factor)
         text_area_w = vw - (margin + (logo_w_scaled if logo_w_scaled > 0 else 0) + margin + margin)
-        # تجهيز أسطر النص (wrap) بالترتيب المنطقي ثم تشكيل كل سطر (RTL) عند الحاجة
+        # طھط¬ظ‡ظٹط² ط£ط³ط·ط± ط§ظ„ظ†طµ (wrap) ط¨ط§ظ„طھط±طھظٹط¨ ط§ظ„ظ…ظ†ط·ظ‚ظٹ ط«ظ… طھط´ظƒظٹظ„ ظƒظ„ ط³ط·ط± (RTL) ط¹ظ†ط¯ ط§ظ„ط­ط§ط¬ط©
         try:
             from PIL import ImageFont as _ImageFont, ImageDraw as _ImageDraw, Image as _Image
 
@@ -3384,7 +3463,7 @@ class ModVideoProcessor:
                 except Exception:
                     return _ImageFont.load_default()
 
-            fnt = _load_font(75)  # تكبير ضخم (كان 56)
+            fnt = _load_font(75)  # طھظƒط¨ظٹط± ط¶ط®ظ… (ظƒط§ظ† 56)
             tmp_img = _Image.new("RGB", (max(1, text_area_w), max(1, bar_h)))
             tmp_draw = _ImageDraw.Draw(tmp_img)
 
@@ -3414,24 +3493,24 @@ class ModVideoProcessor:
         except Exception:
             display_lines = [text[:100]]
 
-        # كتابة النص لملف (لأغراض التتبع/التوافق)
+        # ظƒطھط§ط¨ط© ط§ظ„ظ†طµ ظ„ظ…ظ„ظپ (ظ„ط£ط؛ط±ط§ط¶ ط§ظ„طھطھط¨ط¹/ط§ظ„طھظˆط§ظپظ‚)
         try:
             with open(text_file, "w", encoding="utf-8") as f:
                 f.write("\n".join(display_lines))
         except Exception:
             pass
-        # هروب المسارات
+        # ظ‡ط±ظˆط¨ ط§ظ„ظ…ط³ط§ط±ط§طھ
         def ffmpeg_escape_path(path_str):
             return str(path_str).replace("\\", "/").replace(":", "\\:")
         text_file_esc = ffmpeg_escape_path(text_file)
         font_esc = ffmpeg_escape_path(fontfile)
         filter_parts = []
-        # 🆕 حساب عرض الشريط بناءً على المحتوى الفعلي (نص + صورة)
+        # ًں†• ط­ط³ط§ط¨ ط¹ط±ط¶ ط§ظ„ط´ط±ظٹط· ط¨ظ†ط§ط،ظ‹ ط¹ظ„ظ‰ ط§ظ„ظ…ط­طھظˆظ‰ ط§ظ„ظپط¹ظ„ظٹ (ظ†طµ + طµظˆط±ط©)
         from PIL import Image, ImageDraw, ImageFont
         
-        # تحميل الخط أولاً لحساب عرض النص
+        # طھط­ظ…ظٹظ„ ط§ظ„ط®ط· ط£ظˆظ„ط§ظ‹ ظ„ط­ط³ط§ط¨ ط¹ط±ط¶ ط§ظ„ظ†طµ
         try:
-            font = ImageFont.truetype(fontfile, 65)  # تكبير ضخم (كان 48)
+            font = ImageFont.truetype(fontfile, 65)  # طھظƒط¨ظٹط± ط¶ط®ظ… (ظƒط§ظ† 48)
         except Exception:
             font = None
             for fp in ["C:/Windows/Fonts/tahoma.ttf", "C:/Windows/Fonts/arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/system/fonts/NotoNaskhArabic-Regular.ttf"]:
@@ -3444,7 +3523,7 @@ class ModVideoProcessor:
             if font is None:
                 font = ImageFont.load_default()
         
-        # حساب عرض النص
+        # ط­ط³ط§ط¨ ط¹ط±ط¶ ط§ظ„ظ†طµ
         tmp_img = Image.new("RGB", (1000, 200))
         tmp_draw = ImageDraw.Draw(tmp_img)
         
@@ -3461,27 +3540,27 @@ class ModVideoProcessor:
             line_width = tmp_draw.textlength(shaped_line, font=font)
             max_text_width = max(max_text_width, line_width)
         
-        # 🆕 عرض الشريط = النص + الشعار + هوامش داخلية
-        icon_size = max(120, min(220, bar_h - 40))  # تكبير ضخم للأيقونة
-        gap = 20  # المسافة بين الأيقونة والنص
-        padding_x = 30  # هامش داخلي للشريط
+        # ًں†• ط¹ط±ط¶ ط§ظ„ط´ط±ظٹط· = ط§ظ„ظ†طµ + ط§ظ„ط´ط¹ط§ط± + ظ‡ظˆط§ظ…ط´ ط¯ط§ط®ظ„ظٹط©
+        icon_size = max(120, min(220, bar_h - 40))  # طھظƒط¨ظٹط± ط¶ط®ظ… ظ„ظ„ط£ظٹظ‚ظˆظ†ط©
+        gap = 20  # ط§ظ„ظ…ط³ط§ظپط© ط¨ظٹظ† ط§ظ„ط£ظٹظ‚ظˆظ†ط© ظˆط§ظ„ظ†طµ
+        padding_x = 30  # ظ‡ط§ظ…ط´ ط¯ط§ط®ظ„ظٹ ظ„ظ„ط´ط±ظٹط·
         
         bar_w = int(max_text_width + icon_size + gap + padding_x * 2)
-        bar_w = max(300, min(bar_w, vw - side_margin * 2))  # حد أقصى وأدنى للعرض
+        bar_w = max(300, min(bar_w, vw - side_margin * 2))  # ط­ط¯ ط£ظ‚طµظ‰ ظˆط£ط¯ظ†ظ‰ ظ„ظ„ط¹ط±ط¶
         
-        # إنشاء صورة الشريط بالحجم المحسوب
+        # ط¥ظ†ط´ط§ط، طµظˆط±ط© ط§ظ„ط´ط±ظٹط· ط¨ط§ظ„ط­ط¬ظ… ط§ظ„ظ…ط­ط³ظˆط¨
         overlay_img = Image.new("RGBA", (bar_w, bar_h), (0, 0, 0, int(0.75 * 255)))
         draw = ImageDraw.Draw(overlay_img)
         
-        # إدراج الشعار حسب اتجاه اللغة:
-        # 🆕 تصحيح: للعربية (RTL): الشعار على اليمين، للإنجليزية (LTR): الشعار على اليسار
+        # ط¥ط¯ط±ط§ط¬ ط§ظ„ط´ط¹ط§ط± ط­ط³ط¨ ط§طھط¬ط§ظ‡ ط§ظ„ظ„ط؛ط©:
+        # ًں†• طھطµط­ظٹط­: ظ„ظ„ط¹ط±ط¨ظٹط© (RTL): ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†طŒ ظ„ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹط© (LTR): ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±
         logo_img = None
         logo_w_final = 0
         logo_h_final = 0
         if app_photo and os.path.exists(app_photo) and logo_w > 0 and logo_h > 0:
             try:
                 logo_img = Image.open(app_photo).convert("RGBA")
-                # تصغير الأيقونة لتناسب الشريط
+                # طھطµط؛ظٹط± ط§ظ„ط£ظٹظ‚ظˆظ†ط© ظ„طھظ†ط§ط³ط¨ ط§ظ„ط´ط±ظٹط·
                 target_size = icon_size
                 if logo_w > logo_h:
                     new_w = target_size
@@ -3492,34 +3571,34 @@ class ModVideoProcessor:
                 logo_img = logo_img.resize((new_w, new_h), Image.LANCZOS)
                 logo_w_final, logo_h_final = logo_img.size
                 
-                # 🆕 تصحيح الموضع:
-                # - للعربية (RTL): الشعار على اليمين من الشريط
-                # - للإنجليزية (LTR): الشعار على اليسار من الشريط
+                # ًں†• طھطµط­ظٹط­ ط§ظ„ظ…ظˆط¶ط¹:
+                # - ظ„ظ„ط¹ط±ط¨ظٹط© (RTL): ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ† ظ…ظ† ط§ظ„ط´ط±ظٹط·
+                # - ظ„ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹط© (LTR): ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط± ظ…ظ† ط§ظ„ط´ط±ظٹط·
                 ly = (bar_h - logo_h_final) // 2
                 if is_ar:
-                    lx = bar_w - logo_w_final - padding_x  # الشعار على اليمين للعربية
+                    lx = bar_w - logo_w_final - padding_x  # ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ† ظ„ظ„ط¹ط±ط¨ظٹط©
                 else:
-                    lx = padding_x  # الشعار على اليسار للإنجليزية
+                    lx = padding_x  # ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط± ظ„ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹط©
                 overlay_img.alpha_composite(logo_img, (lx, ly))
             except Exception:
                 logo_img = None
                 logo_w_final = logo_h_final = 0
-        # 🆕 تحديد مساحة النص حسب اتجاه اللغة وموضع الشعار
+        # ًں†• طھط­ط¯ظٹط¯ ظ…ط³ط§ط­ط© ط§ظ„ظ†طµ ط­ط³ط¨ ط§طھط¬ط§ظ‡ ط§ظ„ظ„ط؛ط© ظˆظ…ظˆط¶ط¹ ط§ظ„ط´ط¹ط§ط±
         if is_ar and logo_w_final > 0:
-            # العربية: الشعار على اليمين، النص على اليسار
+            # ط§ظ„ط¹ط±ط¨ظٹط©: ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†طŒ ط§ظ„ظ†طµ ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±
             text_area_left = padding_x
             text_area_right = bar_w - logo_w_final - gap - padding_x
         elif logo_w_final > 0:
-            # الإنجليزية: الشعار على اليسار، النص على اليمين
+            # ط§ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹط©: ط§ظ„ط´ط¹ط§ط± ط¹ظ„ظ‰ ط§ظ„ظٹط³ط§ط±طŒ ط§ظ„ظ†طµ ط¹ظ„ظ‰ ط§ظ„ظٹظ…ظٹظ†
             text_area_left = logo_w_final + gap + padding_x
             text_area_right = bar_w - padding_x
         else:
-            # لا يوجد شعار
+            # ظ„ط§ ظٹظˆط¬ط¯ ط´ط¹ط§ط±
             text_area_left = padding_x
             text_area_right = bar_w - padding_x
         text_area_w2 = max(1, int(text_area_right - text_area_left))
 
-        # تجهيز أسطر النص
+        # طھط¬ظ‡ظٹط² ط£ط³ط·ط± ط§ظ„ظ†طµ
         spacing = 2
         display_lines = []
         for line in (text or "").split('\n'):
@@ -3533,7 +3612,7 @@ class ModVideoProcessor:
         
         total_h = 0
         line_heights = []
-        for ln in display_lines[:3]:  # حد أقصى 3 أسطر
+        for ln in display_lines[:3]:  # ط­ط¯ ط£ظ‚طµظ‰ 3 ط£ط³ط·ط±
             bb = draw.textbbox((0, 0), ln, font=font)
             lh = (bb[3] - bb[1]) if bb else 0
             line_heights.append(lh)
@@ -3544,31 +3623,31 @@ class ModVideoProcessor:
         for i, ln in enumerate(display_lines[:3]):
             lw = draw.textlength(ln, font=font)
             if is_ar:
-                # محاذاة لليمين للنص العربي
+                # ظ…ط­ط§ط°ط§ط© ظ„ظ„ظٹظ…ظٹظ† ظ„ظ„ظ†طµ ط§ظ„ط¹ط±ط¨ظٹ
                 x = text_area_right - lw
             else:
-                # محاذاة لليسار للنص الإنجليزي
+                # ظ…ط­ط§ط°ط§ط© ظ„ظ„ظٹط³ط§ط± ظ„ظ„ظ†طµ ط§ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹ
                 x = text_area_left
             draw.text((x, y), ln, font=font, fill=(255, 255, 255, 255))
             y += line_heights[i] + spacing
-        # حفظ صورة overlay مؤقتاً
+        # ط­ظپط¸ طµظˆط±ط© overlay ظ…ط¤ظ‚طھط§ظ‹
         overlay_path = self.temp_dir / f"cta_bar_{uuid.uuid4().hex}.png"
         overlay_img.save(overlay_path)
         try:
             ovl_esc = ffmpeg_escape_path(overlay_path)
             overlay_input = str(overlay_path)
-            # 🔧 استخدام إعدادات وسيط محسّنة
+            # ًں”§ ط§ط³طھط®ط¯ط§ظ… ط¥ط¹ط¯ط§ط¯ط§طھ ظˆط³ظٹط· ظ…ط­ط³ظ‘ظ†ط©
             ff_threads, base_preset, base_crf = self._shorts_x264_settings()
             preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
             crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", str(base_crf)) or str(base_crf))
-            # إضافة تأثيري fade-in و fade-out على طبقة الدعوة
+            # ط¥ط¶ط§ظپط© طھط£ط«ظٹط±ظٹ fade-in ظˆ fade-out ط¹ظ„ظ‰ ط·ط¨ظ‚ط© ط§ظ„ط¯ط¹ظˆط©
             video_duration = self._get_video_duration(input_path)
             if not video_duration:
                 video_duration = float(duration or 0.0)
             show_start = max(0.0, float(video_duration) - 2.6)
             show_dur = max(1.2, min(2.6, float(video_duration) - show_start))
             show_end = float(show_start) + float(show_dur)
-            # ✅ تسجيل تفصيلي للتوقيتات المحسوبة
+            # âœ… طھط³ط¬ظٹظ„ طھظپطµظٹظ„ظٹ ظ„ظ„طھظˆظ‚ظٹطھط§طھ ط§ظ„ظ…ط­ط³ظˆط¨ط©
             logger.info(f"[CTA_reliable] video_duration={video_duration:.2f}s show_start={show_start:.2f}s show_end={show_end:.2f}s show_dur={show_dur:.2f}s")
             try:
                 seed_s = f"{input_path}::{output_path}::{text}"
@@ -3606,7 +3685,7 @@ class ModVideoProcessor:
             except Exception:
                 pass
 
-            # حركة y بحسب نوع الدخول/الخروج
+            # ط­ط±ظƒط© y ط¨ط­ط³ط¨ ظ†ظˆط¹ ط§ظ„ط¯ط®ظˆظ„/ط§ظ„ط®ط±ظˆط¬
             y_expr = y_base
             if in_kind in {"slideup", "slidedown"} or out_kind in {"slideup", "slidedown"}:
                 intro_sign = 1 if in_kind == "slideup" else (-1 if in_kind == "slidedown" else 0)
@@ -3617,10 +3696,10 @@ class ModVideoProcessor:
                 out_expr = y_base
                 if out_sign != 0:
                     out_expr = f"{y_base}+(t-{fade_out_start_abs})/{fade_out_dur}*{out_sign*slide_px}"
-                # الخروج له أولوية في النهاية
+                # ط§ظ„ط®ط±ظˆط¬ ظ„ظ‡ ط£ظˆظ„ظˆظٹط© ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©
                 y_expr = f"if(gte(t,{fade_out_start_abs}),{out_expr},{intro_expr})"
 
-            # تأثير pop (تكبير/تصغير خفيف) على طبقة الدعوة
+            # طھط£ط«ظٹط± pop (طھظƒط¨ظٹط±/طھطµط؛ظٹط± ط®ظپظٹظپ) ط¹ظ„ظ‰ ط·ط¨ظ‚ط© ط§ظ„ط¯ط¹ظˆط©
             overlay_scale_filter = ""
             if in_kind == "pop" or out_kind == "pop":
                 intro_scale = "1"
@@ -3893,7 +3972,7 @@ class ModVideoProcessor:
             raise RuntimeError(_stderr[-2500:] if _stderr else "CTA image overlay failed")
 
     def _flip_video(self, input_path: str, output_path: Path) -> None:
-        """قلب الفيديو أفقياً (Mirror)"""
+        """ظ‚ظ„ط¨ ط§ظ„ظپظٹط¯ظٹظˆ ط£ظپظ‚ظٹط§ظ‹ (Mirror)"""
         try:
             ff_threads, preset, crf = self._shorts_x264_settings()
             level = (os.getenv("SHORTS_H264_LEVEL", "5.1") or "5.1").strip() or "5.1"
@@ -3910,7 +3989,7 @@ class ModVideoProcessor:
                 "-level", level,
                 "-pix_fmt", "yuv420p",
                 "-threads", str(ff_threads),
-                "-c:a", "copy", # الحفاظ على الصوت كما هو
+                "-c:a", "copy", # ط§ظ„ط­ظپط§ط¸ ط¹ظ„ظ‰ ط§ظ„طµظˆطھ ظƒظ…ط§ ظ‡ظˆ
                 str(output_path)
             ]
             
@@ -3926,3 +4005,4 @@ class ModVideoProcessor:
         except Exception as e:
             logger.error(f"Error flipping video: {e}")
             raise
+
