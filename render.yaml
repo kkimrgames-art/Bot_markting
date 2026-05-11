@@ -43,3 +43,18 @@ services:
         value: "true"
       - key: DOWNLOADER_WORKER_TIMEOUT
         value: "420"
+      # 🔧 Video quality settings for YouTube shorts
+      - key: SHORTS_INTERMEDIATE_CRF
+        value: "14"
+      - key: SHORTS_X264_CRF
+        value: "23"
+      - key: FFMPEG_X264_CRF
+        value: "23"
+      - key: SHORTS_MIN_BITRATE
+        value: "5M"
+      - key: SHORTS_X264_PRESET
+        value: "superfast"
+      - key: AUDIO_BITRATE
+        value: "192k"
+      - key: AUDIO_SAMPLE_RATE
+        value: "48000"
