@@ -59,6 +59,223 @@ def _bot_state_cache_ttl_sec() -> float:
     return _BOT_STATE_CACHE_TTL_SEC
 
 
+_BOT_STATE_JSON_FIELDS = [
+    "channels",
+    "enabled_channels",
+    "quality",
+    "pip",
+    "schedule",
+    "conditions",
+    "proxy",
+    "agent",
+    "publishing_lock",
+    "ai",
+    "ai_manager",
+    "enhance",
+    "pending_videos",
+    "raw_review",
+    "downloader",
+    "scheduler",
+    "source_rate_limits",
+    "gdrive_poll",
+    "channel_content_mode",
+    "awaiting",
+    "last_output",
+    "telegram_notifications",
+    "facecam_missing_notified",
+]
+
+_CHANNEL_CONFIG_BASE_KEYS = {
+    "channel_id",
+    "channel_name",
+    "youtube_channel_id",
+    "platform",
+    "platform_channel_id",
+    "platform_credentials",
+    "enabled",
+    "content_type",
+    "privacy",
+    "publish_interval",
+    "language",
+    "last_publish",
+    "next_publish",
+    "total_published",
+    "created_at",
+    "intro_videos",
+    "outro_videos",
+    "intro_transition",
+    "outro_transition",
+    "scheduling_settings",
+    "custom_overlay_texts",
+}
+
+_CHANNEL_CONFIG_JSON_FIELDS = [
+    "scheduling_settings",
+    "intro_videos",
+    "outro_videos",
+    "fallback_titles",
+    "fallback_descriptions",
+    "description_sections",
+    "source_fallback_titles",
+    "source_fallback_descriptions",
+    "source_description_sections",
+    "custom_overlay_texts",
+    "extra_data",
+]
+
+_PUBLISH_CHANNEL_EXTRA_KEYS = [
+    "custom_overlay_texts",
+    "fallback_title_texts",
+    "fallback_title_mode",
+    "fallback_description_texts",
+    "fallback_description_mode",
+    "overlay_enabled",
+    "overlay_text",
+    "overlay_font_size",
+    "auto_trim_enabled",
+    "max_download_duration",
+    "auto_trim_target_duration",
+]
+
+_PUBLISH_CHANNEL_BASE_KEYS = {
+    "channel_id",
+    "internal_id",
+    "title",
+    "enabled",
+    "lang",
+    "privacy",
+    "token_path",
+    "content_type",
+    "quality",
+    "overlay_font_path",
+    "overlay_position",
+    "custom_description",
+    "custom_description_mode",
+    "facecam_enabled",
+    "facecam_clip_id",
+    "facecam_position",
+    "facecam_scale",
+    "description_sections",
+    "sections_mode",
+    "added_date",
+    "custom_overlay_texts",
+    "extra_data",
+}
+
+_PUBLISH_CHANNEL_JSON_FIELDS = [
+    "description_sections",
+    "custom_overlay_texts",
+    "extra_data",
+]
+
+
+def _json_dump_if_needed(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _parse_json_fields(payload: Optional[Dict[str, Any]], keys: List[str]) -> Dict[str, Any]:
+    data = dict(payload or {})
+    for key in keys:
+        if key in data and isinstance(data[key], str):
+            try:
+                data[key] = json.loads(data[key])
+            except Exception:
+                pass
+    return data
+
+
+def _merge_extra_data(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = dict(payload or {})
+    extra_data = data.get("extra_data")
+    if isinstance(extra_data, str):
+        try:
+            extra_data = json.loads(extra_data)
+        except Exception:
+            extra_data = None
+    if isinstance(extra_data, dict):
+        for key, value in extra_data.items():
+            if key not in data:
+                data[key] = value
+    return data
+
+
+def _prepare_channel_config_payload(channel: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = dict(channel or {})
+    existing_extra = data.get("extra_data")
+    if isinstance(existing_extra, str):
+        try:
+            existing_extra = json.loads(existing_extra)
+        except Exception:
+            existing_extra = None
+    extra_data = dict(existing_extra or {}) if isinstance(existing_extra, dict) else {}
+
+    payload: Dict[str, Any] = {}
+    for key, value in data.items():
+        if key == "extra_data":
+            continue
+        if key in _CHANNEL_CONFIG_BASE_KEYS:
+            payload[key] = value
+        else:
+            extra_data[key] = value
+
+    if extra_data:
+        payload["extra_data"] = extra_data
+
+    for key in _CHANNEL_CONFIG_JSON_FIELDS:
+        if key in payload:
+            payload[key] = _json_dump_if_needed(payload.get(key))
+
+    return payload
+
+
+def _prepare_publish_channel_payload(channel: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = dict(channel or {})
+    existing_extra = data.get("extra_data")
+    if isinstance(existing_extra, str):
+        try:
+            existing_extra = json.loads(existing_extra)
+        except Exception:
+            existing_extra = None
+    extra_data = dict(existing_extra or {}) if isinstance(existing_extra, dict) else {}
+
+    payload: Dict[str, Any] = {}
+    for key, value in data.items():
+        if key == "extra_data":
+            continue
+        if key in _PUBLISH_CHANNEL_BASE_KEYS:
+            payload[key] = value
+        else:
+            extra_data[key] = value
+
+    for key in _PUBLISH_CHANNEL_EXTRA_KEYS:
+        if key == "custom_overlay_texts":
+            continue
+        if key in data:
+            extra_data[key] = data.get(key)
+
+    if "custom_overlay_texts" not in payload:
+        payload["custom_overlay_texts"] = data.get("custom_overlay_texts") or []
+
+    if extra_data:
+        payload["extra_data"] = extra_data
+
+    for key in _PUBLISH_CHANNEL_JSON_FIELDS:
+        if key in payload:
+            payload[key] = _json_dump_if_needed(payload.get(key))
+
+    return payload
+
+
+def _decode_channel_config_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return _merge_extra_data(_parse_json_fields(payload, _CHANNEL_CONFIG_JSON_FIELDS))
+
+
+def _decode_publish_channel_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return _merge_extra_data(_parse_json_fields(payload, _PUBLISH_CHANNEL_JSON_FIELDS))
+
+
 # ========== Bot State Storage ==========
 
 def save_bot_state(state: Dict[str, Any]) -> bool:
@@ -80,49 +297,34 @@ def save_bot_state(state: Dict[str, Any]) -> bool:
     facecam_clips_by_channel = full_state.get("facecam_clips_by_channel", {}) or {}
     ai_metadata_history = full_state.get("ai_metadata_history", {}) or {}
     
-    # حفظ الحالة الرئيسية - البيانات المهمة فقط
-    # البيانات غير المهمة (awaiting, last_output, telegram_notifications, facecam_missing_notified) تُحفظ محلياً فقط
+    # نحفظ الحقول البسيطة مباشرة، والحقول المركبة المعروفة كـ JSON داخل نفس الصف.
     bot_state_data = {
         "id": "main",
-        **{k: v for k, v in full_state.items() if not isinstance(v, (list, dict)) or k in [
-            # بيانات القنوات (مهمة)
-            "channels",
-            "enabled_channels",
-
-            # إعدادات النشر (مهمة)
-            "quality",
-            "pip",
-            "schedule",
-            "conditions",
-            "proxy",
-
-            # حالة النشر (مهمة)
-            "agent",
-            "publishing_lock",
-            "ai",
-            "ai_manager",
-            "enhance",
-
-            # البيانات غير المهمة تم استبعادها (تُحفظ محلياً فقط):
-            # - awaiting: حالة انتظار المستخدم (مؤقتة)
-            # - last_output: آخر مخرجات (مؤقتة)
-            # - telegram_notifications: إشعارات تيليجرام (مؤقتة)
-            # - facecam_missing_notified: إشعارات FaceCam (مؤقتة)
-            # - enhance, ai, downloader, scheduler: إعدادات محلية
-        ]},
         "updated_at": datetime.now().isoformat()
     }
-    
-    # تحويل القيم غير القابلة للتسلسل
-    for key, value in list(bot_state_data.items()):
-        if isinstance(value, (list, dict)):
-            bot_state_data[key] = json.dumps(value) if not isinstance(value, str) else value
+    excluded_state_keys = {
+        "publish_channels",
+        "published_by_channel",
+        "publishing_inflight",
+        "facecam_clips_by_channel",
+        "ai_metadata_history",
+    }
+
+    for key, value in full_state.items():
+        if key in excluded_state_keys or key in _BOT_STATE_JSON_FIELDS:
+            continue
+        if not isinstance(value, (list, dict)):
+            bot_state_data[key] = value
+
+    for key in _BOT_STATE_JSON_FIELDS:
+        if key in full_state:
+            bot_state_data[key] = _json_dump_if_needed(full_state.get(key))
     
     success = supabase_upsert("bot_state", bot_state_data, "id", lambda _: _save_local(full_state))
     
     # حفظ قنوات النشر
     for ch in publish_channels:
-        ch_data = {
+        ch_data = _prepare_publish_channel_payload({
             "channel_id": ch.get("channel_id"),
             "internal_id": ch.get("internal_id"),
             "title": ch.get("title"),
@@ -140,10 +342,22 @@ def save_bot_state(state: Dict[str, Any]) -> bool:
             "facecam_clip_id": ch.get("facecam_clip_id"),
             "facecam_position": ch.get("facecam_position", "top_right"),
             "facecam_scale": ch.get("facecam_scale"),
-            "description_sections": json.dumps(ch.get("description_sections")) if ch.get("description_sections") else None,
+            "description_sections": ch.get("description_sections"),
             "sections_mode": ch.get("sections_mode", "append"),
             "added_date": ch.get("added_date"),
-        }
+            "custom_overlay_texts": ch.get("custom_overlay_texts") or [],
+            "fallback_title_texts": ch.get("fallback_title_texts"),
+            "fallback_title_mode": ch.get("fallback_title_mode"),
+            "fallback_description_texts": ch.get("fallback_description_texts"),
+            "fallback_description_mode": ch.get("fallback_description_mode"),
+            "overlay_enabled": ch.get("overlay_enabled"),
+            "overlay_text": ch.get("overlay_text"),
+            "overlay_font_size": ch.get("overlay_font_size"),
+            "auto_trim_enabled": ch.get("auto_trim_enabled"),
+            "max_download_duration": ch.get("max_download_duration"),
+            "auto_trim_target_duration": ch.get("auto_trim_target_duration"),
+            "extra_data": ch.get("extra_data"),
+        })
         supabase_upsert("publish_channels", ch_data, "channel_id")
     
     # حفظ الفيديوهات المنشورة
@@ -238,21 +452,12 @@ def load_bot_state() -> Dict[str, Any]:
             if result:
                 state = dict(result)
                 
-                # تحويل JSONB إلى dict
-                for key in ["channels", "enabled_channels", "quality", "pip", "schedule",
-                           "conditions", "proxy", "awaiting", "last_output", "agent",
-                           "publishing_lock", "enhance", "ai", "ai_manager", "downloader", "scheduler",
-                           "telegram_notifications", "facecam_missing_notified"]:
-                    if key in state and isinstance(state[key], str):
-                        try:
-                            state[key] = json.loads(state[key])
-                        except:
-                            pass
+                state = _parse_json_fields(state, _BOT_STATE_JSON_FIELDS)
                 
                 # تحميل قنوات النشر
                 channels = supabase_select("publish_channels")
                 if channels:
-                    state["publish_channels"] = channels
+                    state["publish_channels"] = [_decode_publish_channel_payload(ch) for ch in channels]
                 
                 # تحميل الفيديوهات المنشورة
                 videos = supabase_select("published_videos")
@@ -352,30 +557,7 @@ def save_channel_config(channel: Dict[str, Any]) -> bool:
         except Exception as e:
             logger.error(f"خطأ في حفظ القناة محلياً: {e}")
     
-    # تحويل scheduling_settings إلى JSON string
-    data = dict(channel)
-    if "scheduling_settings" in data and isinstance(data["scheduling_settings"], dict):
-        data["scheduling_settings"] = json.dumps(data["scheduling_settings"])
-    if "intro_videos" in data and isinstance(data["intro_videos"], list):
-        data["intro_videos"] = json.dumps(data["intro_videos"])
-    if "outro_videos" in data and isinstance(data["outro_videos"], list):
-        data["outro_videos"] = json.dumps(data["outro_videos"])
-    if "fallback_titles" in data and isinstance(data["fallback_titles"], list):
-        data["fallback_titles"] = json.dumps(data["fallback_titles"])
-    if "fallback_descriptions" in data and isinstance(data["fallback_descriptions"], list):
-        data["fallback_descriptions"] = json.dumps(data["fallback_descriptions"])
-    if "description_sections" in data and isinstance(data["description_sections"], list):
-        data["description_sections"] = json.dumps(data["description_sections"])
-    if "source_fallback_titles" in data and isinstance(data["source_fallback_titles"], list):
-        data["source_fallback_titles"] = json.dumps(data["source_fallback_titles"])
-    if "source_fallback_descriptions" in data and isinstance(data["source_fallback_descriptions"], list):
-        data["source_fallback_descriptions"] = json.dumps(data["source_fallback_descriptions"])
-    if "source_description_sections" in data and isinstance(data["source_description_sections"], list):
-        data["source_description_sections"] = json.dumps(data["source_description_sections"])
-    
-    # Supabase schema doesn't have custom_overlay_texts, so drop it before upsert
-    data.pop("custom_overlay_texts", None)
-
+    data = _prepare_channel_config_payload(channel)
     return supabase_upsert("channel_configs", data, "channel_id", _save_local)
 
 
@@ -395,17 +577,7 @@ def load_channel_config(channel_id: str) -> Optional[Dict[str, Any]]:
     result = supabase_select_one("channel_configs", "channel_id", channel_id, _load_local)
     
     if result:
-        # تحويل JSON strings إلى dict/list
-        for key in ["scheduling_settings", "intro_videos", "outro_videos",
-                     "fallback_titles", "fallback_descriptions", "description_sections",
-                     "source_fallback_titles", "source_fallback_descriptions",
-                     "source_description_sections", "custom_overlay_texts"]:
-            if key in result and isinstance(result[key], str):
-                try:
-                    result[key] = json.loads(result[key])
-                except:
-                    pass
-    
+        return _decode_channel_config_payload(result)
     return result
 
 
@@ -433,12 +605,9 @@ def list_channel_configs(enabled_only: bool = False) -> List[Dict[str, Any]]:
     
     if result:
         for ch in result:
-            for key in ["scheduling_settings", "intro_videos", "outro_videos"]:
-                if key in ch and isinstance(ch[key], str):
-                    try:
-                        ch[key] = json.loads(ch[key])
-                    except:
-                        pass
+            decoded = _decode_channel_config_payload(ch)
+            ch.clear()
+            ch.update(decoded)
     
     return result or []
 

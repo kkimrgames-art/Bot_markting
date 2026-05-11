@@ -78,10 +78,6 @@ def _sanitize_table_payload(table: str, data: Optional[Dict]) -> Dict:
     """Sanitize payloads for known table/schema mismatches before remote sync."""
     payload = dict(data or {})
 
-    if table == "channel_configs":
-        # This field is intentionally kept in local channel state only.
-        payload.pop("custom_overlay_texts", None)
-
     return payload
 
 
