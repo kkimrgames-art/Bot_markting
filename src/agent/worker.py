@@ -6,6 +6,7 @@ import os
 import multiprocessing
 import signal
 from typing import Optional
+import json
 
 from src.agent.job_queue import JobQueue
 from src.agent.auto_mod_fetcher import AutoModFetcher, get_instance_id
@@ -90,9 +91,11 @@ class JobWorker:
                 "chat_id": admin_chat_id,
                 "text": text,
             }
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers = {"Content-Type": "application/json; charset=utf-8"}
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload) as resp:
+                async with session.post(url, data=data, headers=headers) as resp:
                     if resp.status != 200:
                         body = await resp.text()
                         logger.warning("Worker notification failed (%s): %s", resp.status, body[:200])

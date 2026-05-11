@@ -4,6 +4,7 @@ import logging
 import os
 import uuid
 from typing import Any, Dict
+import json
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -69,7 +70,9 @@ async def _send_link_review_fallback(
             "reply_markup": keyboard.to_dict(),
         }
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            async with session.post(url, json=payload) as resp:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers = {"Content-Type": "application/json; charset=utf-8"}
+            async with session.post(url, data=data, headers=headers) as resp:
                 if resp.status == 200:
                     return True
                 body = await resp.text()
