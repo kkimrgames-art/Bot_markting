@@ -7,6 +7,7 @@ import os
 import time
 import asyncio
 import logging
+import json
 from typing import Dict, Optional
 from datetime import datetime, timezone
 
@@ -145,8 +146,10 @@ class AlertSystem:
                     "text": message,
                     "parse_mode": "Markdown",
                 }
+                data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                headers = {"Content-Type": "application/json; charset=utf-8"}
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    async with session.post(url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                         if resp.status == 200:
                             return True
                         else:
