@@ -8364,11 +8364,18 @@ class AutoModFetcher:
                                             )
 
                                             try:
+                                                def _is_low_resource_mode() -> bool:
+                                                    try:
+                                                        return (os.getenv("LOW_RESOURCE_MODE") == "1") or (os.getenv("FFMPEG_LOW_CPU") == "1")
+                                                    except Exception:
+                                                        return False
+
+                                                default_timeout = "150" if _is_low_resource_mode() else "90"
                                                 try:
-                                                    overlay_timeout_s = int(float((os.getenv("AUTO_MOD_CUSTOM_OVERLAY_TIMEOUT_SECONDS", "90") or "90").strip()))
+                                                    overlay_timeout_s = int(float((os.getenv("AUTO_MOD_CUSTOM_OVERLAY_TIMEOUT_SECONDS", default_timeout) or default_timeout).strip()))
                                                 except Exception:
-                                                    overlay_timeout_s = 90
-                                                overlay_timeout_s = max(20, min(240, overlay_timeout_s))
+                                                    overlay_timeout_s = int(float(default_timeout))
+                                                overlay_timeout_s = max(30, min(240, overlay_timeout_s))
 
                                                 await asyncio.wait_for(loop.run_in_executor(None, _ov_func), timeout=float(overlay_timeout_s))
                                                 if ResilientFS.exists(_ov_out):
