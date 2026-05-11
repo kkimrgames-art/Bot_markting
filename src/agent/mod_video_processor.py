@@ -1674,6 +1674,136 @@ class ModVideoProcessor:
         """إضافة نص في أعلى الفيديو طوال الوقت"""
         is_ar = bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", text or ""))
         use_text_shaping = (os.getenv("FFMPEG_DRAWTEXT_TEXT_SHAPING", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+
+        # Arabic (especially mixed Arabic/Latin) is frequently rendered incorrectly by FFmpeg drawtext.
+        # Use a PIL-rendered RGBA overlay for Arabic to guarantee correct shaping.
+        use_image_overlay_for_ar = (os.getenv("ARABIC_OVERLAY_USE_IMAGE", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
+        if is_ar and use_image_overlay_for_ar:
+            from PIL import Image, ImageDraw, ImageFont
+
+            def _shape_line(value: str) -> str:
+                if HAS_ARABIC_SUPPORT:
+                    try:
+                        return get_display(arabic_reshaper.reshape(value))
+                    except Exception:
+                        return value
+                return value
+
+            fontfile = self._get_best_font(text, custom_font)
+            try:
+                font = ImageFont.truetype(str(fontfile), int(top_text_size))
+            except Exception:
+                font = ImageFont.load_default()
+
+            # Prepare lines + shaping
+            raw_lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+            if not raw_lines:
+                raw_lines = [text or ""]
+            display_lines = [_shape_line(ln) for ln in raw_lines[:4]]
+
+            padding_x = 30
+            padding_y = 18
+            stroke_w = 4
+            line_spacing = 10
+            measure = ImageDraw.Draw(Image.new("RGBA", (8, 8), (0, 0, 0, 0)))
+
+            max_w = 1
+            total_h = 0
+            heights: list[int] = []
+            for ln in display_lines:
+                bbox = measure.textbbox((0, 0), ln or " ", font=font, stroke_width=stroke_w)
+                line_w = max(1, (bbox[2] - bbox[0]) if bbox else int(measure.textlength(ln or " ", font=font)))
+                line_h = max(int(top_text_size), (bbox[3] - bbox[1]) if bbox else int(top_text_size))
+                max_w = max(max_w, line_w)
+                total_h += line_h
+                heights.append(line_h)
+            if len(display_lines) > 1:
+                total_h += line_spacing * (len(display_lines) - 1)
+
+            box_w = int(max_w + padding_x * 2)
+            box_h = int(total_h + padding_y * 2)
+
+            img = Image.new("RGBA", (box_w, box_h), (0, 0, 0, int(0.60 * 255)))
+            draw = ImageDraw.Draw(img)
+
+            y = padding_y
+            for i, ln in enumerate(display_lines):
+                bbox = draw.textbbox((0, 0), ln or " ", font=font, stroke_width=stroke_w)
+                line_w = max(1, (bbox[2] - bbox[0]) if bbox else int(draw.textlength(ln or " ", font=font)))
+                x = padding_x + max(0, int((max_w - line_w) / 2))
+                draw.text(
+                    (x, y),
+                    ln,
+                    font=font,
+                    fill=(255, 255, 255, 255),
+                    stroke_width=stroke_w,
+                    stroke_fill=(0, 0, 0, 255),
+                )
+                y += heights[i] + line_spacing
+
+            overlay_path = self.temp_dir / f"top_overlay_{uuid.uuid4().hex}.png"
+            img.save(overlay_path)
+
+            # 🔧 Quality fix: use CRF 14 + superfast for intermediates to prevent generation loss
+            ff_threads, base_preset, _ = self._shorts_x264_settings()
+            if _is_low_resource_env():
+                preset = "superfast"
+                crf = 14
+            else:
+                preset = str(os.getenv("SHORTS_INTERMEDIATE_PRESET", base_preset) or base_preset).strip() or base_preset
+                crf = int(os.getenv("SHORTS_INTERMEDIATE_CRF", "14") or "14")
+            level = (os.getenv("SHORTS_H264_LEVEL", "4.2" if _is_low_resource_env() else "5.1") or "5.1").strip() or "5.1"
+            fps = self._get_video_fps(input_path)
+            if not fps or fps <= 0:
+                fps = 30.0
+
+            video_extra_args = []
+            if _is_low_resource_env():
+                video_extra_args.extend(["-bf", "0"])
+
+            filter_complex = f"[1:v]format=rgba,setpts=PTS-STARTPTS[ovl];[0:v][ovl]overlay=x=(W-w)/2:y={int(top_text_y)}:shortest=1[vout]"
+            cmd = [
+                ffmpeg_bin(),
+                "-y",
+                *_ffmpeg_memory_guard_args(),
+                "-i", input_path,
+                "-loop", "1", "-i", str(overlay_path),
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-preset", preset,
+                "-crf", str(crf),
+                "-profile:v", "high",
+                "-level", level,
+                "-pix_fmt", "yuv420p",
+                "-vsync", "cfr",
+                "-r", f"{fps:.6f}",
+                "-threads", str(ff_threads),
+                *video_extra_args,
+                "-c:a", "copy",
+                str(output_path),
+            ]
+
+            try:
+                _ovl_timeout = self._resolve_ffmpeg_timeout(
+                    input_path, "FFMPEG_OVERLAY_TIMEOUT_SECONDS", 180, 300, 6.0, 5.0, extra_seconds=60,
+                )
+                rc, stderr_text = _run_ffmpeg_with_idle_timeout(
+                    cmd, timeout_s=_ovl_timeout, idle_timeout_s=90, label="TopOverlayImage"
+                )
+                if rc != 0:
+                    raise RuntimeError((stderr_text or "")[-2500:] or "Top overlay image failed")
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    raise RuntimeError("Top overlay output file missing or empty")
+                logger.info("✅ Top overlay text added to video (Arabic image overlay)")
+                return
+            finally:
+                try:
+                    if overlay_path.exists():
+                        overlay_path.unlink()
+                except Exception:
+                    pass
         
         if is_ar and use_text_shaping:
             display_text = text

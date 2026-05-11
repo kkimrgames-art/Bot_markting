@@ -689,7 +689,8 @@ def render_with_pip(
             
             tf_esc = _ffmpeg_escape_path(text_file)
             font_path = _pick_best_font(shaped, overlay_font, cfg)
-            draw = f"textfile='{tf_esc}':fontsize={f_size}:fontcolor=white:borderw=2:bordercolor=black:box=1:boxcolor=black@0.4:x={x_ex}:y={y_ex}"
+            shaping_opt = ":text_shaping=1" if _is_arabic_text(overlay_text) else ""
+            draw = f"textfile='{tf_esc}'{shaping_opt}:fontsize={f_size}:fontcolor=white:borderw=2:bordercolor=black:box=1:boxcolor=black@0.4:x={x_ex}:y={y_ex}"
             if font_path:
                 draw += f":fontfile='{_ffmpeg_escape_path(font_path)}'"
             chains.append(f"{current_v}drawtext={draw}[vbase]")
@@ -743,7 +744,8 @@ def render_with_pip(
 
             tf_esc = _ffmpeg_escape_path(wm_file)
             font_path = _pick_best_font(wm, watermark_font or overlay_font, cfg)
-            draw = f"textfile='{tf_esc}':fontsize=54:fontcolor={wm_color}@{alpha}:borderw=2:bordercolor=black@{min(0.45, alpha + 0.18)}:x={x_ex}:y={y_ex}"
+            shaping_opt = ":text_shaping=1" if _is_arabic_text(watermark_text) else ""
+            draw = f"textfile='{tf_esc}'{shaping_opt}:fontsize=54:fontcolor={wm_color}@{alpha}:borderw=2:bordercolor=black@{min(0.45, alpha + 0.18)}:x={x_ex}:y={y_ex}"
             if font_path:
                 draw += f":fontfile='{_ffmpeg_escape_path(font_path)}'"
             chains.append(f"{current_v}drawtext={draw}[vbase]")
