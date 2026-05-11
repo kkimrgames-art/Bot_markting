@@ -1,4 +1,4 @@
-﻿"""
+"""
 معالجات نظام الجلب التلقائي للمودات - واجهة تيليجرام
 نظام إدارة المصادر والجدولة والحالة عبر بوت تيليجرام
 """
@@ -2455,6 +2455,15 @@ async def edit_source_overlay_mode(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    overlay = settings.get("shorts_overlay") or {}
+    texts = _split_overlay_texts("\n".join(str(x) for x in (overlay.get("texts") or [])))
+    if mode == "random" and len(texts) < 2:
+        await query.answer("⚠️ الاختيار العشوائي يحتاج نصين مختلفين على الأقل. أضف نصًا آخر أولًا.", show_alert=True)
+        return await _show_overlay_editor(update, context)
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"selection_mode": mode}})
     await query.answer("✅ تم تحديث طريقة الاختيار" if success else "❌ تعذر التحديث", show_alert=False)
     return await _show_overlay_editor(update, context)
@@ -2718,6 +2727,15 @@ async def edit_source_description_mode(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    desc = settings.get("extra_description") or {}
+    texts = _split_description_texts("\n---\n".join(str(x) for x in (desc.get("texts") or [])))
+    if mode == "random" and len(texts) < 2:
+        await query.answer("⚠️ الاختيار العشوائي يحتاج وصفين مختلفين على الأقل. أضف وصفًا آخر أولًا.", show_alert=True)
+        return await _show_description_editor(update, context)
     success = await _update_edit_source_settings(context, {"extra_description": {"selection_mode": mode}})
     await query.answer("✅ تم تحديث طريقة الاختيار" if success else "❌ تعذر التحديث", show_alert=False)
     return await _show_description_editor(update, context)
@@ -3280,6 +3298,11 @@ async def add_source_overlay_mode(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
+    overlay = (_draft_source_settings(context).get("shorts_overlay") or {})
+    texts = _split_overlay_texts("\n".join(str(x) for x in (overlay.get("texts") or [])))
+    if mode == "random" and len(texts) < 2:
+        await query.answer("⚠️ الاختيار العشوائي يحتاج نصين مختلفين على الأقل. أرسل نصًا آخر في سطر جديد.", show_alert=True)
+        return await _show_add_overlay_mode_picker(update, context, notice="⚠️ أضف نصين على الأقل لاستخدام الاختيار العشوائي.")
     _update_draft_source_settings(context, {"shorts_overlay": {"selection_mode": mode}})
 
     text = "⏱ <b>اختر توقيت ظهور النص داخل الفيديو:</b>"
@@ -3400,6 +3423,20 @@ async def add_source_description_mode(update: Update, context: ContextTypes.DEFA
     query = update.callback_query
     await _safe_answer(query)
     mode = query.data.split(":", 1)[1]
+    desc = (_draft_source_settings(context).get("extra_description") or {})
+    texts = _split_description_texts("\n---\n".join(str(x) for x in (desc.get("texts") or [])))
+    if mode == "random" and len(texts) < 2:
+        await query.answer("⚠️ الاختيار العشوائي يحتاج وصفين مختلفين على الأقل. أضف وصفًا آخر أولًا.", show_alert=True)
+        keyboard = [
+            [InlineKeyboardButton("ثابت", callback_data="am_src_desc_mode:fixed")],
+            [InlineKeyboardButton("عشوائي", callback_data="am_src_desc_mode:random")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
+        ]
+        await query.edit_message_text(
+            "⚠️ أضف وصفين على الأقل لاستخدام الاختيار العشوائي.\n\nاختر طريقة الاختيار:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return AM_ADD_SOURCE_CUSTOMIZE
     _update_draft_source_settings(context, {"extra_description": {"selection_mode": mode}})
     text = "📌 <b>أين تريد دمج النص الإضافي داخل الوصف النهائي؟</b>"
     keyboard = [

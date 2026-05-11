@@ -726,6 +726,10 @@ async def set_fallback_titles_mode(update: Update, context: ContextTypes.DEFAULT
         await query.answer("❌ القناة غير موجودة", show_alert=True)
         return
     extra = getattr(channel, "extra_data", {}) or {}
+    titles = _split_multiline_texts("\n".join(str(x) for x in (extra.get("fallback_title_texts") or [])))
+    if mode == "random" and len(titles) < 2:
+        await query.answer("⚠️ النمط العشوائي يحتاج عنوانين مختلفين على الأقل. أضف عنوانًا آخر أولًا.", show_alert=True)
+        return await edit_fallback_titles(update, context)
     extra["fallback_title_mode"] = mode
     manager.update_channel(channel_id, extra_data=extra)
     await edit_fallback_titles(update, context)
@@ -842,6 +846,10 @@ async def set_fallback_descriptions_mode(update: Update, context: ContextTypes.D
         await query.answer("❌ القناة غير موجودة", show_alert=True)
         return
     extra = getattr(channel, "extra_data", {}) or {}
+    descriptions = _split_multiline_texts("\n---\n".join(str(x) for x in (extra.get("fallback_description_texts") or [])), allow_blocks=True)
+    if mode == "random" and len(descriptions) < 2:
+        await query.answer("⚠️ النمط العشوائي يحتاج وصفين مختلفين على الأقل. أضف وصفًا آخر أولًا.", show_alert=True)
+        return await edit_fallback_descriptions(update, context)
     extra["fallback_description_mode"] = mode
     manager.update_channel(channel_id, extra_data=extra)
     await edit_fallback_descriptions(update, context)

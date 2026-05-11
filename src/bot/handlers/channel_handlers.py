@@ -636,6 +636,16 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _cot = getattr(channel, "custom_overlay_texts", None) or []
     custom_overlay_info = f"✅ {len(_cot)} نص" if _cot else "❌ غير مفعل"
 
+    fallback_titles = extra.get("fallback_title_texts") or []
+    fallback_descriptions = extra.get("fallback_description_texts") or []
+    fallback_title_count = len(fallback_titles) if isinstance(fallback_titles, list) else 0
+    fallback_desc_count = len(fallback_descriptions) if isinstance(fallback_descriptions, list) else 0
+    fallback_title_mode = (extra.get("fallback_title_mode") or "fixed").strip().lower()
+    fallback_desc_mode = (extra.get("fallback_description_mode") or "fixed").strip().lower()
+    fallback_mode_labels = {"fixed": "ثابت", "random": "عشوائي"}
+    fallback_title_info = f"✅ {fallback_title_count} | {fallback_mode_labels.get(fallback_title_mode, fallback_title_mode)}" if fallback_title_count else "❌ غير محدد"
+    fallback_desc_info = f"✅ {fallback_desc_count} | {fallback_mode_labels.get(fallback_desc_mode, fallback_desc_mode)}" if fallback_desc_count else "❌ غير محدد"
+
     # 🔐 حالة المصادقة (OAuth)
     auth_status = "⌛ جاري الفحص..."
     auth_icon = "❓"
@@ -691,6 +701,8 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 <b>كاميرا الوجه:</b> {facecam}\n"
         f"🅰️ <b>نص التعليق:</b> {overlay}\n"
         f"✏️ <b>نص مخصص:</b> {custom_overlay_info}\n"
+        f"🏷️ <b>عناوين بديلة عند فشل AI:</b> {fallback_title_info}\n"
+        f"📝 <b>أوصاف بديلة عند فشل AI:</b> {fallback_desc_info}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 <b>ID الداخلي:</b> <code>{channel.channel_id}</code>"
     )
@@ -722,7 +734,10 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}"),
-            InlineKeyboardButton("🏷️ بدائل العنوان", callback_data=f"edit_fallback_titles:{channel_id}")
+            InlineKeyboardButton("🏷️ عناوين AI البديلة", callback_data=f"edit_fallback_titles:{channel_id}")
+        ],
+        [
+            InlineKeyboardButton("📝 أوصاف AI البديلة", callback_data=f"edit_fallback_descs:{channel_id}")
         ]
     ]
 

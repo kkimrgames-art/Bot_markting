@@ -776,6 +776,25 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     settings = parse_source_settings(raw_settings)
     normalized = dict(settings)
 
+    def _split_env_fallback_texts(raw: str, allow_blocks: bool = False) -> List[str]:
+        raw = str(raw or "").strip()
+        if not raw:
+            return []
+        try:
+            if raw.startswith("["):
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    items = [str(x).strip() for x in parsed if str(x).strip()]
+                    if items:
+                        return items
+        except Exception:
+            pass
+        if "|" in raw:
+            parts = [p.strip() for p in raw.split("|") if p.strip()]
+            if parts:
+                return parts
+        return _split_configured_texts(raw, allow_blocks=allow_blocks)
+
     try:
         fetch_sources = normalized.get("fetch_sources")
         if isinstance(fetch_sources, dict):
@@ -998,6 +1017,16 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
             break
     if title_fallback_raw is None:
         title_fallback_raw = {}
+
+    if not title_fallback_raw.get("enabled"):
+        env_titles = os.getenv("AUTO_MOD_FALLBACK_TITLES")
+        if env_titles:
+            env_texts = _split_env_fallback_texts(env_titles, allow_blocks=False)
+            if env_texts:
+                env_mode = (os.getenv("AUTO_MOD_FALLBACK_TITLES_MODE") or "").strip().lower()
+                if env_mode not in {"fixed", "random"}:
+                    env_mode = "random" if len(env_texts) > 1 else "fixed"
+                title_fallback_raw = {"enabled": True, "texts": env_texts, "selection_mode": env_mode}
     title_fallback_texts = _split_configured_texts(title_fallback_raw.get("texts"))
     title_fallback_mode = str(title_fallback_raw.get("selection_mode") or "fixed").strip().lower()
     if title_fallback_mode not in {"fixed", "random"}:
@@ -1014,6 +1043,16 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
             break
     if desc_fallback_raw is None:
         desc_fallback_raw = {}
+
+    if not desc_fallback_raw.get("enabled"):
+        env_desc = os.getenv("AUTO_MOD_FALLBACK_DESCRIPTIONS")
+        if env_desc:
+            env_texts = _split_env_fallback_texts(env_desc, allow_blocks=True)
+            if env_texts:
+                env_mode = (os.getenv("AUTO_MOD_FALLBACK_DESCRIPTIONS_MODE") or "").strip().lower()
+                if env_mode not in {"fixed", "random"}:
+                    env_mode = "random" if len(env_texts) > 1 else "fixed"
+                desc_fallback_raw = {"enabled": True, "texts": env_texts, "selection_mode": env_mode}
     desc_fallback_texts = _split_configured_texts(desc_fallback_raw.get("texts"), allow_blocks=True)
     desc_fallback_mode = str(desc_fallback_raw.get("selection_mode") or "fixed").strip().lower()
     if desc_fallback_mode not in {"fixed", "random"}:
@@ -1618,7 +1657,6 @@ def _join_hashtags(tags: List[str], max_chars: int) -> str:
 
 def _build_upload_metadata(
     ai_meta: Dict[str, Any],
-    *,
     channel_key: str,
     source_title: str,
     source_name: str,
@@ -1830,6 +1868,15 @@ def _build_upload_metadata(
         if not final_title:
             final_title = "فيديو قصير جديد" if str(target_lang or "").lower().startswith("ar") else "New short video"
         final_title = final_title[:95].rstrip(" -|:,.،؛")
+
+        if fallback_title_text:
+            try:
+                clean_title = _collapse(_strip_hashtags(final_title))
+                clean_desc = _collapse(_strip_hashtags(merged_description))
+                if (not clean_title) or _looks_like_generic_media_title(clean_title, source_context) or (clean_title and clean_desc and clean_title == clean_desc):
+                    final_title = _strip_hashtags(fallback_title_text)[:95].rstrip(" -|:,.،؛")
+            except Exception:
+                pass
 
         description_plain = _strip_hashtags(merged_description)
         if weak_source_metadata and fallback_description_text:
