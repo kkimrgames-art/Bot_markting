@@ -559,8 +559,9 @@ def render_with_pip(
     fps = int(fps_val) if fps_val else None
     
     is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1"
-    default_crf_val = "28" if is_low_res else "18"
-    default_preset_val = "ultrafast" if is_low_res else "veryfast"
+    # 🔧 Quality fix: Render uses CRF 23 + superfast for far better quality than 28 + ultrafast
+    default_crf_val = "23" if is_low_res else "18"
+    default_preset_val = "superfast" if is_low_res else "veryfast"
 
     try:
         default_crf = int(os.getenv("SHORTS_RENDER_CRF", os.getenv("SHORTS_X264_CRF", default_crf_val)) or default_crf_val)
@@ -877,6 +878,22 @@ def render_with_pip(
     except Exception:
         audio_rate = "48000"
 
+    # 🔧 YouTube quality: tune=film for visual content, bitrate controls for clean re-encode
+    is_low_res = os.getenv("LOW_RESOURCE_MODE") == "1" or os.getenv("FFMPEG_LOW_CPU") == "1"
+    min_rate = "5M" if is_low_res else "8M"
+    max_rate = "10M" if is_low_res else "16M"
+    buf_size = "15M" if is_low_res else "24M"
+    try:
+        if q.get("min_bitrate"):
+            min_rate = str(q.get("min_bitrate"))
+            import re as _re
+            num = float(_re.sub(r'[^0-9.]', '', min_rate))
+            unit = _re.sub(r'[0-9.]', '', min_rate).lower() or "m"
+            max_rate = f"{num * 2:.0f}{unit}"
+            buf_size = f"{num * 3:.0f}{unit}"
+    except Exception:
+        pass
+
     cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, "-threads", str(ffmpeg_threads)] + maps + [
         "-c:v", "libx264",
         "-preset", preset,
@@ -887,6 +904,10 @@ def render_with_pip(
         "-keyint_min", str(max(1, gop // 2)),
         "-sc_threshold", "0",
         "-pix_fmt", "yuv420p",
+        "-tune", "film",
+        "-b:v", min_rate,
+        "-maxrate", max_rate,
+        "-bufsize", buf_size,
         "-c:a", "aac",
         "-b:a", audio_bitrate,
         "-ar", audio_rate,
