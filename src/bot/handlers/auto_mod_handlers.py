@@ -623,6 +623,26 @@ def _short_desc_status(settings: Dict[str, Any]) -> str:
     return f"✅ {len(texts)} نص / {_mode_label(desc.get('selection_mode'))}"
 
 
+def _fallback_title_status(settings: Dict[str, Any]) -> str:
+    cfg = (settings or {}).get("fallback_title") or {}
+    texts = cfg.get("texts") or []
+    if not texts:
+        return "❌ بلا عناوين"
+    if not cfg.get("enabled"):
+        return f"⏸ {len(texts)} عنوان"
+    return f"✅ {len(texts)} عنوان / {_mode_label(cfg.get('selection_mode'))}"
+
+
+def _fallback_desc_status(settings: Dict[str, Any]) -> str:
+    cfg = (settings or {}).get("fallback_description") or {}
+    texts = cfg.get("texts") or []
+    if not texts:
+        return "❌ بلا أوصاف"
+    if not cfg.get("enabled"):
+        return f"⏸ {len(texts)} وصف"
+    return f"✅ {len(texts)} وصف / {_mode_label(cfg.get('selection_mode'))}"
+
+
 def _overlay_details(settings: Dict[str, Any]) -> str:
     overlay = (settings or {}).get("shorts_overlay") or {}
     texts = overlay.get("texts") or []
@@ -1539,6 +1559,8 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     fc_label = _facecam_status(settings)
     overlay_status = _short_overlay_status(settings)
     desc_status = _short_desc_status(settings)
+    fb_title_status = _fallback_title_status(settings)
+    fb_desc_status = _fallback_desc_status(settings)
     raw_review_status = _raw_review_status(settings)
     tail_trim_status = _tail_trim_status(settings)
     intro_effect_status = _video_effect_status(settings, "intro")
@@ -1573,6 +1595,8 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton(f"🎬 فيس كام: {fc_label}", callback_data="am_edit_fc_start")],
         [InlineKeyboardButton(f"📝 إدارة نص الشورتس: {overlay_status}", callback_data="am_edit_ov_menu")],
         [InlineKeyboardButton(f"📄 إدارة نص الوصف: {desc_status}", callback_data="am_edit_desc_menu")],
+        [InlineKeyboardButton(f"🏷️ عناوين بديلة: {fb_title_status}", callback_data="am_edit_fb_title_menu")],
+        [InlineKeyboardButton(f"📝 أوصاف بديلة: {fb_desc_status}", callback_data="am_edit_fb_desc_menu")],
         [InlineKeyboardButton(f"↔️ قلب الفيديو: {hflip_status}", callback_data="am_edit_hflip_menu")],
         [InlineKeyboardButton(f"✂️ قص النهاية: {tail_trim_status}", callback_data="am_edit_trim_menu")],
         [InlineKeyboardButton(f"✨ تأثير البداية: {intro_effect_status}", callback_data="am_edit_fx_menu:intro")],
@@ -1587,6 +1611,224 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_EDIT_SOURCE_CHANNEL
+
+
+async def _show_fallback_title_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    cfg = settings.get("fallback_title") or {}
+    texts = list(cfg.get("texts") or [])
+    enabled = bool(cfg.get("enabled"))
+    mode = str(cfg.get("selection_mode") or "fixed").strip().lower() or "fixed"
+    preview = "\n".join(f"{i+1}. {str(t)[:80]}" for i, t in enumerate(texts[:4])) or "(لا توجد عناوين)"
+    text = (
+        "🏷️ <b>العناوين البديلة للمصدر</b>\n\n"
+        f"الحالة: <code>{'✅ مفعل' if enabled else '❌ معطل'}</code>\n"
+        f"العدد: <code>{len(texts)}</code>\n"
+        f"النمط: <code>{html.escape(_mode_label(mode))}</code>\n\n"
+        "تُستخدم عندما تكون بيانات المصدر ضعيفة أو عند فشل توليد العنوان/الوصف.\n\n"
+        f"<b>معاينة:</b>\n<code>{html.escape(preview)}</code>"
+    )
+    keyboard: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("✏️ تعيين/استبدال العناوين", callback_data="am_edit_fb_title_texts")],
+        [InlineKeyboardButton("🎲 تغيير النمط", callback_data="am_edit_fb_title_mode")],
+        [InlineKeyboardButton("✅ تفعيل/تعطيل", callback_data="am_edit_fb_title_toggle")],
+        [InlineKeyboardButton("🗑 حذف الكل", callback_data="am_edit_fb_title_clear")],
+        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+    ]
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def _show_fallback_desc_editor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    cfg = settings.get("fallback_description") or {}
+    texts = list(cfg.get("texts") or [])
+    enabled = bool(cfg.get("enabled"))
+    mode = str(cfg.get("selection_mode") or "fixed").strip().lower() or "fixed"
+    preview = "\n---\n".join(str(t)[:160] for t in texts[:2]) or "(لا توجد أوصاف)"
+    text = (
+        "📝 <b>الأوصاف البديلة للمصدر</b>\n\n"
+        f"الحالة: <code>{'✅ مفعل' if enabled else '❌ معطل'}</code>\n"
+        f"العدد: <code>{len(texts)}</code>\n"
+        f"النمط: <code>{html.escape(_mode_label(mode))}</code>\n\n"
+        "لإرسال أكثر من وصف، افصل بينهم بسطر يحتوي فقط على <code>---</code>.\n\n"
+        f"<b>معاينة:</b>\n<code>{html.escape(preview)}</code>"
+    )
+    keyboard: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("✏️ تعيين/استبدال الأوصاف", callback_data="am_edit_fb_desc_texts")],
+        [InlineKeyboardButton("🎲 تغيير النمط", callback_data="am_edit_fb_desc_mode")],
+        [InlineKeyboardButton("✅ تفعيل/تعطيل", callback_data="am_edit_fb_desc_toggle")],
+        [InlineKeyboardButton("🗑 حذف الكل", callback_data="am_edit_fb_desc_clear")],
+        [InlineKeyboardButton("🔙 رجوع للمصدر", callback_data="am_edit_src_menu")],
+    ]
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    else:
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_fallback_title_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await _safe_answer(query)
+    return await _show_fallback_title_editor(update, context)
+
+
+async def edit_source_fallback_desc_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await _safe_answer(query)
+    return await _show_fallback_desc_editor(update, context)
+
+
+async def edit_source_fallback_title_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    cfg = settings.get("fallback_title") or {}
+    texts = list(cfg.get("texts") or [])
+    if not texts:
+        await query.answer("أضف عناوين أولاً", show_alert=True)
+        return await _show_fallback_title_editor(update, context)
+    new_enabled = not bool(cfg.get("enabled", False))
+    success = await _update_edit_source_settings(context, {"fallback_title": {"enabled": new_enabled}})
+    await query.answer("✅ تم التحديث" if success else "❌ تعذر التحديث", show_alert=True)
+    return await _show_fallback_title_editor(update, context)
+
+
+async def edit_source_fallback_desc_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    cfg = settings.get("fallback_description") or {}
+    texts = list(cfg.get("texts") or [])
+    if not texts:
+        await query.answer("أضف أوصافاً أولاً", show_alert=True)
+        return await _show_fallback_desc_editor(update, context)
+    new_enabled = not bool(cfg.get("enabled", False))
+    success = await _update_edit_source_settings(context, {"fallback_description": {"enabled": new_enabled}})
+    await query.answer("✅ تم التحديث" if success else "❌ تعذر التحديث", show_alert=True)
+    return await _show_fallback_desc_editor(update, context)
+
+
+async def edit_source_fallback_title_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    keyboard = [
+        [InlineKeyboardButton("ثابت", callback_data="am_edit_fb_title_set_mode:fixed")],
+        [InlineKeyboardButton("عشوائي", callback_data="am_edit_fb_title_set_mode:random")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_fb_title_menu")],
+    ]
+    await query.edit_message_text("اختر طريقة استخدام العناوين البديلة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_fallback_desc_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    keyboard = [
+        [InlineKeyboardButton("ثابت", callback_data="am_edit_fb_desc_set_mode:fixed")],
+        [InlineKeyboardButton("عشوائي", callback_data="am_edit_fb_desc_set_mode:random")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_fb_desc_menu")],
+    ]
+    await query.edit_message_text("اختر طريقة استخدام الأوصاف البديلة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_fallback_title_set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    mode = query.data.split(":", 1)[1]
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    cfg = settings.get("fallback_title") or {}
+    texts = list(cfg.get("texts") or [])
+    if mode == "random" and len(texts) < 2:
+        await query.answer("⚠️ العشوائي يحتاج عنوانين على الأقل", show_alert=True)
+        return await _show_fallback_title_editor(update, context)
+    success = await _update_edit_source_settings(context, {"fallback_title": {"selection_mode": mode}})
+    await query.answer("✅ تم التحديث" if success else "❌ تعذر التحديث", show_alert=True)
+    return await _show_fallback_title_editor(update, context)
+
+
+async def edit_source_fallback_desc_set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    mode = query.data.split(":", 1)[1]
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    settings = _source_settings(src)
+    cfg = settings.get("fallback_description") or {}
+    texts = list(cfg.get("texts") or [])
+    if mode == "random" and len(texts) < 2:
+        await query.answer("⚠️ العشوائي يحتاج وصفين على الأقل", show_alert=True)
+        return await _show_fallback_desc_editor(update, context)
+    success = await _update_edit_source_settings(context, {"fallback_description": {"selection_mode": mode}})
+    await query.answer("✅ تم التحديث" if success else "❌ تعذر التحديث", show_alert=True)
+    return await _show_fallback_desc_editor(update, context)
+
+
+async def edit_source_fallback_title_texts_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    context.user_data["am_text_input_mode"] = "edit_fb_title_texts"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_fb_title_menu")]]
+    await query.edit_message_text(
+        "✍️ <b>أرسل الآن العناوين البديلة</b>\n\n- كل سطر = عنوان مستقل\n- سيتم استبدال القائمة الحالية",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return AM_SOURCE_TEXT_INPUT
+
+
+async def edit_source_fallback_desc_texts_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    context.user_data["am_text_input_mode"] = "edit_fb_desc_texts"
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_fb_desc_menu")]]
+    await query.edit_message_text(
+        "✍️ <b>أرسل الآن الأوصاف البديلة</b>\n\n- لفصل الأوصاف استخدم سطرًا يحتوي فقط على <code>---</code>\n- سيتم استبدال القائمة الحالية",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML",
+    )
+    return AM_SOURCE_TEXT_INPUT
+
+
+async def edit_source_fallback_title_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    success = await _update_edit_source_settings(context, {"fallback_title": {"texts": [], "enabled": False}})
+    await query.answer("✅ تم الحذف" if success else "❌ تعذر الحذف", show_alert=True)
+    return await _show_fallback_title_editor(update, context)
+
+
+async def edit_source_fallback_desc_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await _safe_answer(query)
+    success = await _update_edit_source_settings(context, {"fallback_description": {"texts": [], "enabled": False}})
+    await query.answer("✅ تم الحذف" if success else "❌ تعذر الحذف", show_alert=True)
+    return await _show_fallback_desc_editor(update, context)
 
 
 async def edit_source_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2462,8 +2704,16 @@ async def edit_source_overlay_mode(update: Update, context: ContextTypes.DEFAULT
     overlay = settings.get("shorts_overlay") or {}
     texts = _split_overlay_texts("\n".join(str(x) for x in (overlay.get("texts") or [])))
     if mode == "random" and len(texts) < 2:
-        await query.answer("⚠️ الاختيار العشوائي يحتاج نصين مختلفين على الأقل. أضف نصًا آخر أولًا.", show_alert=True)
-        return await _show_overlay_editor(update, context)
+        context.user_data["am_text_input_mode"] = "append_edit_overlay_texts"
+        await query.answer("⚠️ الاختيار العشوائي يحتاج نصين مختلفين على الأقل.", show_alert=True)
+        text = (
+            "✍️ <b>أرسل الآن نصاً إضافياً (أو أكثر) للشورتس</b>\n\n"
+            "- سيتم <b>إضافة</b> النص/النصوص إلى القائمة الحالية\n"
+            "- بعد الإضافة سيتم تفعيل وضع العشوائي تلقائياً"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_ov_menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_SOURCE_TEXT_INPUT
     success = await _update_edit_source_settings(context, {"shorts_overlay": {"selection_mode": mode}})
     await query.answer("✅ تم تحديث طريقة الاختيار" if success else "❌ تعذر التحديث", show_alert=False)
     return await _show_overlay_editor(update, context)
@@ -2734,8 +2984,17 @@ async def edit_source_description_mode(update: Update, context: ContextTypes.DEF
     desc = settings.get("extra_description") or {}
     texts = _split_description_texts("\n---\n".join(str(x) for x in (desc.get("texts") or [])))
     if mode == "random" and len(texts) < 2:
-        await query.answer("⚠️ الاختيار العشوائي يحتاج وصفين مختلفين على الأقل. أضف وصفًا آخر أولًا.", show_alert=True)
-        return await _show_description_editor(update, context)
+        context.user_data["am_text_input_mode"] = "append_edit_desc_texts"
+        await query.answer("⚠️ الاختيار العشوائي يحتاج وصفين مختلفين على الأقل.", show_alert=True)
+        text = (
+            "✍️ <b>أرسل الآن وصفاً إضافياً (أو أكثر)</b>\n\n"
+            "- لفصل الأوصاف استخدم سطرًا يحتوي فقط على <code>---</code>\n"
+            "- سيتم <b>إضافة</b> الأوصاف إلى القائمة الحالية\n"
+            "- بعد الإضافة سيتم تفعيل وضع العشوائي تلقائياً"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_desc_menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_SOURCE_TEXT_INPUT
     success = await _update_edit_source_settings(context, {"extra_description": {"selection_mode": mode}})
     await query.answer("✅ تم تحديث طريقة الاختيار" if success else "❌ تعذر التحديث", show_alert=False)
     return await _show_description_editor(update, context)
@@ -3301,8 +3560,17 @@ async def add_source_overlay_mode(update: Update, context: ContextTypes.DEFAULT_
     overlay = (_draft_source_settings(context).get("shorts_overlay") or {})
     texts = _split_overlay_texts("\n".join(str(x) for x in (overlay.get("texts") or [])))
     if mode == "random" and len(texts) < 2:
-        await query.answer("⚠️ الاختيار العشوائي يحتاج نصين مختلفين على الأقل. أرسل نصًا آخر في سطر جديد.", show_alert=True)
-        return await _show_add_overlay_mode_picker(update, context, notice="⚠️ أضف نصين على الأقل لاستخدام الاختيار العشوائي.")
+        context.user_data["am_text_input_mode"] = "append_overlay_texts"
+        await query.answer("⚠️ الاختيار العشوائي يحتاج نصين مختلفين على الأقل.", show_alert=True)
+        text = (
+            "✍️ <b>أرسل الآن نصاً إضافياً (أو أكثر) للشورتس</b>\n\n"
+            "- يمكنك إرسال رسالة تحتوي على سطر واحد أو عدة أسطر\n"
+            "- سيتم <b>إضافة</b> هذه النصوص إلى القائمة الحالية\n\n"
+            "مثال:\n<code>لا يفوتك هذا\nتابع للنهاية</code>"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_add_overlay_menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_SOURCE_TEXT_INPUT
     _update_draft_source_settings(context, {"shorts_overlay": {"selection_mode": mode}})
 
     text = "⏱ <b>اختر توقيت ظهور النص داخل الفيديو:</b>"
@@ -3426,17 +3694,17 @@ async def add_source_description_mode(update: Update, context: ContextTypes.DEFA
     desc = (_draft_source_settings(context).get("extra_description") or {})
     texts = _split_description_texts("\n---\n".join(str(x) for x in (desc.get("texts") or [])))
     if mode == "random" and len(texts) < 2:
-        await query.answer("⚠️ الاختيار العشوائي يحتاج وصفين مختلفين على الأقل. أضف وصفًا آخر أولًا.", show_alert=True)
-        keyboard = [
-            [InlineKeyboardButton("ثابت", callback_data="am_src_desc_mode:fixed")],
-            [InlineKeyboardButton("عشوائي", callback_data="am_src_desc_mode:random")],
-            [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
-        ]
-        await query.edit_message_text(
-            "⚠️ أضف وصفين على الأقل لاستخدام الاختيار العشوائي.\n\nاختر طريقة الاختيار:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+        context.user_data["am_text_input_mode"] = "append_desc_texts"
+        await query.answer("⚠️ الاختيار العشوائي يحتاج وصفين مختلفين على الأقل.", show_alert=True)
+        text = (
+            "✍️ <b>أرسل الآن وصفاً إضافياً (أو أكثر)</b>\n\n"
+            "- يمكنك إرسال وصف واحد أو عدة أوصاف\n"
+            "- لفصل الأوصاف عن بعضها استخدم سطرًا يحتوي فقط على <code>---</code>\n"
+            "- سيتم <b>إضافة</b> ما ترسله إلى القائمة الحالية"
         )
-        return AM_ADD_SOURCE_CUSTOMIZE
+        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        return AM_SOURCE_TEXT_INPUT
     _update_draft_source_settings(context, {"extra_description": {"selection_mode": mode}})
     text = "📌 <b>أين تريد دمج النص الإضافي داخل الوصف النهائي؟</b>"
     keyboard = [
@@ -3886,6 +4154,21 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return AM_SOURCE_TEXT_INPUT
 
+    if mode == "append_overlay_texts":
+        new_texts = _split_overlay_texts(raw_text)
+        if not new_texts:
+            await update.message.reply_text("⚠️ أرسل سطرًا واحدًا على الأقل.")
+            return AM_SOURCE_TEXT_INPUT
+        overlay = (_draft_source_settings(context).get("shorts_overlay") or {})
+        current = _split_overlay_texts("\n".join(str(x) for x in (overlay.get("texts") or [])))
+        merged = current + [t for t in new_texts if t not in current]
+        _update_draft_source_settings(
+            context,
+            {"shorts_overlay": {"texts": merged, "enabled": True, "selection_mode": "random"}},
+        )
+        context.user_data.pop("am_text_input_mode", None)
+        return await _show_add_overlay_mode_picker(update, context, notice="✅ تم إضافة النصوص وتفعيل الوضع العشوائي.")
+
     if mode == "add_desc_texts":
         texts = _split_description_texts(raw_text)
         if not texts:
@@ -3900,6 +4183,30 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text(
             "✅ تم حفظ نصوص الوصف.\n\nالآن اختر طريقة الاختيار:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return AM_ADD_SOURCE_CUSTOMIZE
+
+    if mode == "append_desc_texts":
+        new_texts = _split_description_texts(raw_text)
+        if not new_texts:
+            await update.message.reply_text("⚠️ أرسل نصًا أو فقرة واحدة على الأقل.")
+            return AM_SOURCE_TEXT_INPUT
+        desc = (_draft_source_settings(context).get("extra_description") or {})
+        current = _split_description_texts("\n---\n".join(str(x) for x in (desc.get("texts") or [])))
+        merged = current + [t for t in new_texts if t not in current]
+        _update_draft_source_settings(
+            context,
+            {"extra_description": {"texts": merged, "enabled": True, "selection_mode": "random"}},
+        )
+        context.user_data.pop("am_text_input_mode", None)
+        keyboard = [
+            [InlineKeyboardButton("قبل الوصف", callback_data="am_src_desc_place:prepend")],
+            [InlineKeyboardButton("بعد الوصف", callback_data="am_src_desc_place:append")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="am_add_desc_menu")],
+        ]
+        await update.message.reply_text(
+            "✅ تم إضافة الأوصاف وتفعيل الوضع العشوائي.\n\nالآن اختر موضع دمج النص داخل الوصف النهائي:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return AM_ADD_SOURCE_CUSTOMIZE
@@ -3926,6 +4233,27 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return AM_SOURCE_TEXT_INPUT
 
+    if mode == "append_edit_overlay_texts":
+        new_texts = _split_overlay_texts(raw_text)
+        if not new_texts:
+            await update.message.reply_text("⚠️ أرسل سطرًا واحدًا على الأقل.")
+            return AM_SOURCE_TEXT_INPUT
+        src = await _get_edit_source(context)
+        if not src:
+            context.user_data.pop("am_text_input_mode", None)
+            return await sources_menu(update, context)
+        settings = _source_settings(src)
+        overlay = settings.get("shorts_overlay") or {}
+        current = _split_overlay_texts("\n".join(str(x) for x in (overlay.get("texts") or [])))
+        merged = current + [t for t in new_texts if t not in current]
+        success = await _update_edit_source_settings(
+            context,
+            {"shorts_overlay": {"texts": merged, "enabled": True, "selection_mode": "random"}},
+        )
+        context.user_data.pop("am_text_input_mode", None)
+        await update.message.reply_text("✅ تم إضافة النصوص وتفعيل الوضع العشوائي." if success else "❌ تعذر حفظ النصوص.")
+        return await _show_overlay_editor(update, context)
+
     if mode == "edit_desc_texts":
         texts = _split_description_texts(raw_text)
         if not texts:
@@ -3935,6 +4263,44 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("am_text_input_mode", None)
         await update.message.reply_text("✅ تم حفظ نصوص الوصف الجديدة." if success else "❌ تعذر حفظ النصوص.")
         return await _show_description_editor(update, context)
+
+    if mode == "append_edit_desc_texts":
+        new_texts = _split_description_texts(raw_text)
+        if not new_texts:
+            await update.message.reply_text("⚠️ أرسل نصًا أو فقرة واحدة على الأقل.")
+            return AM_SOURCE_TEXT_INPUT
+        src = await _get_edit_source(context)
+        if not src:
+            context.user_data.pop("am_text_input_mode", None)
+            return await sources_menu(update, context)
+        settings = _source_settings(src)
+        desc = settings.get("extra_description") or {}
+        current = _split_description_texts("\n---\n".join(str(x) for x in (desc.get("texts") or [])))
+        merged = current + [t for t in new_texts if t not in current]
+        success = await _update_edit_source_settings(context, {"extra_description": {"texts": merged, "enabled": True, "selection_mode": "random"}})
+        context.user_data.pop("am_text_input_mode", None)
+        await update.message.reply_text("✅ تم إضافة الأوصاف وتفعيل الوضع العشوائي." if success else "❌ تعذر حفظ الأوصاف.")
+        return await _show_description_editor(update, context)
+
+    if mode == "edit_fb_title_texts":
+        texts = _split_overlay_texts(raw_text)
+        if not texts:
+            await update.message.reply_text("⚠️ أرسل سطرًا واحدًا على الأقل.")
+            return AM_SOURCE_TEXT_INPUT
+        success = await _update_edit_source_settings(context, {"fallback_title": {"texts": texts, "enabled": True}})
+        context.user_data.pop("am_text_input_mode", None)
+        await update.message.reply_text("✅ تم حفظ العناوين البديلة." if success else "❌ تعذر حفظ العناوين.")
+        return await _show_fallback_title_editor(update, context)
+
+    if mode == "edit_fb_desc_texts":
+        texts = _split_description_texts(raw_text)
+        if not texts:
+            await update.message.reply_text("⚠️ أرسل نصًا أو فقرة واحدة على الأقل.")
+            return AM_SOURCE_TEXT_INPUT
+        success = await _update_edit_source_settings(context, {"fallback_description": {"texts": texts, "enabled": True}})
+        context.user_data.pop("am_text_input_mode", None)
+        await update.message.reply_text("✅ تم حفظ الأوصاف البديلة." if success else "❌ تعذر حفظ الأوصاف.")
+        return await _show_fallback_desc_editor(update, context)
 
     if mode == "edit_fetch_add":
         url_matches = re.findall(r"https?://\S+", raw_text)
@@ -4896,6 +5262,18 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(edit_source_hflip_menu, pattern=r"^am_edit_hflip_menu$"),
                 CallbackQueryHandler(edit_source_overlay_menu, pattern=r"^am_edit_ov_menu$"),
                 CallbackQueryHandler(edit_source_description_menu, pattern=r"^am_edit_desc_menu$"),
+                CallbackQueryHandler(edit_source_fallback_title_menu, pattern=r"^am_edit_fb_title_menu$"),
+                CallbackQueryHandler(edit_source_fallback_desc_menu, pattern=r"^am_edit_fb_desc_menu$"),
+                CallbackQueryHandler(edit_source_fallback_title_toggle, pattern=r"^am_edit_fb_title_toggle$"),
+                CallbackQueryHandler(edit_source_fallback_desc_toggle, pattern=r"^am_edit_fb_desc_toggle$"),
+                CallbackQueryHandler(edit_source_fallback_title_mode, pattern=r"^am_edit_fb_title_mode$"),
+                CallbackQueryHandler(edit_source_fallback_desc_mode, pattern=r"^am_edit_fb_desc_mode$"),
+                CallbackQueryHandler(edit_source_fallback_title_set_mode, pattern=r"^am_edit_fb_title_set_mode:"),
+                CallbackQueryHandler(edit_source_fallback_desc_set_mode, pattern=r"^am_edit_fb_desc_set_mode:"),
+                CallbackQueryHandler(edit_source_fallback_title_texts_prompt, pattern=r"^am_edit_fb_title_texts$"),
+                CallbackQueryHandler(edit_source_fallback_desc_texts_prompt, pattern=r"^am_edit_fb_desc_texts$"),
+                CallbackQueryHandler(edit_source_fallback_title_clear, pattern=r"^am_edit_fb_title_clear$"),
+                CallbackQueryHandler(edit_source_fallback_desc_clear, pattern=r"^am_edit_fb_desc_clear$"),
                 CallbackQueryHandler(edit_source_tail_trim_menu, pattern=r"^am_edit_trim_menu$"),
                 CallbackQueryHandler(edit_source_video_effect_menu, pattern=r"^am_edit_fx_menu:"),
                 CallbackQueryHandler(edit_source_overlay_animation_menu, pattern=r"^am_edit_ov_anim_menu:"),
