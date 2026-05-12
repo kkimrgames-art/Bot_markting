@@ -932,16 +932,34 @@ def get_processed_videos() -> List[str]:
 
 # ========== Source Rate Limit Tracking ==========
 
+def _coerce_source_rate_limits(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    if value not in (None, ""):
+        logger.warning("Ignoring invalid source_rate_limits state: %s", type(value).__name__)
+    return {}
+
 def mark_source_rate_limited(source_url: str, duration: int = 3600) -> bool:
     """تسجيل مصدر كخاضع للقيود (rate-limited) لفترة زمنية محددة"""
     if not source_url:
         return False
     
+    try:
+        duration = max(0, int(float(duration)))
+    except Exception:
+        duration = 3600
     expires_at = time.time() + duration
     
     # تحديث في الذاكرة أولاً (لسرعة التحقق)
-    state = load_bot_state()
-    rate_limits = state.get("source_rate_limits", {})
+    state = load_bot_state() or {}
+    rate_limits = _coerce_source_rate_limits(state.get("source_rate_limits"))
     rate_limits[source_url] = expires_at
     state["source_rate_limits"] = rate_limits
     save_bot_state(state)
@@ -963,16 +981,27 @@ def is_source_rate_limited(source_url: str) -> bool:
     if not source_url:
         return False
         
-    state = load_bot_state()
-    rate_limits = state.get("source_rate_limits", {})
+    state = load_bot_state() or {}
+    rate_limits = _coerce_source_rate_limits(state.get("source_rate_limits"))
     
     expires_at = rate_limits.get(source_url)
-    if expires_at and time.time() < expires_at:
+    expires_ts = None
+    try:
+        if expires_at is not None:
+            expires_ts = float(expires_at)
+    except (TypeError, ValueError):
+        expires_ts = None
+    
+    if expires_ts is not None and time.time() < expires_ts:
+        if expires_ts != expires_at:
+            rate_limits[source_url] = expires_ts
+            state["source_rate_limits"] = rate_limits
+            save_bot_state(state)
         return True
         
     # تنظيف إذا انتهى الوقت (اختياري، يتم عند الحفظ القادم)
-    if expires_at:
-        del rate_limits[source_url]
+    if expires_at is not None:
+        rate_limits.pop(source_url, None)
         state["source_rate_limits"] = rate_limits
         save_bot_state(state)
         

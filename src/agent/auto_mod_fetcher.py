@@ -7635,6 +7635,8 @@ class AutoModFetcher:
                     current_out_path = None
                     current_yt_url = ""
                     claimed_processing = False
+                    processing_touch_task: Optional[asyncio.Task] = None
+                    processing_touch_stop: Optional[asyncio.Event] = None
 
                     try:
                         fetch_order = config.get("settings", {}).get("fetch_order", "newest")
