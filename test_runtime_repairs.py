@@ -19,6 +19,7 @@ from src.agent.ffmpeg_utils import _candidate_ffmpeg_dirs
 from src.agent.local_metadata import extract_source_metadata_context
 from src.agent.mod_video_processor import ModVideoProcessor
 from src.agent.renderer import render_with_pip
+from src.agent import supabase_storage
 from src.agent.supabase_client import _repair_upsert_payload
 from src.bot import persistence
 from src.bot.handlers.auto_mod_handlers import (
@@ -756,6 +757,48 @@ class RuntimeRepairTests(unittest.TestCase):
                 _RUN_CYCLE_LOCK.release()
 
         self.assertEqual(result.get("status"), "busy")
+
+    def test_source_rate_limit_tolerates_null_state(self):
+        with patch.object(supabase_storage, "load_bot_state", return_value={"source_rate_limits": None}), \
+             patch.object(supabase_storage, "save_bot_state") as save_state:
+            self.assertFalse(supabase_storage.is_source_rate_limited("https://example.com/source"))
+        save_state.assert_not_called()
+
+    def test_mark_source_rate_limit_recovers_null_state(self):
+        with patch.object(supabase_storage, "load_bot_state", return_value={"source_rate_limits": None}), \
+             patch.object(supabase_storage, "save_bot_state", return_value=True) as save_state, \
+             patch.object(supabase_storage, "supabase_upsert", return_value=True), \
+             patch.object(supabase_storage.time, "time", return_value=1000.0):
+            self.assertTrue(supabase_storage.mark_source_rate_limited("https://example.com/source", duration="60"))
+
+        saved_state = save_state.call_args.args[0]
+        self.assertEqual(saved_state["source_rate_limits"]["https://example.com/source"], 1060.0)
+
+    def test_run_cycle_reports_fetch_errors_without_processing_touch_crash(self):
+        fetcher = AutoModFetcher("inst-fetch-error")
+        notifications = []
+        source = {
+            "id": "src-fetch-error",
+            "enabled": True,
+            "source_name": "Broken Source",
+            "source_url": "https://example.com/source",
+            "platform": "youtube_shorts",
+            "settings": {},
+        }
+
+        async def notify(msg):
+            notifications.append(msg)
+
+        fetcher.db.get_config = MagicMock(return_value={"auto_fetch_enabled": True, "settings": {"fetch_order": "newest"}})
+        fetcher.db.get_all_schedules = MagicMock(return_value=[{"enabled": True, "channel_id": "ch-1", "content_type": "minecraft_mods"}])
+        fetcher.db.get_sources = MagicMock(return_value=[source])
+
+        with patch("src.agent.auto_mod_fetcher.has_pending_raw_reviews", return_value=False), \
+             patch.object(fetcher, "fetch_videos_from_source", AsyncMock(side_effect=RuntimeError("fetch failed"))):
+            result = asyncio.run(fetcher.run_cycle(notify_func=notify, force=True))
+
+        self.assertIsInstance(result, dict)
+        self.assertTrue(any("fetch failed" in msg for msg in notifications))
 
     def test_download_sync_recreates_output_dir_before_attempts(self):
         fetcher = AutoModFetcher("inst-download-dir")
