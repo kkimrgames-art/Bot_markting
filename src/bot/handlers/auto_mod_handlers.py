@@ -3087,34 +3087,29 @@ async def add_source_choose_channel(update: Update, context: ContextTypes.DEFAUL
     channel_id = query.data.split(":", 1)[1]
     context.user_data["am_new_source"] = {"channel_id": channel_id}
 
-    # اختيار نوع المحتوى
+    # عرض خيار اختيار المصدر مباشرة بعد اختيار القناة
     text = (
-        "📦 <b>اختر نوع المحتوى:</b>\n\n"
-        "اختر نوع المحتوى لهذا المصدر، أو اضغط <b>نوع جديد</b> لإضافة نوع مخصص."
+        "📍 <b>اختر نوع المصدر:</b>\n\n"
+        "من أين تريد جلب الفيديوهات؟\n\n"
+        "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل يوتيوب\n"
+        "• <b>Facebook</b>: جلب من صفحة/حساب فيسبوك\n"
+        "• <b>Google Drive</b>: جلب من مجلد جوجل درايف\n"
+        "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو محلية\n\n"
+        "اختر المصدر المناسب لك:"
     )
-
-    # أنواع المحتوى المتاحة
-    types = [
-        ("minecraft_mods", "🎮 مودات ماين كرافت"),
-        ("minecraft_builds", "🏗 بناء ماين كرافت"),
-        ("minecraft_shaders", "🌈 شيدرز ماين كرافت"),
-        ("gaming_clips", "🕹 مقاطع ألعاب"),
-        ("tutorials", "📚 شروحات"),
+    keyboard = [
+        [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
+        [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
+        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
+        [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
     ]
-
-    keyboard = []
-    for type_id, type_name in types:
-        keyboard.append([InlineKeyboardButton(type_name, callback_data=f"am_src_type:{type_id}")])
-
-    keyboard.append([InlineKeyboardButton("➕ نوع جديد", callback_data="am_src_type_custom")])
-    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
-
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-    return AM_ADD_SOURCE_TYPE
+    return AM_ADD_SOURCE_KIND
 
 
 async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """اختيار نوع المحتوى"""
+    """اختيار نوع المحتوى - يتم استدعاؤها بعد اختيار المصدر"""
     query = update.callback_query
     await _safe_answer(query)
 
@@ -3129,23 +3124,17 @@ async def add_source_choose_type(update: Update, context: ContextTypes.DEFAULT_T
     content_type = data.split(":", 1)[1]
     context.user_data["am_new_source"]["content_type"] = content_type
 
-    text = (
-        "📍 <b>اختر طريقة المصدر:</b>\n\n"
-        "• <b>YouTube</b>: جلب من قناة/قائمة تشغيل\n"
-        "• <b>Facebook</b>: جلب من صفحة/حساب/فيديو\n"
-        "• <b>Google Drive</b>: جلب من مجلد (Folder)\n"
-        "• <b>قاعدة بيانات</b>: جلب من حاوية فيديو (Containers)\n\n"
-        "سيتم بعد ذلك تحديد المصدر الذي يعتمد عليه البوت ضمن أتمتة الجلب."
-    )
-    keyboard = [
-        [InlineKeyboardButton("▶️ YouTube", callback_data="am_src_kind:youtube")],
-        [InlineKeyboardButton("📘 Facebook", callback_data="am_src_kind:facebook")],
-        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_src_kind:gdrive")],
-        [InlineKeyboardButton("📦 قاعدة بيانات (حاويات)", callback_data="am_src_kind:container")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-    return AM_ADD_SOURCE_KIND
+    # الآن ننتقل مباشرة لطلب الرابط أو اختيار الحاوية حسب نوع المصدر المحدد مسبقاً
+    source_kind = context.user_data.get("am_new_source", {}).get("source_kind", "").strip().lower()
+    
+    if source_kind == "container":
+        return await _handle_container_source_after_type(update, context)
+    elif source_kind == "gdrive":
+        return await _handle_gdrive_source_after_type(update, context)
+    elif source_kind == "facebook":
+        return await _handle_facebook_source_after_type(update, context)
+    else:  # youtube or default
+        return await _handle_youtube_source_after_type(update, context)
 
 
 async def add_source_custom_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3200,63 +3189,100 @@ async def add_source_choose_kind(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.setdefault("am_new_source", {})
     context.user_data["am_new_source"]["source_kind"] = kind
 
-    if kind == "container":
-        return await _show_container_picker(update, context, page=0)
+    # بعد اختيار نوع المصدر، نعرض خيار اختيار نوع المحتوى
+    text = (
+        "📦 <b>اختر نوع المحتوى:</b>\n\n"
+        "اختر نوع المحتوى لهذا المصدر، أو اضغط <b>نوع جديد</b> لإضافة نوع مخصص."
+    )
 
-    if kind == "gdrive":
-        db = _get_db()
+    # أنواع المحتوى المتاحة
+    types = [
+        ("minecraft_mods", "🎮 مودات ماين كرافت"),
+        ("minecraft_builds", "🏗 بناء ماين كرافت"),
+        ("minecraft_shaders", "🌈 شيدرز ماين كرافت"),
+        ("gaming_clips", "🕹 مقاطع ألعاب"),
+        ("tutorials", "📚 شروحات"),
+    ]
+
+    keyboard = []
+    for type_id, type_name in types:
+        keyboard.append([InlineKeyboardButton(type_name, callback_data=f"am_src_type:{type_id}")])
+
+    keyboard.append([InlineKeyboardButton("➕ نوع جديد", callback_data="am_src_type_custom")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_ADD_SOURCE_TYPE
+
+
+async def _handle_container_source_after_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة مصدر الحاوية بعد اختيار نوع المحتوى"""
+    return await _show_container_picker(update, context, page=0)
+
+
+async def _handle_gdrive_source_after_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة مصدر Google Drive بعد اختيار نوع المحتوى"""
+    query = update.callback_query
+    db = _get_db()
+    cfg = None
+    try:
+        cfg = db.get_config()
+    except Exception:
         cfg = None
-        try:
-            cfg = db.get_config()
-        except Exception:
-            cfg = None
-        settings = (cfg or {}).get("settings") or {}
-        gcfg = settings.get("google_drive") or {}
-        token_json = gcfg.get("token_json")
-        linked = isinstance(token_json, dict) and bool(token_json) and (
-            bool(token_json.get("refresh_token")) or bool(token_json.get("token")) or bool(token_json.get("access_token"))
-        )
-        if not linked:
-            text = (
-                "❌ <b>Google Drive غير مربوط</b>\n\n"
-                "قبل إضافة مصدر Google Drive يجب ربط الحساب من قائمة الإعدادات."
-            )
-            keyboard = [
-                [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
-                [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
-            ]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-            return AM_ADD_SOURCE_KIND
-
+    settings = (cfg or {}).get("settings") or {}
+    gcfg = settings.get("google_drive") or {}
+    token_json = gcfg.get("token_json")
+    linked = isinstance(token_json, dict) and bool(token_json) and (
+        bool(token_json.get("refresh_token")) or bool(token_json.get("token")) or bool(token_json.get("access_token"))
+    )
+    if not linked:
         text = (
-            "☁️ <b>مصدر Google Drive</b>\n\n"
-            "أرسل <b>Folder ID</b> (معرف المجلد) الذي تريد أن يجلب منه البوت الفيديوهات.\n\n"
-            "💡 يمكنك الحصول عليه من رابط المجلد:\n"
-            "<code>https://drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>\n\n"
-            "⚠️ يجب أن تكون قد ربطت Google Drive من قائمة الإعدادات أولاً."
-        )
-        keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-        context.user_data.setdefault("am_new_source", {})["platform"] = "google_drive"
-        context.user_data["am_new_source"]["awaiting_url"] = True
-        return AM_ADD_SOURCE_URL
-
-    if kind == "facebook":
-        text = (
-            "⏳ <b>اختر نوع فيديوهات فيس بوك التي تود جلبها:</b>\n\n"
-            "🎬 <b>طويلة فقط</b>: فيديوهات عادية\n"
-            "📱 <b>ريلز فقط</b>: فيديوهات قصيرة (≈ أقل من 60 ثانية)\n"
-            "🔄 <b>أي نوع</b>: أي فيديو"
+            "❌ <b>Google Drive غير مربوط</b>\n\n"
+            "قبل إضافة مصدر Google Drive يجب ربط الحساب من قائمة الإعدادات."
         )
         keyboard = [
-            [InlineKeyboardButton("🎬 طويلة فقط", callback_data="am_src_dur:facebook_long")],
-            [InlineKeyboardButton("📱 ريلز فقط", callback_data="am_src_dur:facebook_reels")],
-            [InlineKeyboardButton("🔄 أي نوع", callback_data="am_src_dur:facebook_any")],
+            [InlineKeyboardButton("☁️ ربط Google Drive", callback_data="am_gdrive_connect")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-        return AM_ADD_SOURCE_URL
+        return AM_ADD_SOURCE_KIND
 
+    text = (
+        "☁️ <b>مصدر Google Drive</b>\n\n"
+        "أرسل <b>Folder ID</b> (معرف المجلد) الذي تريد أن يجلب منه البوت الفيديوهات.\n\n"
+        "💡 يمكنك الحصول عليه من رابط المجلد:\n"
+        "<code>https://drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>\n\n"
+        "⚠️ يجب أن تكون قد ربطت Google Drive من قائمة الإعدادات أولاً."
+    )
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    context.user_data.setdefault("am_new_source", {})["platform"] = "google_drive"
+    context.user_data["am_new_source"]["awaiting_url"] = True
+    return AM_ADD_SOURCE_URL
+
+
+async def _handle_facebook_source_after_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة مصدر Facebook بعد اختيار نوع المحتوى"""
+    query = update.callback_query
+    text = (
+        "⏳ <b>اختر نوع فيديوهات فيس بوك التي تود جلبها:</b>\n\n"
+        "🎬 <b>طويلة فقط</b>: فيديوهات عادية\n"
+        "📱 <b>ريلز فقط</b>: فيديوهات قصيرة (≈ أقل من 60 ثانية)\n"
+        "🔄 <b>أي نوع</b>: أي فيديو"
+    )
+    keyboard = [
+        [InlineKeyboardButton("🎬 طويلة فقط", callback_data="am_src_dur:facebook_long")],
+        [InlineKeyboardButton("📱 ريلز فقط", callback_data="am_src_dur:facebook_reels")],
+        [InlineKeyboardButton("🔄 أي نوع", callback_data="am_src_dur:facebook_any")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_ADD_SOURCE_URL
+
+
+async def _handle_youtube_source_after_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة مصدر YouTube بعد اختيار نوع المحتوى"""
+    query = update.callback_query
     text = (
         "⏳ <b>اختر نوع الفيديوهات التي تود جلبها من هذا المصدر:</b>\n\n"
         "🎬 <b>طويلة فقط</b>: فيديوهات عادية (أكثر من 60 ثانية، وأقل من 30 دقيقة)\n"
