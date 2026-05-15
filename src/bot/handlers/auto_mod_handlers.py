@@ -4396,15 +4396,40 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _show_fallback_desc_editor(update, context)
 
     if mode == "edit_fetch_add":
-        url_matches = re.findall(r"https?://\S+", raw_text)
-        if len(url_matches) > 1:
-            await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
-            return AM_SOURCE_TEXT_INPUT
-        url = url_matches[0] if url_matches else raw_text
-        url = url.strip()
-        if not url.startswith("http"):
-            await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
-            return AM_SOURCE_TEXT_INPUT
+        # استخدام نوع المصدر المختار من قبل المستخدم
+        selected_platform = context.user_data.get("am_edit_fetch_platform", "").strip().lower()
+        
+        # معالجة خاصة لـ Google Drive
+        if selected_platform == "gdrive":
+            # يمكن أن يكون Folder ID أو رابط كامل
+            url = raw_text.strip()
+            # إذا كان رابط كامل، استخرج Folder ID منه
+            if "drive.google.com" in url:
+                folder_id_match = re.search(r"folders/([a-zA-Z0-9_-]+)", url)
+                if folder_id_match:
+                    url = f"gdrive:folder:{folder_id_match.group(1)}"
+                else:
+                    await update.message.reply_text("❌ رابط Google Drive غير صالح. تأكد من أنه رابط مجلد.")
+                    return AM_SOURCE_TEXT_INPUT
+            # إذا كان Folder ID مباشر، تحقق من صحته
+            elif not url.startswith("gdrive:folder:"):
+                # افترض أنه Folder ID مباشر
+                if re.match(r"^[a-zA-Z0-9_-]+$", url):
+                    url = f"gdrive:folder:{url}"
+                else:
+                    await update.message.reply_text("❌ أدخل Folder ID صالح أو رابط Google Drive كامل.")
+                    return AM_SOURCE_TEXT_INPUT
+        else:
+            # للمصادر الأخرى (YouTube, Facebook)، تحقق من أنه رابط HTTP
+            url_matches = re.findall(r"https?://\S+", raw_text)
+            if len(url_matches) > 1:
+                await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
+                return AM_SOURCE_TEXT_INPUT
+            url = url_matches[0] if url_matches else raw_text
+            url = url.strip()
+            if not url.startswith("http"):
+                await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
+                return AM_SOURCE_TEXT_INPUT
 
         src = await _get_edit_source(context)
         if not src:
@@ -4420,8 +4445,6 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ℹ️ هذا الرابط موجود بالفعل ضمن قنوات الجلب.")
             return await edit_source_fetch_sources_menu(update, context)
         
-        # استخدام نوع المصدر المختار من قبل المستخدم
-        selected_platform = context.user_data.get("am_edit_fetch_platform", "").strip().lower()
         if not selected_platform:
             selected_platform = str(src.get("platform") or "").strip().lower()
         
