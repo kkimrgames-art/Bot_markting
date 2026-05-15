@@ -1887,17 +1887,84 @@ async def edit_source_fetch_add_prompt(update: Update, context: ContextTypes.DEF
     if not src:
         return await sources_menu(update, context)
 
-    context.user_data["am_text_input_mode"] = "edit_fetch_add"
+    # عرض خيار اختيار نوع المصدر أولاً
     text = (
         "➕ <b>إضافة قناة جلب</b>\n\n"
-        "أرسل رابط واحد فقط (قناة / قائمة تشغيل / رابط فيديو).\n"
-        "يجب أن يبدأ بـ <code>http</code>.\n\n"
-        "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+        "📍 <b>اختر نوع المصدر:</b>\n\n"
+        "من أين تريد جلب الفيديوهات؟\n\n"
+        "• <b>YouTube</b>: قناة/قائمة تشغيل يوتيوب\n"
+        "• <b>Facebook</b>: صفحة/حساب فيسبوك\n"
+        "• <b>Google Drive</b>: مجلد جوجل درايف\n\n"
+        "اختر المصدر المناسب:"
     )
+    keyboard = [
+        [InlineKeyboardButton("▶️ YouTube", callback_data="am_edit_fetch_kind:youtube")],
+        [InlineKeyboardButton("📘 Facebook", callback_data="am_edit_fetch_kind:facebook")],
+        [InlineKeyboardButton("☁️ Google Drive", callback_data="am_edit_fetch_kind:gdrive")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_fetch_menu")],
+    ]
     if query:
-        await query.edit_message_text(text, parse_mode="HTML")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     else:
-        await update.effective_chat.send_message(text, parse_mode="HTML")
+        await update.effective_chat.send_message(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_EDIT_SOURCE_CHANNEL
+
+
+async def edit_source_fetch_add_choose_kind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالجة اختيار نوع المصدر عند إضافة رابط جلب إضافي"""
+    query = update.callback_query
+    await _safe_answer(query)
+    
+    src = await _get_edit_source(context)
+    if not src:
+        return await sources_menu(update, context)
+    
+    kind = (query.data.split(":", 1)[1] if query and query.data else "").strip().lower()
+    if kind not in {"youtube", "facebook", "gdrive"}:
+        return await edit_source_fetch_sources_menu(update, context)
+    
+    # حفظ نوع المصدر المختار
+    context.user_data["am_edit_fetch_platform"] = kind
+    context.user_data["am_text_input_mode"] = "edit_fetch_add"
+    
+    # عرض رسالة طلب الرابط حسب نوع المصدر
+    if kind == "youtube":
+        text = (
+            "▶️ <b>إضافة مصدر YouTube</b>\n\n"
+            "أرسل رابط قناة يوتيوب أو قائمة تشغيل.\n\n"
+            "مثال:\n"
+            "<code>https://www.youtube.com/@ChannelName</code>\n"
+            "<code>https://www.youtube.com/playlist?list=...</code>\n\n"
+            "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+        )
+    elif kind == "facebook":
+        text = (
+            "📘 <b>إضافة مصدر Facebook</b>\n\n"
+            "أرسل رابط صفحة فيسبوك أو حساب أو فيديو.\n\n"
+            "مثال:\n"
+            "<code>https://www.facebook.com/PageName</code>\n"
+            "<code>https://www.facebook.com/username</code>\n\n"
+            "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+        )
+    elif kind == "gdrive":
+        text = (
+            "☁️ <b>إضافة مصدر Google Drive</b>\n\n"
+            "أرسل <b>Folder ID</b> (معرف المجلد) من جوجل درايف.\n\n"
+            "💡 يمكنك الحصول عليه من رابط المجلد:\n"
+            "<code>https://drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>\n\n"
+            "أو أرسل الرابط الكامل للمجلد.\n\n"
+            "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+        )
+    else:
+        text = (
+            "➕ <b>إضافة قناة جلب</b>\n\n"
+            "أرسل رابط واحد فقط (قناة / قائمة تشغيل / رابط فيديو).\n"
+            "يجب أن يبدأ بـ <code>http</code>.\n\n"
+            "🔙 للرجوع: اضغط رجوع من القائمة السابقة."
+        )
+    
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_edit_fetch_menu")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return AM_SOURCE_TEXT_INPUT
 
 
@@ -4342,22 +4409,31 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         src = await _get_edit_source(context)
         if not src:
             context.user_data.pop("am_text_input_mode", None)
+            context.user_data.pop("am_edit_fetch_platform", None)
             return AM_SOURCES
         items = _fetch_sources_for_ui(src)
         normalized_url = url.rstrip("/")
         existing_urls = {str((x or {}).get("url") or "").strip().rstrip("/") for x in items}
         if normalized_url in existing_urls:
             context.user_data.pop("am_text_input_mode", None)
+            context.user_data.pop("am_edit_fetch_platform", None)
             await update.message.reply_text("ℹ️ هذا الرابط موجود بالفعل ضمن قنوات الجلب.")
             return await edit_source_fetch_sources_menu(update, context)
+        
+        # استخدام نوع المصدر المختار من قبل المستخدم
+        selected_platform = context.user_data.get("am_edit_fetch_platform", "").strip().lower()
+        if not selected_platform:
+            selected_platform = str(src.get("platform") or "").strip().lower()
+        
         items.append({
             "url": url,
             "name": "",
-            "platform": str(src.get("platform") or "").strip().lower(),
+            "platform": selected_platform,
             "enabled": True,
         })
         success = await _update_edit_source_settings(context, {"fetch_sources": items})
         context.user_data.pop("am_text_input_mode", None)
+        context.user_data.pop("am_edit_fetch_platform", None)
         await update.message.reply_text("✅ تم إضافة قناة الجلب." if success else "❌ تعذر إضافة القناة.")
         return await edit_source_fetch_sources_menu(update, context)
 
@@ -5282,6 +5358,7 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(edit_source_refresh, pattern=r"^am_edit_src_menu$"),
                 CallbackQueryHandler(edit_source_fetch_sources_menu, pattern=r"^am_edit_fetch_menu$"),
                 CallbackQueryHandler(edit_source_fetch_add_prompt, pattern=r"^am_edit_fetch_add$"),
+                CallbackQueryHandler(edit_source_fetch_add_choose_kind, pattern=r"^am_edit_fetch_kind:"),
                 CallbackQueryHandler(edit_source_fetch_toggle, pattern=r"^am_edit_fetch_toggle:"),
                 CallbackQueryHandler(edit_source_fetch_delete, pattern=r"^am_edit_fetch_del:"),
                 CallbackQueryHandler(edit_source_privacy_menu, pattern=r"^am_edit_priv_menu$"),
