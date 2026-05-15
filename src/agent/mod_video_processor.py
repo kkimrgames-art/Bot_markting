@@ -1216,7 +1216,9 @@ class ModVideoProcessor:
                     8.0,
                     extra_seconds=90,
                 )
-                _idle_timeout = min(120, max(45, _timeout // 4))
+                # زيادة idle_timeout لتجنب انقطاع الترميز للفيديوهات الطويلة
+                # نستخدم 50% من timeout بدلاً من 25%، مع حد أدنى 90 ثانية وأقصى 180 ثانية
+                _idle_timeout = min(180, max(90, _timeout // 2))
                 logger.info(f"🎬 [FinalEncode] timeout={_timeout}s idle={_idle_timeout}s encoder={enc_settings.get('encoder')}")
                 rc, stderr = _run_ffmpeg_with_idle_timeout(
                     cmd, timeout_s=_timeout, idle_timeout_s=_idle_timeout, label="FinalEncode"
