@@ -4399,10 +4399,12 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # استخدام نوع المصدر المختار من قبل المستخدم
         selected_platform = context.user_data.get("am_edit_fetch_platform", "").strip().lower()
         
+        # معالجة الرابط حسب نوع المصدر
+        url = raw_text.strip()
+        
         # معالجة خاصة لـ Google Drive
-        if selected_platform == "gdrive":
+        if selected_platform == "gdrive" or "drive.google.com" in url or url.startswith("gdrive:"):
             # يمكن أن يكون Folder ID أو رابط كامل
-            url = raw_text.strip()
             # إذا كان رابط كامل، استخرج Folder ID منه
             if "drive.google.com" in url:
                 folder_id_match = re.search(r"folders/([a-zA-Z0-9_-]+)", url)
@@ -4416,11 +4418,37 @@ async def source_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # افترض أنه Folder ID مباشر
                 if re.match(r"^[a-zA-Z0-9_-]+$", url):
                     url = f"gdrive:folder:{url}"
-                else:
+                # إذا كان بالتنسيق gdrive:folder:xxx فهو صحيح
+                elif not url:
                     await update.message.reply_text("❌ أدخل Folder ID صالح أو رابط Google Drive كامل.")
                     return AM_SOURCE_TEXT_INPUT
+            selected_platform = "gdrive"
+        elif selected_platform == "youtube" or "youtube.com" in url or "youtu.be" in url:
+            # روابط YouTube
+            url_matches = re.findall(r"https?://\S+", raw_text)
+            if len(url_matches) > 1:
+                await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
+                return AM_SOURCE_TEXT_INPUT
+            url = url_matches[0] if url_matches else raw_text
+            url = url.strip()
+            if not url.startswith("http"):
+                await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
+                return AM_SOURCE_TEXT_INPUT
+            selected_platform = "youtube"
+        elif selected_platform == "facebook" or "facebook.com" in url or "fb.watch" in url:
+            # روابط Facebook
+            url_matches = re.findall(r"https?://\S+", raw_text)
+            if len(url_matches) > 1:
+                await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
+                return AM_SOURCE_TEXT_INPUT
+            url = url_matches[0] if url_matches else raw_text
+            url = url.strip()
+            if not url.startswith("http"):
+                await update.message.reply_text("❌ أدخل رابطًا صالحًا يبدأ بـ http")
+                return AM_SOURCE_TEXT_INPUT
+            selected_platform = "facebook"
         else:
-            # للمصادر الأخرى (YouTube, Facebook)، تحقق من أنه رابط HTTP
+            # للمصادر الأخرى، تحقق من أنه رابط HTTP
             url_matches = re.findall(r"https?://\S+", raw_text)
             if len(url_matches) > 1:
                 await update.message.reply_text("⚠️ أرسل رابط واحد فقط في الرسالة.")
