@@ -52,6 +52,11 @@ async def _open_api_keys_menu_from_auto_mod(update: Update, context: ContextType
     return ConversationHandler.END
 
 
+async def _open_ready_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .ready_videos_handlers import start_ready_videos
+    return await start_ready_videos(update, context)
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -1052,7 +1057,7 @@ async def gdrive_process_auth_result(update: Update, context: ContextTypes.DEFAU
 # ==================== القائمة الرئيسية ====================
 
 async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """القائمة الرئيسية لنظام الجلب التلقائي"""
+    """القائمة الرئيسية لنظام الجلب التلقائي — واجهة محسّنة وغنية"""
     query = update.callback_query
     if query:
         await _safe_answer(query)
@@ -1061,23 +1066,160 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = await asyncio.to_thread(db.get_config)
     stats = await asyncio.to_thread(db.get_stats)
 
-    enabled = "✅ مفعل" if config.get("auto_fetch_enabled") else "❌ معطل"
+    # ─── جمع بيانات إضافية للعرض الغني ───
+    enabled = bool(config.get("auto_fetch_enabled"))
     content_type = config.get("default_content_type", "minecraft_mods")
+    instance_id = get_instance_id()
 
-    text = (
-        "🤖 <b>نظام الجلب التلقائي للمودات</b>\n\n"
-        f"📊 الحالة: {enabled}\n"
-        f"🆔 النسخة: <code>{get_instance_id()[:20]}</code>\n"
-        f"📦 نوع المحتوى: <code>{html.escape(content_type)}</code>\n\n"
-        f"📈 <b>الإحصائيات:</b>\n"
-        f"• القنوات: {stats.get('total_channels', 0)}\n"
-        f"• المصادر: {stats.get('total_sources', 0)}\n"
-        f"• الجداول: {stats.get('total_schedules', 0)}\n"
-        f"• المنشور: {stats.get('published', 0)}\n"
-        f"• الفاشل: {stats.get('failed', 0)}\n"
-    )
+    # إحصائيات أساسية
+    total_channels = int(stats.get("total_channels", 0))
+    total_sources = int(stats.get("total_sources", 0))
+    total_schedules = int(stats.get("total_schedules", 0))
+    published = int(stats.get("published", 0))
+    failed = int(stats.get("failed", 0))
+    processing = int(stats.get("processing", 0))
+    total_processed = int(stats.get("total_processed", 0))
 
-    toggle_text = "⏸ إيقاف" if config.get("auto_fetch_enabled") else "▶️ تشغيل"
+    # معدل النجاح
+    success_rate = 0.0
+    if total_processed > 0:
+        success_rate = (published / total_processed) * 100
+
+    # ─── حالة النظام الصحية (سريعة) ───
+    health_indicators = []
+    health_warnings = []
+
+    # حالة السبات
+    try:
+        from ...agent import hibernation_manager
+        is_hibernating = hibernation_manager.is_hibernating()
+        if is_hibernating:
+            health_indicators.append("💤 سبات")
+            health_warnings.append("البوت في وضع السبات")
+        else:
+            health_indicators.append("☀️ نشط")
+    except Exception:
+        pass
+
+    # حالة DB
+    try:
+        from ...agent.supabase_client import USE_SUPABASE, is_online
+        if USE_SUPABASE:
+            db_online = is_online()
+            health_indicators.append("✅ DB" if db_online else "❌ DB")
+            if not db_online:
+                health_warnings.append("قاعدة البيانات غير متصلة")
+        else:
+            health_indicators.append("📁 محلي")
+    except Exception:
+        pass
+
+    # حالة AI (ملخص سريع)
+    try:
+        from ...agent import ai_quota_tracker
+        ai_providers_ok = 0
+        ai_providers_blocked = 0
+        for prov in ["gemini", "openrouter", "groq", "clarifai", "mistral"]:
+            try:
+                status = ai_quota_tracker.get_provider_status(prov)
+                if status.get("total_calls", 0) > 0 or status.get("available"):
+                    if status.get("available"):
+                        ai_providers_ok += 1
+                    else:
+                        ai_providers_blocked += 1
+            except Exception:
+                pass
+        if ai_providers_ok > 0:
+            health_indicators.append(f"🤖 AI({ai_providers_ok})")
+        if ai_providers_blocked > 0:
+            health_warnings.append(f"{ai_providers_blocked} مزود AI محظور")
+    except Exception:
+        pass
+
+    # حالة القرص والذاكرة
+    try:
+        from ...agent.disk_guard import status_dict as disk_status
+        disk = disk_status()
+        disk_level = disk.get("level", "ok")
+        if disk_level == "ok":
+            health_indicators.append(f"💾 {disk.get('free_mb', 0):.0f}MB")
+        elif disk_level == "warning":
+            health_indicators.append(f"⚠️ قرص")
+            health_warnings.append(f"مساحة القرص منخفضة: {disk.get('free_mb', 0):.0f}MB")
+        else:
+            health_indicators.append(f"🛑 قرص")
+            health_warnings.append(f"مساحة القرص حرجة: {disk.get('free_mb', 0):.0f}MB")
+    except Exception:
+        pass
+
+    try:
+        from ...agent.memory_guard import status_dict as mem_status
+        mem = mem_status()
+        mem_level = mem.get("level", "ok")
+        if mem_level != "ok":
+            health_warnings.append(f"الذاكرة: {mem_level} ({mem.get('rss_mb', 0):.0f}MB)")
+    except Exception:
+        pass
+
+    # فترات الهدنة النشطة
+    try:
+        from ...agent import preflight_checks
+        cooldowns = preflight_checks.list_active_cooldowns()
+        if cooldowns:
+            health_indicators.append(f"⏸ {len(cooldowns)}هدنة")
+            health_warnings.append(f"{len(cooldowns)} قناة/مصدر في فترة هدنة")
+    except Exception:
+        pass
+
+    # ─── بناء النص المحسّن ───
+    status_icon = "🟢" if enabled else "🔴"
+    status_text = "مفّعل" if enabled else "معطّل"
+
+    text = "┏━━━━━━━━━━━━━━━━━━━━━━━┓\n"
+    text += "┃  🤖 <b>نظام الجلب التلقائي</b>  ┃\n"
+    text += "┗━━━━━━━━━━━━━━━━━━━━━━━┛\n\n"
+
+    # قسم الحالة السريعة
+    text += "📋 <b>الحالة العامة</b>\n"
+    text += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+    text += f"{status_icon} الأتمتة: <b>{status_text}</b>\n"
+    text += f"🆔 النسخة: <code>{html.escape(str(instance_id)[:24])}</code>\n"
+    text += f"📦 المحتوى: <code>{html.escape(str(content_type))}</code>\n"
+    if health_indicators:
+        text += f"🩺 الصحة: {' • '.join(health_indicators)}\n"
+    text += "\n"
+
+    # قسم الإحصائيات
+    text += "📈 <b>الإحصائيات</b>\n"
+    text += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+    text += "🌐 <b>البنية التحتية:</b>\n"
+    text += f"   📺 القنوات: <b>{total_channels}</b>\n"
+    text += f"   📡 المصادر: <b>{total_sources}</b>\n"
+    text += f"   ⏰ الجداول: <b>{total_schedules}</b>\n\n"
+    text += "📤 <b>النشر:</b>\n"
+    text += f"   ✅ منشور: <b>{published}</b>"
+    if failed > 0:
+        text += f"  •  ❌ فاشل: <b>{failed}</b>"
+    text += "\n"
+    if processing > 0:
+        text += f"   ⏳ قيد المعالجة: <b>{processing}</b>\n"
+    text += f"   📊 معدل النجاح: <b>{success_rate:.1f}%</b>"
+    if total_processed > 0:
+        text += f" <i>({total_processed} إجمالي)</i>"
+    text += "\n\n"
+
+    # قسم التنبيهات (إذا وجدت)
+    if health_warnings:
+        text += "⚠️ <b>تنبيهات تحتاج انتباه</b>\n"
+        text += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+        for warning in health_warnings[:4]:  # max 4 warnings
+            text += f"  • {warning}\n"
+        text += "\n"
+
+    # تلميح سريع
+    text += "💡 <i>اختر من القائمة أدناه للإدارة</i>\n"
+
+    toggle_text = "⏸ إيقاف" if enabled else "▶️ تشغيل"
 
     keyboard = [
         [InlineKeyboardButton("📋 القنوات", callback_data="list_channels:0"),
@@ -1086,9 +1228,15 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📊 الحالة", callback_data="am_status")],
         [InlineKeyboardButton("📦 حاويات الفيديو", callback_data="am_view_containers"),
          InlineKeyboardButton("🎬 فيديوهات الفيس كام", callback_data="am_fc_viewer")],
+        [InlineKeyboardButton("📹 فيديوهات جاهزة", callback_data="am_ready_videos")],
         [InlineKeyboardButton("⚙️ الإعدادات", callback_data="am_config")],
         [InlineKeyboardButton("🤖 الذكاء الاصطناعي", callback_data="ai_main_menu"),
          InlineKeyboardButton("🔑 مفاتيح API", callback_data="api_keys_menu")],
+        [InlineKeyboardButton("🩺 فحص النظام المسبق", callback_data="am_preflight")],
+        [InlineKeyboardButton("💤 حالة السبات", callback_data="am_hibernation")],
+        [InlineKeyboardButton("📊 التقارير اليومية", callback_data="am_reports")],
+        [InlineKeyboardButton("🌐 جلب YouTube", callback_data="am_youtube")],
+        [InlineKeyboardButton("📺 إدارة الإعلانات", callback_data="am_ads")],
         [InlineKeyboardButton(toggle_text, callback_data="am_toggle"),
          InlineKeyboardButton("🚀 تشغيل الآن", callback_data="am_run_now"),
          InlineKeyboardButton("🧪 اختبار", callback_data="am_test_render")],
@@ -1125,12 +1273,959 @@ async def toggle_auto_fetch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await auto_mod_menu(update, context)
 
 
+# ==================== فحص النظام المسبق (Preflight) ====================
+
+async def show_preflight_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة فحص النظام المسبق"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import preflight_checks as _pf
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل تحميل وحدة الفحص: {e}")
+        return AM_MENU
+
+    # Run a global preflight (without channel/source) — checks resources, AI, network, DB
+    text = "🩺 <b>فحص النظام المسبق</b>\n\n"
+    text += "<i>جاري فحص مكونات النظام العامة...</i>\n"
+
+    keyboard_temp = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard_temp), parse_mode="HTML")
+
+    # Run global checks (no channel/source — use a placeholder channel_id)
+    global_report = _pf.run_preflight_checks(
+        channel_id="(global)",
+        schedule=None,
+        source=None,
+        skip_network=False,
+        skip_db=False,
+        skip_ai=False,
+        skip_resource=False,
+    )
+    # Filter out channel/source-specific checks for the global view
+    global_report.checks = [c for c in global_report.checks if c.category in {"resource", "ai", "network", "database"}]
+
+    text = "🩺 <b>فحص النظام المسبق</b>\n\n"
+    text += global_report.summary_text()
+    text += "\n\n<b>القنوات في فترة هدنة:</b>\n"
+
+    # List channels in cooldown
+    try:
+        cooldowns = _pf.list_active_cooldowns()
+        if not cooldowns:
+            text += "✅ لا توجد قنوات في فترة هدنة حالياً.\n"
+        else:
+            for cd in cooldowns[:10]:
+                ch = cd.get("channel_id", "?")[:20]
+                src = cd.get("source_id", "") or "—"
+                src_short = src[:15] if src else "—"
+                remaining = cd.get("seconds_remaining", 0)
+                reason = (cd.get("reason") or "غير معروف")[:60]
+                text += f"⏸ <code>{ch}...</code> (مصدر: {src_short}) — {remaining}s متبقي\n"
+                text += f"   📛 {reason}\n"
+            if len(cooldowns) > 10:
+                text += f"\n<i>...و {len(cooldowns) - 10} قناة أخرى</i>\n"
+    except Exception as e:
+        text += f"⚠️ تعذر عرض فترات الهدنة: {e}\n"
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 إعادة الفحص", callback_data="am_preflight")],
+        [InlineKeyboardButton("♻️ مسح كل فترات الهدنة", callback_data="am_preflight_clear_cd")],
+        [InlineKeyboardButton("🔍 فحص قناة محددة", callback_data="am_preflight_channels")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+    ]
+
+    try:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception:
+        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def preflight_clear_cooldowns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """مسح كل فترات الهدنة"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import preflight_checks as _pf
+        count = _pf.clear_all_cooldowns()
+        await query.message.reply_text(
+            f"✅ تم مسح {count} فترة هدنة.\n"
+            f"يمكن الآن إعادة محاولة القنوات التي كانت متوقفة."
+        )
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل مسح فترات الهدنة: {e}")
+
+    return await show_preflight_menu(update, context)
+
+
+async def preflight_list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض القنوات لفحصها بشكل فردي"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        db = _get_db()
+        schedules = await asyncio.to_thread(db.get_all_schedules)
+        active = [s for s in schedules if s.get("enabled")]
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل جلب الجداول: {e}")
+        return AM_MENU
+
+    if not active:
+        await query.edit_message_text(
+            "❌ لا توجد جداول نشطة لفحصها.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 رجوع", callback_data="am_preflight")]
+            ])
+        )
+        return AM_MENU
+
+    text = "🔍 <b>اختر قناة لفحصها:</b>\n\n"
+    keyboard = []
+    for i, sch in enumerate(active[:20]):  # cap at 20 for keyboard size
+        channel_id = sch.get("channel_id", "?")
+        content_type = sch.get("content_type", "minecraft_mods")
+        label = f"📺 {channel_id[:18]}... ({content_type[:15]})"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"am_pf_check:{i}")])
+
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_preflight")])
+
+    # Store active schedules in user_data for retrieval
+    context.user_data["preflight_active_schedules"] = active[:20]
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def preflight_check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """فحص قناة محددة بشكل مفصل"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    idx = int(query.data.split(":")[1])
+    active = context.user_data.get("preflight_active_schedules", [])
+    if idx < 0 or idx >= len(active):
+        await query.edit_message_text("❌ فهرس غير صالح.")
+        return AM_MENU
+
+    schedule = active[idx]
+    channel_id = schedule.get("channel_id", "?")
+    content_type = schedule.get("content_type", "minecraft_mods")
+
+    # Show "checking..." message
+    await query.edit_message_text(
+        f"⏳ <b>جاري فحص القناة...</b>\n<code>{channel_id[:25]}...</code>\n\nقد يستغرق هذا بضع ثوانٍ.",
+        parse_mode="HTML"
+    )
+
+    try:
+        from ...agent import preflight_checks as _pf
+        # Get sources for this channel
+        db = _get_db()
+        sources = await asyncio.to_thread(db.get_sources, channel_id, content_type)
+        sources = [s for s in (sources or []) if s.get("enabled", True)]
+
+        # Run channel-level preflight + first source's checks
+        source = sources[0] if sources else None
+        report = _pf.run_preflight_checks(
+            channel_id=channel_id,
+            schedule=schedule,
+            source=source,
+            skip_network=False,
+            skip_db=False,
+            skip_ai=False,
+            skip_resource=False,
+        )
+
+        text = report.summary_text()
+        if not report.all_passed:
+            text += "\n\n<b>⚠️ توجد مشاكل تمنع بدء المعالجة لهذه القناة.</b>"
+        else:
+            text += "\n\n✅ <b>القناة جاهزة للمعالجة.</b>"
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 إعادة الفحص", callback_data=f"am_pf_check:{idx}")],
+            [InlineKeyboardButton("🔙 رجوع للقنوات", callback_data="am_preflight_channels")],
+            [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="am_menu")],
+        ]
+        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception as e:
+        await query.message.reply_text(
+            f"❌ فشل الفحص: {e}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 رجوع", callback_data="am_preflight_channels")]
+            ])
+        )
+
+    return AM_MENU
+
+
+# ==================== حالة السبات (Hibernation) ====================
+
+async def show_hibernation_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض حالة السبات الحالية"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import hibernation_manager
+        status_text = hibernation_manager.get_status_text()
+        is_hib = hibernation_manager.is_hibernating()
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل تحميل وحدة السبات: {e}")
+        return AM_MENU
+
+    keyboard = []
+    if is_hib:
+        # Hibernating — offer manual wake + DB ping test
+        keyboard.append([InlineKeyboardButton("☀️ استيقاظ يدوي", callback_data="am_hib_wake")])
+        keyboard.append([InlineKeyboardButton("🧪 اختبار DB الآن", callback_data="am_hib_ping")])
+    else:
+        # Active — offer manual hibernate + reset counter
+        keyboard.append([InlineKeyboardButton("💤 سبات يدوي", callback_data="am_hib_sleep")])
+        keyboard.append([InlineKeyboardButton("🔄 تصفير عداد الفشل", callback_data="am_hib_reset")])
+
+    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="am_hibernation")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")])
+
+    try:
+        await query.edit_message_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception:
+        await query.message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def hibernation_manual_wake(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """استيقاظ يدوي من السبات"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import hibernation_manager
+        # Also reset the failure counter so we don't immediately re-hibernate
+        hibernation_manager.reset_failure_counter()
+        success = hibernation_manager.force_wake()
+        if success:
+            await query.message.reply_text(
+                "☀️ <b>تم إيقاظ البوت يدوياً</b>\n\n"
+                "✅ تم تصفير عداد الفشل.\n"
+                "✅ تم إعادة تفعيل جميع المهام.\n"
+                "📊 سيعمل البوت الآن بشكل طبيعي."
+            ,
+                parse_mode="HTML"
+            )
+        else:
+            await query.message.reply_text("ℹ️ البوت ليس في وضع السبات حالياً.")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل الاستيقاظ: {e}")
+
+    return await show_hibernation_status(update, context)
+
+
+async def hibernation_manual_sleep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إدخال البوت في وضع السبات يدوياً"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import hibernation_manager
+        success = hibernation_manager.force_hibernate(reason="Manual hibernation by admin")
+        if success:
+            await query.message.reply_text(
+                "💤 <b>تم إدخال البوت في وضع السبات يدوياً</b>\n\n"
+                "⏸ جميع المهام متوقفة الآن.\n"
+                "🔁 سيستيقظ البوت تلقائياً عند عودة DB (إن كان معطلاً).\n"
+                "💡 يمكنك إيقاظه يدوياً من نفس القائمة."
+            ,
+                parse_mode="HTML"
+            )
+        else:
+            await query.message.reply_text("ℹ️ البوت في وضع السبات بالفعل.")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل الإسبات: {e}")
+
+    return await show_hibernation_status(update, context)
+
+
+async def hibernation_ping_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اختبار اتصال DB يدوياً"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    await query.message.reply_text("🧪 <i>جاري فحص اتصال قاعدة البيانات...</i>", parse_mode="HTML")
+
+    try:
+        from ...agent import hibernation_manager
+        import asyncio as _asyncio
+        online = await hibernation_manager._ping_db()
+        if online:
+            await query.message.reply_text(
+                "✅ <b>قاعدة البيانات متصلة!</b>\n\n"
+                "إذا كان البوت لا يزال في وضع السبات، يمكنك إيقاظه يدوياً."
+            ,
+                parse_mode="HTML"
+            )
+        else:
+            await query.message.reply_text(
+                "❌ <b>قاعدة البيانات غير متصلة</b>\n\n"
+                "البوت سيبقى في وضع السبات حتى تعود DB."
+            ,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل الفحص: {e}")
+
+    return await show_hibernation_status(update, context)
+
+
+async def hibernation_reset_counter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تصفير عداد فشل DB"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import hibernation_manager
+        hibernation_manager.reset_failure_counter()
+        await query.message.reply_text(
+            "✅ تم تصفير عداد فشل DB.\n"
+            f"العداد الحالي: <code>{hibernation_manager.get_failure_count()}</code>"
+        ,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    return await show_hibernation_status(update, context)
+
+
+# ==================== التقارير اليومية (Daily Reports) ====================
+
+async def show_reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة التقارير اليومية"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import daily_report_generator
+        status_text = daily_report_generator.get_report_status_text()
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل تحميل وحدة التقارير: {e}")
+        return AM_MENU
+
+    # Get last 5 reports history
+    try:
+        history = daily_report_generator.get_report_history(limit=5)
+    except Exception:
+        history = []
+
+    if history:
+        status_text += "\n\n📜 *آخر التقارير:*\n"
+        for h in history[:5]:
+            sent_at = h.get("sent_at", "?")[:16]
+            rtype = h.get("type", "?")
+            type_name = daily_report_generator.REPORT_TYPE_NAMES.get(rtype, rtype)
+            status_text += f"  • {type_name} — `{sent_at}`\n"
+
+    keyboard = [
+        [InlineKeyboardButton("📊 إرسال تقرير الأداء", callback_data="am_rep_send:performance")],
+        [InlineKeyboardButton("🩺 إرسال تقرير الصحة", callback_data="am_rep_send:health")],
+        [InlineKeyboardButton("📝 إرسال تقرير النشاط", callback_data="am_rep_send:activity")],
+        [InlineKeyboardButton("🔬 إرسال تقرير تفصيلي", callback_data="am_rep_send:deep_dive")],
+        [InlineKeyboardButton("🔄 إرسال التقرير القادم (دوري)", callback_data="am_rep_send:auto")],
+        [InlineKeyboardButton("🔕 إعادة ضبط بوابة الإشعارات", callback_data="am_rep_reset_gate")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+    ]
+
+    try:
+        await query.edit_message_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception:
+        # Try without parse_mode if Markdown fails
+        try:
+            await query.edit_message_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            await query.message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return AM_MENU
+
+
+async def reports_send_specific(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إرسال تقرير محدد فوراً"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    report_type = query.data.split(":")[1] if ":" in query.data else None
+    if report_type == "auto":
+        report_type = None  # Use rotation
+
+    try:
+        from ...agent import daily_report_generator
+        success, message = await daily_report_generator.send_report_now(report_type=report_type)
+    except Exception as e:
+        success, message = False, f"❌ خطأ: {e}"
+
+    await query.message.reply_text(message, parse_mode="HTML")
+
+    return await show_reports_menu(update, context)
+
+
+async def reports_reset_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إعادة ضبط بوابة الإشعارات"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import daily_report_generator
+        daily_report_generator.reset_notification_gate()
+        await query.message.reply_text(
+            "✅ تم إعادة ضبط بوابة الإشعارات.\n"
+            "ستُرسل الإشعارات القادمة بدون قيود الـ throttle."
+        )
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    return await show_reports_menu(update, context)
+
+
+# ==================== جلب YouTube (Proxy Pool) ====================
+
+async def show_youtube_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة جلب فيديوهات YouTube"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import youtube_resilient_fetcher
+        status_text = youtube_resilient_fetcher.get_status_text()
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل تحميل وحدة جلب YouTube: {e}")
+        return AM_MENU
+
+    keyboard = [
+        [InlineKeyboardButton("🔄 تحديث قائمة البروكسيات", callback_data="am_yt_refresh")],
+        [InlineKeyboardButton("🧪 اختبار جلب فيديو", callback_data="am_yt_test")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+    ]
+
+    try:
+        await query.edit_message_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception:
+        await query.message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def youtube_refresh_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تحديث قائمة البروكسيات يدوياً"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    await query.message.reply_text("⏳ <i>جاري تحديث قائمة البروكسيات... قد يستغرق هذا دقيقة.</i>", parse_mode="HTML")
+
+    try:
+        from ...agent import youtube_resilient_fetcher
+        # Run in thread to avoid blocking
+        count = await asyncio.to_thread(youtube_resilient_fetcher.refresh_proxies)
+        await query.message.reply_text(
+            f"✅ تم تحديث قائمة البروكسيات.\n"
+            f"🌐 عدد البروكسيات العاملة: <b>{count}</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل التحديث: {e}")
+
+    return await show_youtube_menu(update, context)
+
+
+async def youtube_test_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اختبار جلب فيديو YouTube قصير"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    await query.message.reply_text(
+        "⏳ <i>جاري اختبار جلب فيديو من YouTube...</i>\n"
+        "<i>سيستخدم البوت البروكسيات المتاحة.</i>",
+        parse_mode="HTML"
+    )
+
+    try:
+        from ...agent import youtube_resilient_fetcher
+        import tempfile
+        import os
+
+        tmpdir = tempfile.mkdtemp(prefix="yt_test_")
+        test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # "Me at the zoo" — short, public
+
+        # Run download in thread
+        result = await asyncio.to_thread(
+            youtube_resilient_fetcher.download_video,
+            test_url,
+            os.path.join(tmpdir, "%(id)s.%(ext)s"),
+            720,  # max_height
+            5,    # max_attempts
+            True  # use_proxy
+        )
+
+        if result.get("success"):
+            filepath = result.get("filepath", "")
+            size_mb = os.path.getsize(filepath) / (1024*1024) if filepath and os.path.exists(filepath) else 0
+            await query.message.reply_text(
+                f"✅ <b>نجح الاختبار!</b>\n\n"
+                f"🎬 العنوان: <code>{result.get('title', '?')}</code>\n"
+                f"⏱ المدة: <code>{result.get('duration', '?')}s</code>\n"
+                f"📦 الحجم: <code>{size_mb:.2f}MB</code>\n"
+                f"🌐 البروكسي: <code>{(result.get('proxy_used') or 'مباشر')[:40]}</code>\n"
+                f"🔄 المحاولات: <code>{result.get('attempts', '?')}</code>",
+                parse_mode="HTML"
+            )
+            # Cleanup
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            await query.message.reply_text(
+                f"❌ <b>فشل الاختبار</b>\n\n"
+                f"📛 الخطأ: <code>{result.get('error', 'غير معروف')[:200]}</code>\n"
+                f"🔄 المحاولات: <code>{result.get('attempts', '?')}</code>\n\n"
+                f"💡 تأكد من وجود بروكسيات عاملة (استخدم زر التحديث).",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        await query.message.reply_text(f"❌ خطأ: {e}")
+
+    return await show_youtube_menu(update, context)
+
+
+# ==================== إدارة الإعلانات (Ad Management) ====================
+
+# Conversation states for ad management
+AD_SELECT_SOURCE, AD_UPLOAD_VIDEO, AD_SET_POSITION, AD_SET_TIMING, AD_SET_CONTINUE = range(5)
+
+
+async def show_ads_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض قائمة إدارة الإعلانات"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import ad_manager
+        status_text = ad_manager.get_status_text()
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل تحميل وحدة الإعلانات: {e}")
+        return AM_MENU
+
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة إعلان لمصدر", callback_data="am_ads_add")],
+        [InlineKeyboardButton("📋 عرض كل الإعلانات", callback_data="am_ads_list")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+    ]
+
+    try:
+        await query.edit_message_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except Exception:
+        await query.message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def ads_add_select_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اختيار المصدر لإضافة إعلان له"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        db = _get_db()
+        sources = await asyncio.to_thread(db.get_sources)
+        sources = [s for s in (sources or []) if s.get("enabled", True)]
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل جلب المصادر: {e}")
+        return AM_MENU
+
+    if not sources:
+        await query.edit_message_text(
+            "❌ لا توجد مصادر مفعّلة.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 رجوع", callback_data="am_ads")]
+            ])
+        )
+        return AM_MENU
+
+    text = "📺 <b>إضافة إعلان</b>\n\nاختر المصدر الذي تريد إضافة إعلان له:"
+
+    keyboard = []
+    for i, src in enumerate(sources[:15]):
+        src_name = src.get("source_name", "مصدر")[:30]
+        source_id = str(src.get("id") or src.get("source_url", ""))
+        keyboard.append([InlineKeyboardButton(
+            f"📡 {src_name}",
+            callback_data=f"am_ads_src:{i}"
+        )])
+
+    # Also offer channel-level ad
+    keyboard.append([InlineKeyboardButton("📺 إعلان لكل القنوات (عام)", callback_data="am_ads_src:channel")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="am_ads")])
+
+    context.user_data["ads_sources"] = sources[:15]
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def ads_source_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بعد اختيار المصدر — اعرض الإعدادات الحالية واطلب رفع الفيديو"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    selection = query.data.split(":")[1]
+    if selection == "channel":
+        source_id = "__channel_wide__"
+        source_name = "إعلان عام لكل القنوات"
+    else:
+        idx = int(selection)
+        sources = context.user_data.get("ads_sources", [])
+        if idx < 0 or idx >= len(sources):
+            await query.edit_message_text("❌ فهرس غير صالح.")
+            return AM_MENU
+        src = sources[idx]
+        source_id = str(src.get("id") or src.get("source_url", ""))
+        source_name = src.get("source_name", "مصدر")
+
+    context.user_data["ads_current_source_id"] = source_id
+    context.user_data["ads_current_source_name"] = source_name
+
+    # Get current ad config
+    try:
+        from ...agent import ad_manager
+        ad_cfg = ad_manager.get_ad_config(source_id)
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل: {e}")
+        return AM_MENU
+
+    text = (
+        f"📺 <b>إعدادات إعلان: {html.escape(str(source_name)[:30])}</b>\n\n"
+        f"🆔 المصدر: <code>{source_id[:30]}...</code>\n\n"
+        f"📊 <b>الإعدادات الحالية:</b>\n"
+        f"  ✅ مفعّل: {'نعم' if ad_cfg['enabled'] else 'لا'}\n"
+        f"  📍 الموضع: {'آخر الفيديو' if ad_cfg['position'] == 'end' else 'منتصف الفيديو'}\n"
+        f"  ⏱ المدة: {ad_cfg['timing']}s\n"
+        f"  🔄 تكملة الفيديو بعد الإعلان: {'نعم' if ad_cfg['continue_after_ad'] else 'لا'}\n"
+        f"  🎬 فيديو الإعلان: {'مرفوع ✅' if ad_cfg['has_video'] else 'غير مرفوع ❌'}\n\n"
+    )
+
+    keyboard = []
+    if ad_cfg["has_video"]:
+        keyboard.append([InlineKeyboardButton("✅ تفعيل الإعلان" if not ad_cfg["enabled"] else "❌ تعطيل الإعلان",
+                                              callback_data=f"am_ads_toggle:{source_id}")])
+        keyboard.append([
+            InlineKeyboardButton("📍 تغيير الموضع", callback_data=f"am_ads_pos:{source_id}"),
+            InlineKeyboardButton("⏱ تغيير المدة", callback_data=f"am_ads_timing:{source_id}"),
+        ])
+        keyboard.append([InlineKeyboardButton("🔄 تبديل تكملة الفيديو", callback_data=f"am_ads_cont:{source_id}")])
+        keyboard.append([InlineKeyboardButton("🗑️ حذف فيديو الإعلان", callback_data=f"am_ads_del:{source_id}")])
+    else:
+        text += "📥 <b>أرسل فيديو الإعلان الآن</b> (كملف فيديو أو رسالة فيديو)\n"
+        text += "<i>سيتم استخدامه كإعلان يظهر في الفيديوهات المعالجة لهذا المصدر.</i>\n"
+
+    keyboard.append([InlineKeyboardButton("📥 رفع فيديو إعلان جديد", callback_data=f"am_ads_upload:{source_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع لقائمة الإعلانات", callback_data="am_ads")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
+async def ads_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تبديل تفعيل/تعطيل الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    source_id = query.data.split(":")[1]
+
+    try:
+        from ...agent import ad_manager
+        ad_cfg = ad_manager.get_ad_config(source_id)
+        ad_manager.set_ad_config(source_id, enabled=not ad_cfg["enabled"])
+        status = "مفعّل" if not ad_cfg["enabled"] else "معطّل"
+        await query.message.reply_text(f"✅ تم {status} الإعلان.")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    # Refresh view by calling source selected
+    context.user_data["ads_current_source_id"] = source_id
+    # Simulate the callback
+    query.data = f"am_ads_src:{source_id}"  # Won't work for index-based — use direct refresh
+    # Instead, just show the ads menu
+    return await show_ads_menu(update, context)
+
+
+async def ads_set_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تعيين موضع الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    source_id = query.data.split(":")[1]
+
+    keyboard = [
+        [InlineKeyboardButton("📍 آخر الفيديو", callback_data=f"am_ads_posset:{source_id}:end")],
+        [InlineKeyboardButton("📍 منتصف الفيديو", callback_data=f"am_ads_posset:{source_id}:middle")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"am_ads_src:{source_id}")],
+    ]
+    await query.edit_message_text(
+        "📍 <b>اختر موضع الإعلان:</b>\n\n"
+        "• <b>آخر الفيديو:</b> الإعلان يظهر في نهاية الفيديو.\n"
+        "• <b>منتصف الفيديو:</b> الإعلان يظهر في منتصف الفيديو.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    return AM_MENU
+
+
+async def ads_position_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حفظ موضع الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    parts = query.data.split(":")
+    source_id = parts[1]
+    position = parts[2]
+
+    try:
+        from ...agent import ad_manager
+        ad_manager.set_ad_config(source_id, position=position)
+        pos_text = "آخر الفيديو" if position == "end" else "منتصف الفيديو"
+        await query.message.reply_text(f"✅ تم تعيين الموضع: {pos_text}")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    return await show_ads_menu(update, context)
+
+
+async def ads_set_timing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تعيين مدة الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    source_id = query.data.split(":")[1]
+
+    keyboard = [
+        [
+            InlineKeyboardButton("2s", callback_data=f"am_ads_timset:{source_id}:2"),
+            InlineKeyboardButton("5s", callback_data=f"am_ads_timset:{source_id}:5"),
+            InlineKeyboardButton("10s", callback_data=f"am_ads_timset:{source_id}:10"),
+        ],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"am_ads_src:{source_id}")],
+    ]
+    await query.edit_message_text(
+        "⏱ <b>اختر مدة الإعلان:</b>\n\n"
+        "• <b>2s:</b> إعلان قصير جداً (ثانيتين)\n"
+        "• <b>5s:</b> إعلان قصير (5 ثوانٍ)\n"
+        "• <b>10s:</b> إعلان متوسط (10 ثوانٍ)",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    return AM_MENU
+
+
+async def ads_timing_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حفظ مدة الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    parts = query.data.split(":")
+    source_id = parts[1]
+    timing = float(parts[2])
+
+    try:
+        from ...agent import ad_manager
+        ad_manager.set_ad_config(source_id, timing=timing)
+        await query.message.reply_text(f"✅ تم تعيين المدة: {timing}s")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    return await show_ads_menu(update, context)
+
+
+async def ads_toggle_continue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تبديل خيار تكملة الفيديو بعد الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    source_id = query.data.split(":")[1]
+
+    try:
+        from ...agent import ad_manager
+        ad_cfg = ad_manager.get_ad_config(source_id)
+        ad_manager.set_ad_config(source_id, continue_after_ad=not ad_cfg["continue_after_ad"])
+        status = "مفعّل (الفيديو يكمل بعد الإعلان)" if not ad_cfg["continue_after_ad"] else "معطّل (الفيديو ينتهي بعد الإعلان)"
+        await query.message.reply_text(f"✅ تم تبديل خيار التكملة: {status}")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    return await show_ads_menu(update, context)
+
+
+async def ads_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف فيديو الإعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    source_id = query.data.split(":")[1]
+
+    try:
+        from ...agent import ad_manager
+        ad_manager.delete_ad_video(source_id)
+        await query.message.reply_text("✅ تم حذف فيديو الإعلان.")
+    except Exception as e:
+        await query.message.reply_text(f"❌ فشل: {e}")
+
+    return await show_ads_menu(update, context)
+
+
+async def ads_upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بدء رفع فيديو إعلان"""
+    query = update.callback_query
+    await _safe_answer(query)
+    source_id = query.data.split(":")[1]
+    context.user_data["ads_upload_source_id"] = source_id
+
+    await query.edit_message_text(
+        "📥 <b>رفع فيديو الإعلان</b>\n\n"
+        "أرسل فيديو الإعلان الآن (كملف فيديو أو رسالة فيديو).\n"
+        "سيتم استخدامه كإعلان يظهر في الفيديوهات المعالجة.\n\n"
+        "💡 <i>يفضل أن يكون الفيديو قصيراً (2-15 ثانية) وبجودة عالية.</i>",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ إلغاء", callback_data="am_ads")]
+        ]),
+        parse_mode="HTML"
+    )
+    return AD_UPLOAD_VIDEO
+
+
+async def ads_receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """استقبال وحفظ فيديو الإعلان"""
+    source_id = context.user_data.get("ads_upload_source_id")
+    if not source_id:
+        await update.message.reply_text("❌ خطأ: لم يتم تحديد المصدر.")
+        return ConversationHandler.END
+
+    # Get the video file
+    video_file = None
+    if update.message.video:
+        video_file = update.message.video
+    elif update.message.document and update.message.document.mime_type and "video" in update.message.document.mime_type:
+        video_file = update.message.document
+    elif update.message.document:
+        video_file = update.message.document
+
+    if not video_file:
+        await update.message.reply_text("❌ لم يتم العثور على فيديو. أرسل ملف فيديو صالح.")
+        return AD_UPLOAD_VIDEO
+
+    # Download the file
+    await update.message.reply_text("⏳ <i>جاري تنزيل فيديو الإعلان...</i>", parse_mode="HTML")
+
+    try:
+        import tempfile
+        import os
+
+        tmpdir = tempfile.mkdtemp(prefix="ad_upload_")
+        file_ext = ".mp4"
+        if hasattr(video_file, 'file_name') and video_file.file_name:
+            _, ext = os.path.splitext(video_file.file_name)
+            if ext:
+                file_ext = ext
+        tmp_file = os.path.join(tmpdir, f"ad{file_ext}")
+
+        # Download
+        tg_file = await video_file.get_file()
+        await tg_file.download_to_drive(tmp_file)
+
+        if not os.path.exists(tmp_file) or os.path.getsize(tmp_file) < 1000:
+            await update.message.reply_text("❌ فشل تنزيل الملف (حجم صغير جداً).")
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return ConversationHandler.END
+
+        # Save as ad video
+        from ...agent import ad_manager
+        success = ad_manager.save_ad_video(source_id, tmp_file)
+
+        # Enable by default if saving succeeded
+        if success:
+            ad_manager.set_ad_config(source_id, enabled=True, position="end", timing=5.0, continue_after_ad=True)
+
+        # Cleanup
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+        if success:
+            await update.message.reply_text(
+                "✅ <b>تم رفع فيديو الإعلان بنجاح!</b>\n\n"
+                "الإعدادات الافتراضية:\n"
+                "  📍 الموضع: آخر الفيديو\n"
+                "  ⏱ المدة: 5s\n"
+                "  🔄 تكملة الفيديو: مفعّل\n\n"
+                "يمكنك تعديل هذه الإعدادات من قائمة الإعلانات.",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text("❌ فشل حفظ فيديو الإعلان.")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ أثناء التنزيل: {e}")
+
+    return await show_ads_menu(update, context)
+
+
+async def ads_list_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض كل الإعلانات"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    try:
+        from ...agent import ad_manager
+        ads = ad_manager.list_all_ads()
+    except Exception as e:
+        await query.edit_message_text(f"❌ فشل: {e}")
+        return AM_MENU
+
+    if not ads:
+        text = "📺 <b>قائمة الإعلانات</b>\n\n📭 لا توجد إعلانات مُضافة."
+    else:
+        text = f"📺 <b>قائمة الإعلانات ({len(ads)})</b>\n\n"
+        for ad in ads[:15]:
+            icon = "✅" if ad["enabled"] else "❌"
+            video_icon = "🎬" if ad["has_video"] else "⚠️"
+            pos_text = "آخر" if ad["position"] == "end" else "وسط"
+            cont = "نعم" if ad["continue_after_ad"] else "لا"
+            text += (
+                f"{icon} {video_icon} <code>{ad['source_id'][:25]}...</code>\n"
+                f"   📍 {pos_text} | ⏱ {ad['timing']}s | 🔄 {cont}\n"
+            )
+
+    keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="am_ads")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    return AM_MENU
+
+
 # ==================== تشغيل دورة فورية ====================
 
 async def run_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """تشغيل دورة جلب فورية"""
     query = update.callback_query
     await _safe_answer(query)
+
+    # Check hibernation first — don't allow manual run if hibernating
+    try:
+        from ...agent import hibernation_manager
+        if hibernation_manager.is_hibernating():
+            meta = hibernation_manager.get_hibernation_meta()
+            await query.edit_message_text(
+                "💤 <b>البوت في وضع السبات</b>\n\n"
+                "لا يمكن تشغيل دورة جلب أثناء السبات.\n\n"
+                f"📛 السبب: <code>{meta.get('reason', 'غير معروف')[:200]}</code>\n"
+                f"🕐 بدأ السبات: <code>{meta.get('started_at', '?')}</code>\n\n"
+                "💡 يمكنك إيقاظ البوت يدوياً من قائمة '💤 حالة السبات' "
+                "إذا كنت متأكداً أن DB تعمل.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💤 حالة السبات", callback_data="am_hibernation")],
+                    [InlineKeyboardButton("🔙 رجوع", callback_data="am_menu")],
+                ]),
+                parse_mode="HTML"
+            )
+            return AM_MENU
+    except Exception:
+        pass
 
     text = "⏳ <b>جاري تشغيل دورة جلب...</b>\n\nقد يستغرق هذا بضع دقائق."
     await query.edit_message_text(text, parse_mode="HTML")
@@ -1521,6 +2616,34 @@ async def edit_source_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await _show_edit_source_menu(update, context, src_id=src_id)
 
 
+async def toggle_border_removal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تفعيل/تعطيل إزالة الحواف للمصدر"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    src = await _get_edit_source(context)
+    if not src:
+        await query.answer("❌ خطأ: لم يتم العثور على المصدر", show_alert=True)
+        return await sources_menu(update, context)
+
+    src_id = src.get("id")
+    settings = _source_settings(src)
+    current = bool(settings.get("border_removal_enabled", False))
+    new_val = not current
+
+    # Update source settings
+    settings["border_removal_enabled"] = new_val
+    src["settings"] = json.dumps(settings, ensure_ascii=False) if isinstance(settings, dict) else settings
+
+    db = _get_db()
+    await asyncio.to_thread(db._save_existing_source, src_id, {"settings": src["settings"]})
+
+    status = "✅ مفعّل" if new_val else "❌ معطّل"
+    await query.answer(f"🔲 إزالة الحواف: {status}", show_alert=True)
+
+    return await _show_edit_source_menu(update, context)
+
+
 async def _get_edit_source(context: ContextTypes.DEFAULT_TYPE) -> Optional[Dict[str, Any]]:
     src_id = context.user_data.get("am_edit_source_id")
     if not src_id:
@@ -1582,6 +2705,7 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
         f"✂️ قص النهاية: <code>{html.escape(tail_trim_status)}</code>\n"
         f"✨ تأثير البداية: <code>{html.escape(intro_effect_status)}</code>\n"
         f"🏁 تأثير النهاية: <code>{html.escape(outro_effect_status)}</code>\n"
+        f"🔲 إزالة الحواف: <code>{'✅ مفعّل' if settings.get('border_removal_enabled') else '❌ معطّل'}</code>\n"
         f"🧪 مراجعة الخام: <code>{html.escape(raw_review_status)}</code>\n"
         f"📹 شورتس فقط: <code>{html.escape(shorts_only_status)}</code>\n\n"
         "ماذا تود تعديله؟"
@@ -1601,6 +2725,7 @@ async def _show_edit_source_menu(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton(f"✂️ قص النهاية: {tail_trim_status}", callback_data="am_edit_trim_menu")],
         [InlineKeyboardButton(f"✨ تأثير البداية: {intro_effect_status}", callback_data="am_edit_fx_menu:intro")],
         [InlineKeyboardButton(f"🏁 تأثير النهاية: {outro_effect_status}", callback_data="am_edit_fx_menu:outro")],
+        [InlineKeyboardButton(f"🔲 إزالة الحواف: {'✅ مفعّل' if settings.get('border_removal_enabled') else '❌ معطّل'}", callback_data="am_edit_border_toggle")],
         [InlineKeyboardButton(f"🧪 مراجعة الخام: {raw_review_status}", callback_data="am_edit_raw_toggle")],
         [InlineKeyboardButton(f"📹 شورتس فقط: {shorts_only_status}", callback_data="am_edit_shorts_only_toggle")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="am_sources")],
@@ -5364,6 +6489,40 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(_open_api_keys_menu_from_auto_mod, pattern=r"^api_keys_menu$"),
         CallbackQueryHandler(auto_mod_menu, pattern=r"^main_menu$"),
         CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
+        # Preflight checks
+        CallbackQueryHandler(show_preflight_menu, pattern=r"^am_preflight$"),
+        CallbackQueryHandler(preflight_clear_cooldowns, pattern=r"^am_preflight_clear_cd$"),
+        CallbackQueryHandler(preflight_list_channels, pattern=r"^am_preflight_channels$"),
+        CallbackQueryHandler(preflight_check_channel, pattern=r"^am_pf_check:"),
+        # Hibernation
+        CallbackQueryHandler(show_hibernation_status, pattern=r"^am_hibernation$"),
+        CallbackQueryHandler(hibernation_manual_wake, pattern=r"^am_hib_wake$"),
+        CallbackQueryHandler(hibernation_manual_sleep, pattern=r"^am_hib_sleep$"),
+        CallbackQueryHandler(hibernation_ping_db, pattern=r"^am_hib_ping$"),
+        CallbackQueryHandler(hibernation_reset_counter, pattern=r"^am_hib_reset$"),
+        # Reports
+        CallbackQueryHandler(show_reports_menu, pattern=r"^am_reports$"),
+        CallbackQueryHandler(reports_send_specific, pattern=r"^am_rep_send:"),
+        CallbackQueryHandler(reports_reset_gate, pattern=r"^am_rep_reset_gate$"),
+        # YouTube fetcher (proxy pool)
+        CallbackQueryHandler(show_youtube_menu, pattern=r"^am_youtube$"),
+        CallbackQueryHandler(youtube_refresh_proxies, pattern=r"^am_yt_refresh$"),
+        CallbackQueryHandler(youtube_test_download, pattern=r"^am_yt_test$"),
+        # Ad management
+        CallbackQueryHandler(show_ads_menu, pattern=r"^am_ads$"),
+        CallbackQueryHandler(ads_add_select_source, pattern=r"^am_ads_add$"),
+        CallbackQueryHandler(ads_source_selected, pattern=r"^am_ads_src:"),
+        CallbackQueryHandler(ads_toggle, pattern=r"^am_ads_toggle:"),
+        CallbackQueryHandler(ads_set_position, pattern=r"^am_ads_pos:"),
+        CallbackQueryHandler(ads_position_set, pattern=r"^am_ads_posset:"),
+        CallbackQueryHandler(ads_set_timing, pattern=r"^am_ads_timing:"),
+        CallbackQueryHandler(ads_timing_set, pattern=r"^am_ads_timset:"),
+        CallbackQueryHandler(ads_toggle_continue, pattern=r"^am_ads_cont:"),
+        CallbackQueryHandler(ads_delete, pattern=r"^am_ads_del:"),
+        CallbackQueryHandler(ads_upload_start, pattern=r"^am_ads_upload:"),
+        CallbackQueryHandler(ads_list_all, pattern=r"^am_ads_list$"),
+        # Ready videos (Google Drive → YouTube)
+        CallbackQueryHandler(_open_ready_videos, pattern=r"^am_ready_videos$"),
     ]
 
 
@@ -5457,6 +6616,7 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(edit_source_hflip_set, pattern=r"^am_edit_hflip:"),
                 CallbackQueryHandler(edit_source_raw_review_toggle, pattern=r"^am_edit_raw_toggle$"),
                 CallbackQueryHandler(edit_shorts_only_toggle, pattern=r"^am_edit_shorts_only_toggle$"),
+                CallbackQueryHandler(toggle_border_removal, pattern=r"^am_edit_border_toggle$"),
                 CallbackQueryHandler(edit_source_choose_channel, pattern=r"^am_edit_ch:"),
                 CallbackQueryHandler(edit_source_choose_duration, pattern=r"^am_set_dur:"),
                 CallbackQueryHandler(edit_source_choose_facecam, pattern=r"^am_edit_fc:"),
@@ -5572,6 +6732,10 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
             ],
             AM_CLIENT_SECRET_UPLOAD: [
                 MessageHandler(filters.Document.ALL, receive_client_secret_file),
+                *_auto_mod_common_nav_handlers(),
+            ],
+            AD_UPLOAD_VIDEO: [
+                MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.ALL, ads_receive_video),
                 *_auto_mod_common_nav_handlers(),
             ],
         },

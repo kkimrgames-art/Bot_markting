@@ -5,5 +5,6 @@ from . import (
     file_auth_handler,
     language_handlers,
     language_edit_handlers,
-    edit_handlers
+    edit_handlers,
+    ready_videos_handlers,
 )

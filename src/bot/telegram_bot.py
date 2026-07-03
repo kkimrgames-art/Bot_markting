@@ -66,6 +66,82 @@ def build_application(token: str):
     from .handlers.auto_mod_handlers import get_auto_mod_conversation_handler
     application.add_handler(get_auto_mod_conversation_handler())
 
+    from .handlers.ready_videos_handlers import (
+        start_ready_videos, start_drive_auth, check_drive_auth,
+        list_drive_videos, paginate_videos, select_drive_video,
+        confirm_video_selection, toggle_channel_selection, confirm_channel_selection,
+        receive_video_title, receive_video_description, skip_description,
+        receive_video_thumbnail, skip_thumbnail, start_upload,
+        cancel_ready_videos, reauth_drive, copy_auth_url,
+        RV_MENU, RV_AUTH_WAIT, RV_VIDEO_LIST, RV_VIDEO_DETAIL,
+        RV_SELECT_CHANNELS, RV_TITLE, RV_DESCRIPTION, RV_THUMBNAIL, RV_CONFIRM_UPLOAD,
+    )
+
+    ready_videos_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_ready_videos, pattern=r"^am_ready_videos$"),
+        ],
+        states={
+            RV_MENU: [
+                CallbackQueryHandler(start_drive_auth, pattern=r"^rv_start_auth$"),
+                CallbackQueryHandler(reauth_drive, pattern=r"^rv_reauth$"),
+                CallbackQueryHandler(list_drive_videos, pattern=r"^rv_list_videos$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_AUTH_WAIT: [
+                CallbackQueryHandler(check_drive_auth, pattern=r"^rv_check_auth$"),
+                CallbackQueryHandler(copy_auth_url, pattern=r"^rv_copy_auth_url$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_menu$"),
+                CallbackQueryHandler(list_drive_videos, pattern=r"^rv_list_videos$"),
+            ],
+            RV_VIDEO_LIST: [
+                CallbackQueryHandler(paginate_videos, pattern=r"^rv_page:"),
+                CallbackQueryHandler(select_drive_video, pattern=r"^rv_select:"),
+                CallbackQueryHandler(list_drive_videos, pattern=r"^rv_list_videos$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_menu$"),
+            ],
+            RV_VIDEO_DETAIL: [
+                CallbackQueryHandler(confirm_video_selection, pattern=r"^rv_confirm_video:"),
+                CallbackQueryHandler(list_drive_videos, pattern=r"^rv_list_videos$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_menu$"),
+            ],
+            RV_SELECT_CHANNELS: [
+                CallbackQueryHandler(toggle_channel_selection, pattern=r"^rv_toggle_ch:"),
+                CallbackQueryHandler(confirm_channel_selection, pattern=r"^rv_confirm_channels$"),
+                CallbackQueryHandler(list_drive_videos, pattern=r"^rv_list_videos$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_menu$"),
+            ],
+            RV_TITLE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_video_title),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_DESCRIPTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_video_description),
+                CallbackQueryHandler(skip_description, pattern=r"^rv_skip_desc$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_THUMBNAIL: [
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.ALL, receive_video_thumbnail),
+                CallbackQueryHandler(skip_thumbnail, pattern=r"^rv_skip_thumb$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_CONFIRM_UPLOAD: [
+                CallbackQueryHandler(start_upload, pattern=r"^rv_start_upload$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_menu$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+        ],
+        allow_reentry=True,
+        per_message=False,
+    )
+    application.add_handler(ready_videos_conv)
+
     from .handlers.ai_manager_handler import get_ai_manager_conv
     application.add_handler(get_ai_manager_conv())
 
