@@ -519,8 +519,10 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 status_icon = "✅"  # كل شيء جاهز
                 
-            safe_name = html.escape(channel.channel_name[:30])  # تقصير الاسم والهروب
-            
+            # عرض الاسم الحقيقي للقناة على YouTube إن وُجد، وإلا الاسم المخزن
+            display_name = getattr(channel, "youtube_channel_name", None) or channel.channel_name
+            safe_name = html.escape(display_name[:30])  # تقصير الاسم والهروب
+
             keyboard.append([
                 InlineKeyboardButton(
                     f"{status_icon} {safe_name}",
@@ -549,7 +551,7 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             text=text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
     except BadRequest as e:
         if "Message is not modified" not in str(e):
@@ -665,7 +667,12 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         auth_icon = "⚠️"
 
     import html
-    safe_name = html.escape(channel.channel_name)
+    # عرض الاسم الحقيقي للقناة على YouTube إن وُجد
+    yt_real_name = getattr(channel, "youtube_channel_name", None)
+    safe_name = html.escape(yt_real_name or channel.channel_name)
+
+    # رابط القناة الأصلي على YouTube
+    channel_url = manager.resolve_channel_url(channel)
 
     # 📝 تجميع الرسالة بتصميم أنيق
     text = (
@@ -673,18 +680,19 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>الحالة العامة:</b> {status_emoji} {status_text}\n"
         f"🆔 <b>معرف اليوتيوب:</b> <code>{channel.youtube_channel_id}</code>\n"
+        f"🔗 <b>رابط القناة:</b> {channel_url}\n"
         f"🔐 <b>حالة الربط:</b> {auth_icon} {auth_status}\n\n"
-        
+
         f"🛠 <b>الإعدادات الأساسية:</b>\n"
         f"🔹 <b>النوع:</b> {content_type}\n"
         f"🔹 <b>المرئية:</b> {privacy}\n"
         f"🔹 <b>اللغة:</b> {lang_display}\n\n"
-        
+
         f"⏱ <b>الجدولة والنشر:</b>\n"
         f"🔸 <b>الوتيرة:</b> {interval_text}\n"
         f"🔸 <b>النشر القادم:</b> {next_publish_text}\n"
         f"🔸 <b>إجمالي المنشورات:</b> <code>{channel.total_published}</code> منشور\n\n"
-        
+
         f"🎬 <b>خيارات المعالجة:</b>\n"
         f"✨ <b>جودة الفيديو:</b> <code>{quality}</code>\n"
         f"✂️ <b>القص التلقائي:</b> {'✅ مفعل' if extra.get('auto_trim_enabled', True) else '❌ معطل'}\n"
@@ -721,8 +729,7 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✂️ القص", callback_data=f"edit_trim:{channel_id}")
         ],
         [
-            InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}"),
-            InlineKeyboardButton("🏷️ بدائل العنوان", callback_data=f"edit_fallback_titles:{channel_id}")
+            InlineKeyboardButton("📄 الوصف", callback_data=f"edit_custom_desc:{channel_id}")
         ]
     ]
 
@@ -739,7 +746,11 @@ async def view_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🧹 تصفير السجل", callback_data=f"reset_mem:{channel_id}"),
         InlineKeyboardButton("🗑 حذف القناة", callback_data=f"delete_channel:{channel_id}")
     ])
-    
+
+    # زر رابط القناة الأصلي على YouTube
+    if channel_url:
+        keyboard.append([InlineKeyboardButton("🔗 زيارة القناة على YouTube", url=channel_url)])
+
     keyboard.append([InlineKeyboardButton("🔙 العودة لقائمة القنوات", callback_data="list_channels:0")])
     
     await query.edit_message_text(

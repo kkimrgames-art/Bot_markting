@@ -776,25 +776,6 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     settings = parse_source_settings(raw_settings)
     normalized = dict(settings)
 
-    def _split_env_fallback_texts(raw: str, allow_blocks: bool = False) -> List[str]:
-        raw = str(raw or "").strip()
-        if not raw:
-            return []
-        try:
-            if raw.startswith("["):
-                parsed = json.loads(raw)
-                if isinstance(parsed, list):
-                    items = [str(x).strip() for x in parsed if str(x).strip()]
-                    if items:
-                        return items
-        except Exception:
-            pass
-        if "|" in raw:
-            parts = [p.strip() for p in raw.split("|") if p.strip()]
-            if parts:
-                return parts
-        return _split_configured_texts(raw, allow_blocks=allow_blocks)
-
     try:
         fetch_sources = normalized.get("fetch_sources")
         if isinstance(fetch_sources, dict):
@@ -960,11 +941,6 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     overlay_mode = str(overlay_raw.get("selection_mode") or "fixed").strip().lower()
     if overlay_mode not in {"fixed", "random"}:
         overlay_mode = "fixed"
-    overlay_image_path = str(overlay_raw.get("image_path") or overlay_raw.get("image") or "").strip()
-    if overlay_image_path:
-        overlay_image_path = overlay_image_path.replace("\\", "/")
-    else:
-        overlay_image_path = None
     normalized["shorts_overlay"] = {
         "enabled": bool(overlay_raw.get("enabled", False)) and bool(overlay_texts),
         "texts": overlay_texts,
@@ -972,7 +948,6 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
         "timing": overlay_timing,
         "duration": overlay_duration,
         "screen_position": overlay_position,
-        "image_path": overlay_image_path,
         "intro_animation": _normalize_overlay_animation_config(overlay_raw.get("intro_animation") or settings.get("overlay_intro_animation")),
         "outro_animation": _normalize_overlay_animation_config(overlay_raw.get("outro_animation") or settings.get("overlay_outro_animation")),
     }
@@ -983,84 +958,13 @@ def normalize_source_settings(raw_settings: Any) -> Dict[str, Any]:
     if desc_mode not in {"fixed", "random"}:
         desc_mode = "fixed"
     placement = str(desc_raw.get("placement") or "append").strip().lower()
-    if placement not in {"append", "prepend", "template"}:
+    if placement not in {"append", "prepend"}:
         placement = "append"
     normalized["extra_description"] = {
         "enabled": bool(desc_raw.get("enabled", False)) and bool(desc_texts),
         "texts": desc_texts,
         "selection_mode": desc_mode,
         "placement": placement,
-    }
-    sections_raw = settings.get("description_sections")
-    sections_mode = str(settings.get("sections_mode") or "append").strip().lower()
-    if sections_mode not in {"append", "prepend", "template"}:
-        sections_mode = "append"
-    normalized_sections: List[Dict[str, str]] = []
-    if isinstance(sections_raw, list):
-        for item in sections_raw:
-            if not isinstance(item, dict):
-                continue
-            section_title = str(item.get("title") or "").strip()
-            section_content = str(item.get("content") or "").strip()
-            if not section_title and not section_content:
-                continue
-            normalized_sections.append({"title": section_title, "content": section_content})
-    normalized["description_sections"] = {
-        "enabled": bool(normalized_sections),
-        "sections": normalized_sections,
-        "mode": sections_mode,
-    }
-    title_fallback_raw = None
-    for key in ("fallback_title", "title_fallback", "fallback_titles"):
-        if isinstance(settings.get(key), dict):
-            title_fallback_raw = settings.get(key)
-            break
-    if title_fallback_raw is None:
-        title_fallback_raw = {}
-
-    if not title_fallback_raw.get("enabled"):
-        env_titles = os.getenv("AUTO_MOD_FALLBACK_TITLES")
-        if env_titles:
-            env_texts = _split_env_fallback_texts(env_titles, allow_blocks=False)
-            if env_texts:
-                env_mode = (os.getenv("AUTO_MOD_FALLBACK_TITLES_MODE") or "").strip().lower()
-                if env_mode not in {"fixed", "random"}:
-                    env_mode = "random" if len(env_texts) > 1 else "fixed"
-                title_fallback_raw = {"enabled": True, "texts": env_texts, "selection_mode": env_mode}
-    title_fallback_texts = _split_configured_texts(title_fallback_raw.get("texts"))
-    title_fallback_mode = str(title_fallback_raw.get("selection_mode") or "fixed").strip().lower()
-    if title_fallback_mode not in {"fixed", "random"}:
-        title_fallback_mode = "fixed"
-    normalized["fallback_title"] = {
-        "enabled": bool(title_fallback_raw.get("enabled", False)) and bool(title_fallback_texts),
-        "texts": title_fallback_texts,
-        "selection_mode": title_fallback_mode,
-    }
-    desc_fallback_raw = None
-    for key in ("fallback_description", "description_fallback", "fallback_descriptions"):
-        if isinstance(settings.get(key), dict):
-            desc_fallback_raw = settings.get(key)
-            break
-    if desc_fallback_raw is None:
-        desc_fallback_raw = {}
-
-    if not desc_fallback_raw.get("enabled"):
-        env_desc = os.getenv("AUTO_MOD_FALLBACK_DESCRIPTIONS")
-        if env_desc:
-            env_texts = _split_env_fallback_texts(env_desc, allow_blocks=True)
-            if env_texts:
-                env_mode = (os.getenv("AUTO_MOD_FALLBACK_DESCRIPTIONS_MODE") or "").strip().lower()
-                if env_mode not in {"fixed", "random"}:
-                    env_mode = "random" if len(env_texts) > 1 else "fixed"
-                desc_fallback_raw = {"enabled": True, "texts": env_texts, "selection_mode": env_mode}
-    desc_fallback_texts = _split_configured_texts(desc_fallback_raw.get("texts"), allow_blocks=True)
-    desc_fallback_mode = str(desc_fallback_raw.get("selection_mode") or "fixed").strip().lower()
-    if desc_fallback_mode not in {"fixed", "random"}:
-        desc_fallback_mode = "fixed"
-    normalized["fallback_description"] = {
-        "enabled": bool(desc_fallback_raw.get("enabled", False)) and bool(desc_fallback_texts),
-        "texts": desc_fallback_texts,
-        "selection_mode": desc_fallback_mode,
     }
     tail_trim_raw = settings.get("tail_trim")
     if isinstance(tail_trim_raw, dict):
@@ -1148,63 +1052,6 @@ def _choose_configured_text(texts: List[str], selection_mode: str = "fixed") -> 
     return clean[0]
 
 
-def _coerce_source_text_config(texts: Any, *, selection_mode: Any = "fixed", allow_blocks: bool = False) -> Dict[str, Any]:
-    normalized_texts = _split_configured_texts(texts, allow_blocks=allow_blocks)
-    mode = str(selection_mode or "fixed").strip().lower()
-    if mode not in {"fixed", "random"}:
-        mode = "fixed"
-    return {
-        "enabled": bool(normalized_texts),
-        "texts": normalized_texts,
-        "selection_mode": mode,
-    }
-
-
-def _merge_channel_publish_metadata_settings(raw_source_settings: Any, channel_extra: Any) -> Dict[str, Any]:
-    merged = parse_source_settings(raw_source_settings)
-    extra = dict(channel_extra or {}) if isinstance(channel_extra, dict) else {}
-
-    custom_desc = str(extra.get("custom_description") or "").strip()
-    if custom_desc:
-        desc_mode = str(extra.get("custom_description_mode") or "append").strip().lower()
-        if desc_mode not in {"append", "prepend", "template"}:
-            desc_mode = "append"
-        existing_extra_desc = merged.get("extra_description") if isinstance(merged.get("extra_description"), dict) else {}
-        if not existing_extra_desc:
-            merged["extra_description"] = {
-                "enabled": True,
-                "texts": [custom_desc],
-                "selection_mode": "fixed",
-                "placement": desc_mode,
-            }
-
-    sections = extra.get("description_sections")
-    if isinstance(sections, list) and sections:
-        existing_sections = merged.get("description_sections")
-        if not existing_sections:
-            merged["description_sections"] = sections
-        if not merged.get("sections_mode"):
-            merged["sections_mode"] = str(extra.get("sections_mode") or "append").strip().lower() or "append"
-
-    fallback_title_cfg = _coerce_source_text_config(
-        extra.get("fallback_title_texts"),
-        selection_mode=extra.get("fallback_title_mode"),
-        allow_blocks=False,
-    )
-    if fallback_title_cfg.get("enabled") and not isinstance(merged.get("fallback_title"), dict):
-        merged["fallback_title"] = dict(fallback_title_cfg)
-
-    fallback_desc_cfg = _coerce_source_text_config(
-        extra.get("fallback_description_texts"),
-        selection_mode=extra.get("fallback_description_mode"),
-        allow_blocks=True,
-    )
-    if fallback_desc_cfg.get("enabled") and not isinstance(merged.get("fallback_description"), dict):
-        merged["fallback_description"] = dict(fallback_desc_cfg)
-
-    return normalize_source_settings(merged)
-
-
 def pick_source_overlay_config(raw_settings: Any) -> Optional[Dict[str, Any]]:
     overlay = normalize_source_settings(raw_settings).get("shorts_overlay") or {}
     if not overlay.get("enabled"):
@@ -1217,7 +1064,6 @@ def pick_source_overlay_config(raw_settings: Any) -> Optional[Dict[str, Any]]:
         "timing": overlay.get("timing", "full"),
         "duration": float(overlay.get("duration", 2.0) or 2.0),
         "screen_position": overlay.get("screen_position", "top"),
-        "image_path": overlay.get("image_path"),
         "intro_animation": dict(overlay.get("intro_animation") or {"enabled": False, "type": "none", "duration": 0.0}),
         "outro_animation": dict(overlay.get("outro_animation") or {"enabled": False, "type": "none", "duration": 0.0}),
     }
@@ -1405,18 +1251,9 @@ def merge_source_extra_description(base_description: str, raw_settings: Any) -> 
         return (base_description or "").strip()
 
     original = (base_description or "").strip()
-    placement = str(extra_cfg.get("placement") or "append").strip().lower()
     if not original:
-        if placement == "template":
-            if "{ai}" in selected_text:
-                return selected_text.replace("{ai}", "").strip()
-            return selected_text
         return selected_text
-    if placement == "template":
-        if "{ai}" in selected_text:
-            return selected_text.replace("{ai}", original).strip()
-        return f"{selected_text}\n\n{original}".strip()
-    if placement == "prepend":
+    if extra_cfg.get("placement") == "prepend":
         return f"{selected_text}\n\n{original}"
     return f"{original}\n\n{selected_text}"
 
@@ -1426,106 +1263,6 @@ def _get_source_extra_description_text(raw_settings: Any) -> str:
     if not extra_cfg.get("enabled"):
         return ""
     return _choose_configured_text(extra_cfg.get("texts") or [], extra_cfg.get("selection_mode", "fixed")).strip()
-
-
-def _render_description_sections_text(raw_settings: Any) -> str:
-    sections_cfg = normalize_source_settings(raw_settings).get("description_sections") or {}
-    if not sections_cfg.get("enabled"):
-        return ""
-    sections = sections_cfg.get("sections") or []
-    if not isinstance(sections, list):
-        return ""
-    parts: List[str] = []
-    for item in sections:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or "").strip()
-        content = str(item.get("content") or "").strip()
-        if title and content:
-            parts.append(f"{title}\n{content}")
-        elif title:
-            parts.append(title)
-        elif content:
-            parts.append(content)
-    return "\n\n".join(part for part in parts if part).strip()
-
-
-def merge_source_description_sections(base_description: str, raw_settings: Any) -> str:
-    sections_text = _render_description_sections_text(raw_settings)
-    if not sections_text:
-        return (base_description or "").strip()
-    sections_cfg = normalize_source_settings(raw_settings).get("description_sections") or {}
-    mode = str(sections_cfg.get("mode") or "append").strip().lower()
-    original = (base_description or "").strip()
-    if not original:
-        if mode == "template" and "{sections}" in sections_text:
-            return sections_text.replace("{sections}", "").strip()
-        return sections_text
-    if mode == "template":
-        if "{sections}" in original:
-            return original.replace("{sections}", sections_text).strip()
-        return f"{original}\n\n{sections_text}".strip()
-    if mode == "prepend":
-        return f"{sections_text}\n\n{original}".strip()
-    return f"{original}\n\n{sections_text}".strip()
-
-
-def _get_fallback_title_text(raw_settings: Any) -> str:
-    cfg = normalize_source_settings(raw_settings).get("fallback_title") or {}
-    if not cfg.get("enabled"):
-        return ""
-    return _choose_configured_text(cfg.get("texts") or [], cfg.get("selection_mode", "fixed")).strip()
-
-
-def _get_fallback_description_text(raw_settings: Any) -> str:
-    cfg = normalize_source_settings(raw_settings).get("fallback_description") or {}
-    if not cfg.get("enabled"):
-        return ""
-    return _choose_configured_text(cfg.get("texts") or [], cfg.get("selection_mode", "fixed")).strip()
-
-
-def _looks_like_generic_media_title(value: Any, source_context: Optional[Dict[str, Any]] = None) -> bool:
-    raw = str(value or "").strip()
-    if not raw:
-        return True
-    base = os.path.splitext(os.path.basename(raw))[0].strip()
-    if not base:
-        return True
-    low = base.lower()
-    if len(base) < 5:
-        return True
-    if re.fullmatch(r"[a-f0-9]{8,}", low):
-        return True
-    generic_patterns = [
-        r"^(video|vid|clip|file|img|dsc|mvimg|pxl|reel|short|shorts|untitled|new video)[\s_\-]*\d*$",
-        r"^(whatsapp|telegram|screen(?:recording)?|recording|download|upload|edited)[\s_\-]*\d*$",
-        r"^\d{5,}$",
-        r"^[a-z]{0,4}[_\-]?\d{6,}$",
-    ]
-    if any(re.fullmatch(pattern, low) for pattern in generic_patterns):
-        return True
-    alpha_count = sum(1 for ch in base if ch.isalpha())
-    digit_count = sum(1 for ch in base if ch.isdigit())
-    if alpha_count <= 2 and digit_count >= 4:
-        return True
-    separators = sum(1 for ch in base if ch in {"_", "-", ".", " "})
-    if digit_count >= alpha_count and separators >= 2 and len(base) <= 24:
-        return True
-    ctx = source_context or {}
-    src_url = str(ctx.get("source_url") or ctx.get("url") or "").strip().lower()
-    if src_url.startswith("gdrive://") and (digit_count >= alpha_count or low.startswith(("video", "vid", "clip", "file"))):
-        return True
-    return False
-
-
-def _source_metadata_needs_configured_fallback(source_title: Any, source_description: Any, source_context: Optional[Dict[str, Any]] = None) -> bool:
-    clean_title = str(source_title or "").strip()
-    clean_desc = str(source_description or "").strip()
-    if not clean_desc:
-        return True
-    if _looks_like_generic_media_title(clean_title, source_context):
-        return True
-    return False
 
 
 def _looks_like_shorts_url(url: Any) -> bool:
@@ -1583,10 +1320,8 @@ def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, sourc
     if explicit_video_type in ("shorts", "long"):
         return explicit_video_type
 
-    normalized_source_settings = normalize_source_settings(source_settings)
-
     # Check if source has shorts_only setting enabled
-    if normalized_source_settings and _to_bool(normalized_source_settings.get("shorts_only"), False):
+    if source_settings and _to_bool(source_settings.get("shorts_only"), False):
         return "shorts"
 
     platform = str(src_platform or "").strip().lower()
@@ -1594,13 +1329,6 @@ def _infer_processing_video_type(video: Dict[str, Any], src_platform: Any, sourc
         return "shorts"
     if "long" in platform:
         return "long"
-
-    # Google Drive sources do not expose `/shorts` style URLs and are added
-    # without a duration-mode picker, so default them to shorts unless the
-    # source explicitly opted out via `shorts_only=false`.
-    if platform == "google_drive" or str(source_url or "").strip().lower().startswith("gdrive:"):
-        if not (normalized_source_settings and "shorts_only" in normalized_source_settings):
-            return "shorts"
 
     for candidate_url in (
         (video or {}).get("url"),
@@ -1657,6 +1385,7 @@ def _join_hashtags(tags: List[str], max_chars: int) -> str:
 
 def _build_upload_metadata(
     ai_meta: Dict[str, Any],
+    *,
     channel_key: str,
     source_title: str,
     source_name: str,
@@ -1686,20 +1415,15 @@ def _build_upload_metadata(
             return ""
         return raw[:35]
 
-    source_context = ai_meta.get("source_context") if isinstance(ai_meta.get("source_context"), dict) else {}
-    weak_source_metadata = _source_metadata_needs_configured_fallback(source_title, source_description, source_context)
-    fallback_title_text = _get_fallback_title_text(source_settings)
-    fallback_description_text = _get_fallback_description_text(source_settings)
-    base_description = ai_meta.get("description", source_description or "")
-    if weak_source_metadata and fallback_description_text:
-        base_description = fallback_description_text
-    merged_description = merge_source_extra_description(base_description, source_settings)
-    merged_description = merge_source_description_sections(merged_description, source_settings)
+    merged_description = merge_source_extra_description(
+        ai_meta.get("description", source_description or ""),
+        source_settings,
+    )
     extra_description_text = _get_source_extra_description_text(source_settings)
-    sections_description_text = _render_description_sections_text(source_settings)
+    source_context = ai_meta.get("source_context") if isinstance(ai_meta.get("source_context"), dict) else {}
     source_signals = extract_source_metadata_context(
         hint_title=source_title,
-        source_description=" ".join(part for part in [source_description, extra_description_text, sections_description_text, fallback_description_text if weak_source_metadata else ""] if part),
+        source_description=" ".join(part for part in [source_description, extra_description_text] if part),
         lang=target_lang,
         content_type=content_type,
         source_name=source_name,
@@ -1714,9 +1438,6 @@ def _build_upload_metadata(
         merged_description,
         source_description,
         extra_description_text,
-        sections_description_text,
-        fallback_title_text,
-        fallback_description_text if weak_source_metadata else "",
     ):
         hashtag_candidates.extend(_extract_hashtags_from_text(text))
 
@@ -1840,27 +1561,12 @@ def _build_upload_metadata(
         if not final_title:
             final_title = "#shorts" if (is_shorts and not strict_local_script) else "#video"
 
-        description_plain = _strip_hashtags(merged_description)
-        if weak_source_metadata and fallback_description_text:
-            description_plain = _strip_hashtags(fallback_description_text)
-        if len(description_plain) < 20:
-            description_plain = _strip_hashtags(ai_meta.get("description", ""))
-        if len(description_plain) < 20:
-            description_plain = _strip_hashtags(source_description)
-
-        hashtags_block = _join_hashtags(description_tags, 700)
-        if description_plain and hashtags_block:
-            final_description = f"{description_plain}\n\n{hashtags_block}".strip()
-        elif description_plain:
-            final_description = description_plain
-        else:
-            final_description = hashtags_block or final_title
-        final_description = final_description[:4900].rstrip()
+        final_description = _join_hashtags(description_tags, 4900)
+        if not final_description:
+            final_description = final_title
     else:
         # عنوان قابل للقراءة + هاشتاغات
-        final_title = _strip_hashtags(fallback_title_text) if (weak_source_metadata and fallback_title_text) else ""
-        if not final_title:
-            final_title = _strip_hashtags(ai_meta.get("title", ""))
+        final_title = _strip_hashtags(ai_meta.get("title", ""))
         if not final_title:
             final_title = _strip_hashtags(source_title)
         if not final_title:
@@ -1869,18 +1575,7 @@ def _build_upload_metadata(
             final_title = "فيديو قصير جديد" if str(target_lang or "").lower().startswith("ar") else "New short video"
         final_title = final_title[:95].rstrip(" -|:,.،؛")
 
-        if fallback_title_text:
-            try:
-                clean_title = _collapse(_strip_hashtags(final_title))
-                clean_desc = _collapse(_strip_hashtags(merged_description))
-                if (not clean_title) or _looks_like_generic_media_title(clean_title, source_context) or (clean_title and clean_desc and clean_title == clean_desc):
-                    final_title = _strip_hashtags(fallback_title_text)[:95].rstrip(" -|:,.،؛")
-            except Exception:
-                pass
-
         description_plain = _strip_hashtags(merged_description)
-        if weak_source_metadata and fallback_description_text:
-            description_plain = _strip_hashtags(fallback_description_text)
         if len(description_plain) < 20:
             description_plain = _strip_hashtags(ai_meta.get("description", ""))
         if len(description_plain) < 20:
@@ -1910,8 +1605,6 @@ def _build_upload_metadata(
     seen_upload_tags = set()
     raw_upload_candidates: List[str] = []
     raw_upload_candidates.extend([str(x) for x in (ai_meta.get("tags") or [])])
-    if weak_source_metadata and fallback_title_text:
-        raw_upload_candidates.extend(re.findall(r"[0-9A-Za-z\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]{3,}", fallback_title_text))
     raw_upload_candidates.extend(_keywords_from_hashtags(description_tags, source_title or content_type, target_lang, limit=24))
     raw_upload_candidates.extend([str(x) for x in (source_signals.get("keywords") or [])])
 
@@ -1928,46 +1621,6 @@ def _build_upload_metadata(
     if not upload_tags:
         upload_tags = _keywords_from_hashtags(title_tags or description_tags, source_title or content_type, target_lang, limit=15)
     return final_title, final_description, upload_tags
-
-
-def _build_hashtag_only_upload_metadata(
-    ai_meta: Dict[str, Any],
-    *,
-    source_title: str,
-    source_name: str,
-    content_type: str,
-    target_lang: str,
-    is_shorts: bool,
-    source_description: str = "",
-    source_settings: Any = None,
-) -> Tuple[str, str, List[str]]:
-    """طبقة توافق للاختبارات والمسارات القديمة التي تحتاج مخرجات هاشتاغ فقط."""
-    from src.agent.ai import _extract_hashtags_from_text, _filter_hashtags_by_target_language
-
-    final_title, final_description, upload_tags = _build_upload_metadata(
-        ai_meta,
-        channel_key="legacy_hashtag_only",
-        source_title=source_title,
-        source_name=source_name,
-        content_type=content_type,
-        target_lang=target_lang,
-        is_shorts=is_shorts,
-        source_description=source_description,
-        source_settings=source_settings,
-    )
-
-    title_tags = _filter_hashtags_by_target_language(_extract_hashtags_from_text(final_title), target_lang)
-    description_tags = _filter_hashtags_by_target_language(_extract_hashtags_from_text(final_description), target_lang)
-
-    compact_title = _join_hashtags(title_tags, 95)
-    if not compact_title:
-        compact_title = "#shorts" if is_shorts else "#video"
-
-    compact_description = _join_hashtags(description_tags, 4900)
-    if not compact_description:
-        compact_description = compact_title
-
-    return compact_title, compact_description, upload_tags
 
 
 def _parse_datetime_utc(value: Any) -> Optional[datetime]:
@@ -4837,20 +4490,6 @@ class AutoModFetcher:
 
         if any(token in lowered for token in ["invalid_grant", "refresh token", "revoked", "expired", "token has been expired"]):
             return "auth", 86400, "🔑 انتهت/أُلغيت صلاحيات Google Drive. قم بربط Google Drive من الإعدادات ثم أعد المحاولة."
-        if any(token in lowered for token in [
-            "accessnotconfigured",
-            "drive api has not been used",
-            "drive.googleapis.com/overview",
-            "api has not been used in project",
-            "it is disabled",
-            "enable it by visiting",
-        ]):
-            return (
-                "api_disabled",
-                21600,
-                "🛠️ Google Drive API غير مفعّل في مشروع Google المرتبط ببيانات OAuth. "
-                "فعّل Drive API من Google Cloud Console لنفس project_id ثم انتظر دقائق لإتمام التفعيل وأعد المحاولة."
-            )
         if any(token in lowered for token in ["insufficient permissions", "insufficientpermission", "permission", "403", "forbidden"]):
             return "permission", 21600, "🚫 لا توجد صلاحيات كافية للوصول إلى المجلد في Google Drive. تأكد من المشاركة/الصلاحيات أو أعد الربط."
         if any(token in lowered for token in ["404", "not found", "file not found", "folder"]):
@@ -5075,43 +4714,14 @@ class AutoModFetcher:
 
     def _parse_gdrive_folder_id(self, source_url: str) -> str:
         raw = (source_url or "").strip()
-        if not raw:
-            return ""
-
-        # Support explicit prefixes used by the UI: gdrive:folder:<id> or gdrive:<id>
-        low = raw.lower()
-        if low.startswith("gdrive:folder:"):
-            return raw.split(":", 2)[2].strip()
-        if low.startswith("gdrive:"):
-            return raw.split(":", 1)[1].strip()
-
-        # If the user pasted a full Google Drive URL, try to extract the ID from
-        # common patterns like /folders/<id>, /file/d/<id>/..., or ?id=<id>
-        try:
-            parsed = urlparse(raw)
-            path = parsed.path or ""
-            query = parse_qs(parsed.query)
-
-            m = re.search(r"/folders/([a-zA-Z0-9_-]+)", path)
-            if m:
-                return m.group(1)
-
-            m = re.search(r"/file/d/([a-zA-Z0-9_-]+)", path)
-            if m:
-                return m.group(1)
-
-            if "id" in query and query.get("id"):
-                return query.get("id")[0]
-
-            # Fallback: extract a bare-looking id chunk from the input
-            m = re.search(r"([a-zA-Z0-9_-]{10,})", raw)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
-
-        # As last resort return the raw value (existing behavior)
-        return raw
+        folder_id = ""
+        if raw.lower().startswith("gdrive:folder:"):
+            folder_id = raw.split(":", 2)[2].strip()
+        elif raw.lower().startswith("gdrive:"):
+            folder_id = raw.split(":", 1)[1].strip()
+        else:
+            folder_id = raw
+        return folder_id
 
     def _gdrive_poll_state(self, source_url: str) -> Dict[str, Any]:
         try:
@@ -5710,7 +5320,7 @@ class AutoModFetcher:
 
     def _preflight_youtube_upload_auth(self, channel_id: str) -> None:
         from src.agent.error_tracker import get_error_tracker
-        from src.agent.uploader import _creds_from_token_file, _recover_token_from_db
+        from src.agent.uploader import _creds_from_token_file
         from src.bot.channel_manager import ChannelManager
 
         et = get_error_tracker()
@@ -5723,23 +5333,33 @@ class AutoModFetcher:
 
         token_path = channel.token_path
         if not token_path or not os.path.exists(token_path):
-            # محاولة استعادة التوكن من قاعدة البيانات (Render يفقد الملفات عند إعادة التشغيل)
-            yt_id = channel.youtube_channel_id or ""
-            if token_path and yt_id:
-                recovered = _recover_token_from_db(token_path, yt_id)
-                if recovered and os.path.exists(token_path):
-                    logger.info(f"🔄 Token recovered from DB for channel {channel_id[:20]} during preflight")
-                else:
-                    logger.error(f"Token not found for channel {channel_id} during upload preflight (DB recovery failed)")
-                    et.record_error("upload", "token_missing", channel_id)
-                    raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
-            else:
-                logger.error(f"Token not found for channel {channel_id} during upload preflight")
-                et.record_error("upload", "token_missing", channel_id)
-                raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
+            logger.error(f"Token not found for channel {channel_id} during upload preflight")
+            et.record_error("upload", "token_missing", channel_id)
+            raise RuntimeError(f"ملف التوكن غير موجود للقناة {channel_id}")
 
         try:
-            _creds_from_token_file(token_path)
+            creds = _creds_from_token_file(token_path)
+
+            # 🔒 التحقق من أن التوكن ينتمي للقناة الصحيحة
+            try:
+                from googleapiclient.discovery import build
+                yt_service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+                ch_resp = yt_service.channels().list(part="id", mine=True).execute()
+                token_channels = [item.get("id", "") for item in (ch_resp.get("items") or [])]
+                if token_channels and channel_id not in token_channels:
+                    msg = (
+                        f"❌ توكن القناة {channel_id[:15]}... ينتمي لقناة أخرى: {token_channels[0][:15]}... "
+                        f"— يُرجى إعادة ربط القناة بالتوكن الصحيح"
+                    )
+                    logger.error(msg)
+                    et.record_error("upload", "token_wrong_channel", channel_id)
+                    raise RuntimeError(msg)
+            except RuntimeError:
+                raise
+            except Exception as verify_err:
+                # لا نمنع النشر إذا فشل التحقق (بعض التوكنات قد لا تدعم channels.list)
+                logger.debug(f"Could not verify token channel ownership: {verify_err}")
+
             logger.debug(f"✅ Upload auth preflight passed for {channel_id[:20]}")
         except Exception as tok_err:
             logger.warning(f"⚠️ Token pre-validation failed: {tok_err}")
@@ -5804,111 +5424,27 @@ class AutoModFetcher:
         except Exception:
             pass
 
-        # الحد الأقصى لحجم الملف (ميغابايت) - مهم جداً لخطة Render المجانية
-        max_file_size_mb = int(os.environ.get("GDRIVE_MAX_FILE_SIZE_MB", "400") or 400)
-
         try:
             service = self._gdrive_service()
-            meta = service.files().get(
-                fileId=file_id,
-                fields="name,mimeType,size",
-                supportsAllDrives=True
-            ).execute()
+            meta = service.files().get(fileId=file_id, fields="name,mimeType", supportsAllDrives=True).execute()
             name = str((meta or {}).get("name") or "").strip() or file_id
-
-            # فحص حجم الملف قبل التحميل لمنع استنفاد القرص/الذاكرة
-            file_size_bytes = int((meta or {}).get("size") or 0)
-            file_size_mb = file_size_bytes / (1024 * 1024) if file_size_bytes > 0 else 0
-            if file_size_mb > max_file_size_mb:
-                logger.warning(
-                    f"⏭️ [GDrive] Skipping file {file_id} ({name}): "
-                    f"size {file_size_mb:.1f}MB exceeds limit {max_file_size_mb}MB"
-                )
-                self._last_download_error = (
-                    f"gdrive_file_too_large: الملف كبير جداً "
-                    f"({file_size_mb:.0f}MB > الحد {max_file_size_mb}MB)"
-                )
-                return None
-
-            # فحص المساحة المتاحة على القرص
-            try:
-                import shutil
-                disk_usage = shutil.disk_usage(output_dir)
-                free_mb = disk_usage.free / (1024 * 1024)
-                # نحتاج ضعف حجم الملف تقريباً (الأصلي + المعالج)
-                needed_mb = file_size_mb * 2.5 if file_size_mb > 0 else 200
-                if free_mb < needed_mb:
-                    logger.warning(
-                        f"⚠️ [GDrive] Low disk space: {free_mb:.0f}MB free, "
-                        f"need ~{needed_mb:.0f}MB for file {name}"
-                    )
-                    # محاولة تنظيف الملفات المؤقتة القديمة
-                    try:
-                        from src.agent.disk_guard import cleanup_old_files
-                        cleanup_old_files(max_age_hours=0.5)
-                    except Exception:
-                        pass
-                    # إعادة فحص المساحة
-                    disk_usage = shutil.disk_usage(output_dir)
-                    free_mb = disk_usage.free / (1024 * 1024)
-                    if free_mb < file_size_mb * 1.2:
-                        logger.error(
-                            f"❌ [GDrive] Not enough disk space even after cleanup: "
-                            f"{free_mb:.0f}MB free < {file_size_mb * 1.2:.0f}MB needed"
-                        )
-                        self._last_download_error = (
-                            f"disk_space_low: لا توجد مساحة كافية على القرص "
-                            f"({free_mb:.0f}MB متاح)"
-                        )
-                        return None
-            except ImportError:
-                pass
-            except Exception as disk_err:
-                logger.debug(f"Disk space check failed (non-fatal): {disk_err}")
-
         except Exception:
             name = file_id
-            file_size_mb = 0
 
         ext = os.path.splitext(name)[1] or ".mp4"
         dest = os.path.join(output_dir, f"{file_id}{ext}")
 
         try:
-            request = self._gdrive_service().files().get_media(
-                fileId=file_id, supportsAllDrives=True
-            )
-            # حجم القطعة 2MB بدلاً من 8MB لتقليل استهلاك الذاكرة على Render
-            chunk_size = int(os.environ.get("GDRIVE_CHUNK_SIZE_MB", "2") or 2) * 1024 * 1024
-            chunk_size = max(256 * 1024, min(chunk_size, 16 * 1024 * 1024))
-
+            request = self._gdrive_service().files().get_media(fileId=file_id, supportsAllDrives=True)
             with open(dest, "wb") as fh:
-                downloader = MediaIoBaseDownload(fh, request, chunksize=chunk_size)
+                downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
                 done = False
-                chunk_num = 0
                 while not done:
-                    status, done = downloader.next_chunk()
-                    chunk_num += 1
-                    if status and chunk_num % 5 == 0:
-                        pct = int(status.progress() * 100)
-                        logger.info(
-                            f"📥 [GDrive] Downloading {name}: {pct}% "
-                            f"(chunk {chunk_num})"
-                        )
-
+                    _, done = downloader.next_chunk()
             if os.path.exists(dest) and os.path.getsize(dest) > 0:
-                final_size_mb = os.path.getsize(dest) / (1024 * 1024)
-                logger.info(
-                    f"✅ [GDrive] Downloaded {name}: {final_size_mb:.1f}MB"
-                )
                 return dest
             return None
         except Exception as e:
-            # تنظيف الملف الجزئي عند الفشل
-            try:
-                if os.path.exists(dest):
-                    os.remove(dest)
-            except Exception:
-                pass
             self._remember_download_error(e)
             logger.error(f"Failed to download gdrive file {file_id}: {e}")
             return None
@@ -7317,10 +6853,9 @@ class AutoModFetcher:
                 sources_list = self.db.get_sources(channel_id, content_type)
             except Exception:
                 sources_list = []
-            enabled_sources = [s for s in (sources_list or []) if bool((s or {}).get("enabled", True))]
-            if not enabled_sources:
-                logger.debug(
-                    "⏭️ [AutoMod] Schedule skipped because no enabled sources exist (channel=%s, content_type=%s)",
+            if not sources_list:
+                logger.info(
+                    "⏭️ [AutoMod] Schedule skipped because no sources exist (channel=%s, content_type=%s)",
                     channel_id[:10],
                     content_type,
                 )
@@ -7441,17 +6976,6 @@ class AutoModFetcher:
                 schedule_total = len(schedules)
             except SupabaseInfrastructureError as infra_err:
                 logger.critical(f"🛑 [AutoMod] Infrastructure Error (DB Unreachable): {infra_err}")
-                # Report to hibernation manager — may trigger hibernation after threshold
-                try:
-                    from . import hibernation_manager
-                    hibernation_triggered = hibernation_manager.record_db_failure(error=infra_err)
-                    if hibernation_triggered:
-                        logger.warning("💤 Hibernation triggered by SupabaseInfrastructureError")
-                        # If hibernation was just triggered, skip the notification here
-                        # (the hibernation manager will send its own notification)
-                        return {"status": "hibernating", "message": f"DB Infrastructure Error triggered hibernation: {infra_err.message}"}
-                except Exception as hm_err:
-                    logger.warning(f"Failed to notify hibernation manager: {hm_err}")
                 await _notify(
                     "🚨 *البوت متوقف حالياً بسبب عطل في قاعدة البيانات!*\n\n"
                     f"⚠️ السبب: `{infra_err.message}`\n"
@@ -7551,115 +7075,6 @@ class AutoModFetcher:
                         )
                     continue
 
-                # ========== الفحص المسبق الشامل قبل البدء بأي معالجة ==========
-                # تحقق من: القناة موجودة + مفعّلة، التوكن صالح، المصادر متوفرة،
-                # المساحة كافية، ffmpeg متاح، خدمات AI متاحة، الاتصال بالإنترنت، إلخ.
-                # عند فشل فحص حرج: أوقف جدول هذه القناة فقط + أرسل إشعار للمالك.
-                try:
-                    from . import preflight_checks as _pf
-                    # Skip preflight in preview_mode (admin manually testing) or in
-                    # targeted-resume scenarios (admin explicitly asked to retry).
-                    skip_preflight = bool(preview_mode or approved_target_resume)
-                    if not skip_preflight:
-                        # First: check cooldown — if we recently failed preflight for
-                        # this channel, skip it silently (saves resources + reduces noise).
-                        in_cd, cd_entry = _pf.is_channel_in_cooldown(channel_id)
-                        if in_cd and not schedule_force:
-                            results["skipped"] += 1
-                            cd_seconds = cd_entry.get("seconds_remaining", 0) if cd_entry else 0
-                            logger.info(
-                                f"⏭ [AutoMod] Skipping schedule {sch_idx}: in preflight cooldown "
-                                f"(channel={channel_id[:10]}..., {cd_seconds}s remaining)"
-                            )
-                            if meta_notifications_enabled:
-                                try:
-                                    cd_reason = cd_entry.get("reason", "غير معروف") if cd_entry else ""
-                                    await _notify(
-                                        f"⏭ الجدول {sch_idx}: *تخطي* — القناة في فترة هدنة بعد فشل سابق.\n"
-                                        f"   📺 القناة: `{channel_id[:20]}...`\n"
-                                        f"   ⏱ المتبقي: ~{cd_seconds}s\n"
-                                        f"   📛 السبب: `{cd_reason[:80]}`"
-                                    )
-                                except Exception:
-                                    pass
-                            continue
-
-                        # Run preflight checks (channel-level — source checks happen per-source below)
-                        preflight_report = _pf.run_preflight_checks(
-                            channel_id=channel_id,
-                            schedule=schedule,
-                            source=None,  # We'll re-run per-source checks inside the source loop
-                            skip_network=False,
-                            skip_db=False,
-                            skip_ai=False,
-                            skip_resource=False,
-                        )
-
-                        if not preflight_report.all_passed:
-                            # Critical failure — pause this schedule + notify admin
-                            results["skipped"] += 1
-                            results["failed"] += 1
-                            failures = preflight_report.critical_failures
-                            logger.warning(
-                                f"🛑 [AutoMod] Preflight FAILED for schedule {sch_idx} "
-                                f"(channel={channel_id[:10]}..., failures={[f.name for f in failures]})"
-                            )
-                            # Mark cooldown so we don't retry this channel for a while
-                            try:
-                                off_reason_msg = "; ".join(f"{f.name}: {f.message[:50]}" for f in failures[:3])
-                                _pf.mark_channel_preflight_failed(
-                                    channel_id,
-                                    reason=off_reason_msg,
-                                    cooldown_seconds=int(os.getenv("PREFLIGHT_COOLDOWN_SECONDS", "1800") or "1800"),
-                                )
-                            except Exception:
-                                pass
-                            # Pause this schedule (channel-level)
-                            try:
-                                schedule["enabled"] = False
-                                self.db._save_existing_schedule(schedule, {"enabled": False})
-                                logger.warning(
-                                    f"🛑 [AutoMod] Schedule paused due to preflight failure "
-                                    f"(channel={channel_id[:20]}..., content_type={content_type})."
-                                )
-                            except Exception as db_err:
-                                logger.error(f"Failed to pause schedule after preflight failure: {db_err}")
-                            # Send pause notification
-                            try:
-                                pause_msg = preflight_report.failure_text()
-                                await _notify(pause_msg)
-                            except Exception:
-                                pass
-                            # Skip this schedule entirely
-                            continue
-                        else:
-                            # Preflight passed — log summary
-                            logger.info(
-                                f"✅ [AutoMod] Preflight passed for schedule {sch_idx} "
-                                f"(channel={channel_id[:10]}..., {preflight_report.duration_seconds:.2f}s, "
-                                f"{len(preflight_report.checks)} checks, {len(preflight_report.warnings)} warnings)"
-                            )
-                            if meta_notifications_enabled and preflight_report.warnings:
-                                try:
-                                    warnings_text = "\n".join(
-                                        f"⚠️ {w.name}: {w.message}" for w in preflight_report.warnings[:3]
-                                    )
-                                    await _notify(
-                                        f"✅ الجدول {sch_idx}: الفحص المسبق ناجح مع تحذيرات.\n{warnings_text}"
-                                    )
-                                except Exception:
-                                    pass
-                except Exception as pf_err:
-                    # If preflight itself crashes, log + continue (don't block the bot)
-                    logger.warning(f"⚠️ [AutoMod] Preflight check crashed (non-blocking): {pf_err}")
-                    if meta_notifications_enabled:
-                        try:
-                            await _notify(
-                                f"⚠️ الجدول {sch_idx}: تعطل الفحص المسبق ({str(pf_err)[:80]}). سيتم المتابعة بحذر."
-                            )
-                        except Exception:
-                            pass
-
                 logger.info(f"📡 [AutoMod] Processing schedule {sch_idx}... (Channel: {channel_id[:10]}...)")
                 await _notify(
                     f"📡 الجدول {sch_idx}: *بدء المعالجة*\n"
@@ -7679,11 +7094,8 @@ class AutoModFetcher:
                         source for source in sources_list
                         if str(source.get("id") or f"{channel_id}:{source.get('source_url', '')}") == str(target_source_id)
                     ]
-
-                if not preview_mode:
-                    sources_list = [s for s in (sources_list or []) if bool((s or {}).get("enabled", True))]
                 if not sources_list:
-                    logger.debug(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
+                    logger.info(f"⚠️ [AutoMod] No sources found for channel {channel_id[:10]}... content_type={content_type}")
                     if meta_notifications_enabled:
                         await _notify(
                             f"⚠️ الجدول {sch_idx}: لا توجد مصادر للقناة `{channel_id[:20]}...`"
@@ -7706,65 +7118,6 @@ class AutoModFetcher:
                     source_id = str(source.get("id") or f"{channel_id}:{legacy_src_url}")
                     if not source.get("enabled") and not (preview_mode and source_id == str(target_source_id)):
                         continue
-
-                    # ========== فحص مسبق لكل مصدر (source-level preflight) ==========
-                    # تحقق سريع: المصدر مفعّل، المنصة مدعومة، الروابط صالحة.
-                    # عند الفشل: تعطيل هذا المصدر فقط + إشعار + متابعة باقي المصادر.
-                    if not preview_mode and not approved_target_resume:
-                        try:
-                            from . import preflight_checks as _pf_src
-                            src_preflight = _pf_src.run_preflight_checks(
-                                channel_id=channel_id,
-                                schedule=schedule,
-                                source=source,
-                                skip_network=True,    # Already checked at channel level
-                                skip_db=True,         # Already checked at channel level
-                                skip_ai=True,         # Already checked at channel level
-                                skip_resource=True,   # Already checked at channel level
-                            )
-                            src_critical_failures = src_preflight.critical_failures
-                            if src_critical_failures:
-                                logger.warning(
-                                    f"🛑 [AutoMod] Source-level preflight FAILED "
-                                    f"(source={src_name[:20]}, channel={channel_id[:10]}..., "
-                                    f"failures={[f.name for f in src_critical_failures]})"
-                                )
-                                # Disable this source (NOT the whole channel)
-                                try:
-                                    source["enabled"] = False
-                                    self.db._save_existing_source(source_id, {"enabled": False})
-                                    logger.warning(
-                                        f"🛑 [AutoMod] Source disabled due to preflight failure "
-                                        f"(source={src_name[:20]}..., channel={channel_id[:20]}...)."
-                                    )
-                                except Exception as db_err:
-                                    logger.error(f"Failed to disable source after preflight failure: {db_err}")
-                                # Send admin notification (source-level, not as critical as channel-level)
-                                try:
-                                    pause_msg = (
-                                        f"🛑 <b>تم تعطيل مصدر تلقائياً بعد فشل الفحص المسبق</b>\n\n"
-                                        f"📺 القناة: <code>{channel_id[:25]}...</code>\n"
-                                        f"🎯 المصدر: <code>{src_name[:30]}</code>\n"
-                                        f"🆔 المصدر: <code>{source_id[:25]}...</code>\n\n"
-                                    )
-                                    for f in src_critical_failures[:3]:
-                                        pause_msg += f"🔍 <b>{f.name}</b>: <code>{f.message}</code>\n"
-                                        if f.suggested_fix:
-                                            pause_msg += f"   💡 {f.suggested_fix}\n"
-                                    pause_msg += (
-                                        f"\n⏸ تم تعطيل هذا المصدر فقط.\n"
-                                        f"✅ القناة وبقية المصادر سيواصلون العمل.\n"
-                                        f"🔧 بعد إصلاح المشكلة، أعد تفعيل المصدر من إعدادات الأتمتة."
-                                    )
-                                    await _notify(pause_msg)
-                                except Exception:
-                                    pass
-                                # Continue to next source (don't break the schedule)
-                                continue
-                        except Exception as src_pf_err:
-                            logger.warning(
-                                f"⚠️ [AutoMod] Source-level preflight crashed (non-blocking): {src_pf_err}"
-                            )
 
                     fetch_sources = []
                     try:
@@ -7814,8 +7167,6 @@ class AutoModFetcher:
                     current_out_path = None
                     current_yt_url = ""
                     claimed_processing = False
-                    processing_touch_task: Optional[asyncio.Task] = None
-                    processing_touch_stop: Optional[asyncio.Event] = None
 
                     try:
                         fetch_order = config.get("settings", {}).get("fetch_order", "newest")
@@ -8482,51 +7833,6 @@ class AutoModFetcher:
 
                                 await _notify("✅ تمت المعالجة بنجاح.")
 
-                            # ========== إزالة الحواف (Border Removal) ==========
-                            # إذا كان المصدر لديه ميزة إزالة الحواف مفعّلة، يتم فحص الفيديو
-                            # وإزالة أي حواف (سوداء/بيضاء/ملوّنة) واستبدالها بحواف سوداء نظيفة.
-                            border_removal_enabled = bool(source_settings.get("border_removal_enabled", False))
-                            if not border_removal_enabled:
-                                # Also check channel-level setting
-                                try:
-                                    from src.bot.channel_manager import ChannelManager as _CM_br
-                                    _ch_br = _CM_br().get_channel(channel_id)
-                                    if _ch_br:
-                                        _extra_br = getattr(_ch_br, "extra_data", {}) or {}
-                                        border_removal_enabled = bool(_extra_br.get("border_removal_enabled", False))
-                                except Exception:
-                                    pass
-
-                            if border_removal_enabled and out_path and ResilientFS.exists(out_path):
-                                try:
-                                    await _notify("🔲 *جاري فحص وإزالة الحواف...*")
-                                    from src.agent import border_detector as _bd
-                                    
-                                    _br_out_dir = _project_local_path(".output", "auto_mod_border")
-                                    ResilientFS.makedirs(_br_out_dir, exist_ok=True)
-                                    _br_out = os.path.join(_br_out_dir, f"{vid_id}_noborder.mp4")
-                                    
-                                    loop = asyncio.get_running_loop()
-                                    import functools as _ft_br
-                                    _br_func = _ft_br.partial(_bd.remove_borders, out_path, _br_out)
-                                    
-                                    try:
-                                        _br_timeout = int(os.getenv("AUTO_MOD_BORDER_REMOVAL_TIMEOUT_SECONDS", "120") or "120")
-                                        await asyncio.wait_for(loop.run_in_executor(None, _br_func), timeout=float(_br_timeout))
-                                        if ResilientFS.exists(_br_out):
-                                            borders_info = _bd.detect_borders.__doc__ or ""
-                                            self._cleanup_file(out_path)
-                                            out_path = _br_out
-                                            await _notify("✅ تم إزالة الحواف بنجاح.")
-                                        else:
-                                            await _notify("⚠️ فشل إزالة الحواف، سيتم المتابعة بدونها.")
-                                    except asyncio.TimeoutError:
-                                        logger.warning(f"⚠️ Border removal timed out for {vid_id}")
-                                        await _notify("⚠️ نفذ وقت إزالة الحواف.")
-                                except Exception as br_err:
-                                    logger.warning(f"Border removal failed: {br_err}")
-                                    await _notify(f"⚠️ فشل إزالة الحواف: `{str(br_err)[:60]}`")
-
                             # ========== نص مخصص (Custom Overlay Text) ==========
                             source_overlay = pick_source_overlay_config(source_settings) if vid_type == "shorts" else None
                             channel_overlay = None
@@ -8534,81 +7840,11 @@ class AutoModFetcher:
                                 try:
                                     from src.bot.channel_manager import ChannelManager as _CM
                                     _ch = _CM().get_channel(channel_id)
-                                    _overlay_texts = (getattr(_ch, "custom_overlay_texts", None) or []) if _ch else []
+                                    _overlay_texts = getattr(_ch, "custom_overlay_texts", None) or [] if _ch else []
                                     if _overlay_texts:
-                                        _picked = random.choice(_overlay_texts)
-                                        # custom_overlay_texts entries are normally dicts with keys:
-                                        #   {text, timing, duration, screen_position, intro_animation?, outro_animation?}
-                                        # but older versions stored plain strings — handle both gracefully.
-                                        if isinstance(_picked, dict):
-                                            _ov_text_val = str(_picked.get("text") or "").strip()
-                                            if _ov_text_val:
-                                                # Preserve the user-selected timing / duration / position
-                                                try:
-                                                    _ov_dur_val = float(_picked.get("duration") or 2.0)
-                                                except Exception:
-                                                    _ov_dur_val = 2.0
-                                                channel_overlay = {
-                                                    "text": _ov_text_val,
-                                                    "timing": str(_picked.get("timing") or "full"),
-                                                    "duration": _ov_dur_val,
-                                                    "screen_position": str(_picked.get("screen_position") or "top"),
-                                                    "intro_animation": _picked.get("intro_animation") or {"enabled": False, "type": "none", "duration": 0.0},
-                                                    "outro_animation": _picked.get("outro_animation") or {"enabled": False, "type": "none", "duration": 0.0},
-                                                }
-                                        elif isinstance(_picked, str):
-                                            _ov_text_val = _picked.strip()
-                                            if _ov_text_val:
-                                                channel_overlay = {
-                                                    "text": _ov_text_val,
-                                                    "timing": "full",
-                                                    "duration": 2.0,
-                                                    "screen_position": "top",
-                                                    "intro_animation": {"enabled": False, "type": "none", "duration": 0.0},
-                                                    "outro_animation": {"enabled": False, "type": "none", "duration": 0.0},
-                                                }
+                                        channel_overlay = random.choice(_overlay_texts)
                                 except Exception:
                                     channel_overlay = None
-
-                            # Fallback: simple channel-level overlay_text (extra_data["overlay_text"])
-                            # This is the text set via the "🅰️ إعداد نص التعليق" menu (minecraft content type).
-                            # It is only used when no source-level or custom_overlay_texts entry was chosen.
-                            if not source_overlay and not channel_overlay and vid_type == "shorts":
-                                try:
-                                    from src.bot.channel_manager import ChannelManager as _CM
-                                    _ch = _CM().get_channel(channel_id)
-                                    if _ch:
-                                        _extra = getattr(_ch, "extra_data", {}) or {}
-                                        if _extra.get("overlay_enabled", True):
-                                            _simple_text = str(_extra.get("overlay_text") or "").strip()
-                                            if _simple_text:
-                                                _simple_pos = str(_extra.get("overlay_position") or "bottom_center").lower()
-                                                # Map bottom_* / top_* to the renderer's expected values
-                                                if _simple_pos.startswith("bottom"):
-                                                    _simple_screen_pos = "bottom"
-                                                elif _simple_pos.startswith("top"):
-                                                    _simple_screen_pos = "top"
-                                                elif "center" in _simple_pos or "middle" in _simple_pos:
-                                                    _simple_screen_pos = "center"
-                                                else:
-                                                    _simple_screen_pos = "top"
-                                                try:
-                                                    _simple_size = int(_extra.get("overlay_font_size") or 64)
-                                                except Exception:
-                                                    _simple_size = 64
-                                                channel_overlay = {
-                                                    "text": _simple_text,
-                                                    "timing": "full",
-                                                    "duration": 0.0,
-                                                    "screen_position": _simple_screen_pos,
-                                                    "intro_animation": {"enabled": False, "type": "none", "duration": 0.0},
-                                                    "outro_animation": {"enabled": False, "type": "none", "duration": 0.0},
-                                                    # Pass through font size hint for downstream usage
-                                                    "_font_size_hint": _simple_size,
-                                                    "_overlay_font_path": _extra.get("overlay_font_path"),
-                                                }
-                                except Exception:
-                                    pass
 
                             overlay_cfg = source_overlay or channel_overlay
                             if overlay_cfg and vid_type == "shorts":
@@ -8637,46 +7873,24 @@ class AutoModFetcher:
 
                                             loop = asyncio.get_running_loop()
                                             import functools
-
-                                            # Font settings (used by the simple overlay_text fallback path):
-                                            # the user can choose a custom font + size via the "🅰️ إعداد نص التعليق" menu.
-                                            _ov_font_size = 56
-                                            try:
-                                                _fs_hint = overlay_cfg.get("_font_size_hint")
-                                                if _fs_hint:
-                                                    _ov_font_size = max(20, min(200, int(_fs_hint)))
-                                            except Exception:
-                                                pass
-                                            _ov_custom_font = overlay_cfg.get("_overlay_font_path") or None
-
                                             _ov_func = functools.partial(
                                                 _mvp_ov.add_custom_overlay_text,
                                                 input_path=out_path,
                                                 output_path=_ov_out,
                                                 text=_ov_text,
                                                 timing=overlay_cfg.get("timing", "full"),
-                                                duration=float(overlay_cfg.get("duration", 2.0) or 0.0),
+                                                duration=float(overlay_cfg.get("duration", 2.0)),
                                                 screen_position=overlay_cfg.get("screen_position", "top"),
-                                                overlay_image_path=overlay_cfg.get("image_path"),
                                                 intro_animation=overlay_cfg.get("intro_animation"),
                                                 outro_animation=overlay_cfg.get("outro_animation"),
-                                                custom_font=_ov_custom_font,
-                                                font_size=_ov_font_size,
                                             )
 
                                             try:
-                                                def _is_low_resource_mode() -> bool:
-                                                    try:
-                                                        return (os.getenv("LOW_RESOURCE_MODE") == "1") or (os.getenv("FFMPEG_LOW_CPU") == "1")
-                                                    except Exception:
-                                                        return False
-
-                                                default_timeout = "150" if _is_low_resource_mode() else "90"
                                                 try:
-                                                    overlay_timeout_s = int(float((os.getenv("AUTO_MOD_CUSTOM_OVERLAY_TIMEOUT_SECONDS", default_timeout) or default_timeout).strip()))
+                                                    overlay_timeout_s = int(float((os.getenv("AUTO_MOD_CUSTOM_OVERLAY_TIMEOUT_SECONDS", "90") or "90").strip()))
                                                 except Exception:
-                                                    overlay_timeout_s = int(float(default_timeout))
-                                                overlay_timeout_s = max(30, min(240, overlay_timeout_s))
+                                                    overlay_timeout_s = 90
+                                                overlay_timeout_s = max(20, min(240, overlay_timeout_s))
 
                                                 await asyncio.wait_for(loop.run_in_executor(None, _ov_func), timeout=float(overlay_timeout_s))
                                                 if ResilientFS.exists(_ov_out):
@@ -8744,48 +7958,6 @@ class AutoModFetcher:
                                 except Exception as fc_err:
                                     logger.warning(f"Facecam overlay failed: {fc_err}")
                                     await _notify(f"⚠️ فشل الفيس كام: `{str(fc_err)[:80]}`")
-
-                            # ========== إدراج الإعلان (Ad Insertion) ==========
-                            try:
-                                from src.agent import ad_manager
-                                ad_cfg = ad_manager.get_ad_config(source_id)
-                                # Also check channel-level ad
-                                if not ad_cfg.get("enabled"):
-                                    ad_cfg = ad_manager.get_ad_config(channel_id)
-
-                                if ad_cfg.get("enabled") and ad_cfg.get("has_video"):
-                                    await _notify(f"📺 *جاري إضافة إعلان:* position={ad_cfg['position']}, timing={ad_cfg['timing']}s")
-                                    from src.agent.mod_video_processor import ModVideoProcessor as _MVP_Ad
-                                    _mvp_ad = _MVP_Ad(temp_dir=_project_local_path(".temp", "auto_mod"))
-                                    _ad_out_dir = _project_local_path(".output", "auto_mod_ad")
-                                    ResilientFS.makedirs(_ad_out_dir, exist_ok=True)
-                                    _ad_out = os.path.join(_ad_out_dir, f"{vid_id}_ad.mp4")
-
-                                    loop = asyncio.get_running_loop()
-                                    import functools as _ft_ad
-                                    _ad_func = _ft_ad.partial(
-                                        _mvp_ad.insert_ad_video,
-                                        input_path=out_path,
-                                        output_path=_ad_out,
-                                        ad_video_path=ad_cfg["video_path"],
-                                        position=ad_cfg.get("position", "end"),
-                                        timing=float(ad_cfg.get("timing", 5.0)),
-                                        continue_after_ad=bool(ad_cfg.get("continue_after_ad", True)),
-                                    )
-                                    try:
-                                        _ad_timeout = int(os.getenv("AUTO_MOD_AD_INSERTION_TIMEOUT_SECONDS", "180") or "180")
-                                        await asyncio.wait_for(loop.run_in_executor(None, _ad_func), timeout=float(_ad_timeout))
-                                        if ResilientFS.exists(_ad_out):
-                                            self._cleanup_file(out_path)
-                                            out_path = _ad_out
-                                            await _notify("✅ تم إضافة الإعلان بنجاح.")
-                                        else:
-                                            await _notify("⚠️ فشل إضافة الإعلان، سيتم الرفع بدونه.")
-                                    except asyncio.TimeoutError:
-                                        logger.warning(f"⚠️ Ad insertion timed out for {vid_id}")
-                                        await _notify("⚠️ نفذ وقت إضافة الإعلان.")
-                            except Exception as ad_err:
-                                logger.warning(f"Ad insertion failed: {ad_err}")
 
                             if preview_mode:
                                 await _notify(
@@ -9119,11 +8291,6 @@ class AutoModFetcher:
                 channel_id[:10],
             )
 
-            effective_source_settings = _merge_channel_publish_metadata_settings(
-                source_settings,
-                getattr(channel, "extra_data", {}) or {},
-            )
-
             # توليد بيانات الفيديو محلياً قبل النشر
             ai_meta = generate_ai_metadata(
                 cfg=cfg,
@@ -9146,11 +8313,11 @@ class AutoModFetcher:
                 target_lang=target_lang,
                 is_shorts=is_shorts,
                 source_description=source_description,
-                source_settings=effective_source_settings,
+                source_settings=source_settings,
             )
             
             # Use per-source privacy setting if configured, otherwise channel default
-            privacy = effective_source_settings.get("privacy") or getattr(channel, "privacy", "unlisted") or "unlisted"
+            privacy = source_settings.get("privacy") or getattr(channel, "privacy", "unlisted") or "unlisted"
 
             loop = asyncio.get_running_loop()
             import functools
@@ -9365,14 +8532,6 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
         logger.warning(f"⚠️ Failed to initialize AutoMod config: {e}")
 
     while True:
-        # ========== فحص وضع السبات ==========
-        # إذا كانت قاعدة البيانات متعطلة، توقف تماماً حتى تعود.
-        try:
-            from . import hibernation_manager
-            await hibernation_manager.wait_if_hibernating()
-        except Exception:
-            pass
-
         loop_started_monotonic = time.monotonic()
         hb.beat("auto_fetch")  # نبضة في كل دورة
         

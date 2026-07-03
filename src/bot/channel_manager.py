@@ -202,11 +202,14 @@ class Channel:
         scheduling_settings: Optional[Dict[str, Any]] = None,
         # 🆕 نصوص مخصصة تظهر على الفيديو
         custom_overlay_texts: Optional[List[Dict[str, Any]]] = None,
+        # 🆕 الاسم الحقيقي للقناة على YouTube (يُجلب من API)
+        youtube_channel_name: Optional[str] = None,
         **kwargs
     ):
         self.channel_id = channel_id
         self.channel_name = channel_name
         self.youtube_channel_id = youtube_channel_id
+        self.youtube_channel_name = youtube_channel_name  # الاسم الفعلي من YouTube
         self.platform = platform
         self.platform_channel_id = platform_channel_id or youtube_channel_id
         self.platform_credentials = platform_credentials or {}
@@ -327,6 +330,8 @@ class Channel:
             "scheduling_settings": self.scheduling_settings,
             # 🆕 نصوص مخصصة
             "custom_overlay_texts": self.custom_overlay_texts,
+            # 🆕 الاسم الحقيقي للقناة على YouTube
+            "youtube_channel_name": getattr(self, "youtube_channel_name", None),
         }
         data.update(self.extra_data)
         return data
@@ -612,7 +617,75 @@ class ChannelManager:
         )
 
         return platform.validate_credentials(credentials)
-    
+
+    def fetch_youtube_channel_name(self, youtube_channel_id: str) -> Optional[str]:
+        """
+        جلب الاسم الحقيقي لقناة YouTube من API باستخدام التوكن الخاص بها.
+        يُرجع الاسم الفعلي أو None في حال الفشل.
+        """
+        channel_id = str(youtube_channel_id or "").strip()
+        if not channel_id:
+            return None
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = None
+        token_path = resolve_youtube_token_path(channel_id, cfg)
+        if not token_path or not os.path.exists(token_path):
+            return None
+        try:
+            from ..agent.uploader import _creds_from_token_file
+            creds = _creds_from_token_file(token_path)
+            from googleapiclient.discovery import build
+            youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+            # Try channels.list with mine=True first (works with standard OAuth scopes)
+            resp = youtube.channels().list(part="snippet", mine=True).execute()
+            items = resp.get("items") or []
+            if items:
+                return items[0].get("snippet", {}).get("title")
+            # Fallback: list by ID
+            resp2 = youtube.channels().list(part="snippet", id=channel_id).execute()
+            items2 = resp2.get("items") or []
+            if items2:
+                return items2[0].get("snippet", {}).get("title")
+        except Exception as e:
+            logger.debug(f"Failed to fetch YouTube channel name for {channel_id}: {e}")
+        return None
+
+    def resolve_channel_url(self, channel: Optional["Channel"]) -> str:
+        """
+        بناء رابط قناة YouTube الأصلي بناءً على معرف القناة.
+        """
+        if channel is None:
+            return ""
+        yt_id = str(getattr(channel, "youtube_channel_id", "") or "").strip()
+        if not yt_id:
+            return ""
+        # If it's already a URL, return as-is
+        if yt_id.startswith("http"):
+            return yt_id
+        return f"https://www.youtube.com/channel/{yt_id}"
+
+    def refresh_all_youtube_names(self) -> Dict[str, str]:
+        """
+        تحديث أسماء جميع القنوات من YouTube API (للقنوات التي تفتقر للاسم الحقيقي).
+        يُرجع قاموس {channel_id: real_name} للقنوات التي تم تحديثها.
+        """
+        updated: Dict[str, str] = {}
+        channels = self.list_all_channels(enabled_only=False)
+        for ch in channels:
+            if ch.platform != "youtube" or not ch.youtube_channel_id:
+                continue
+            if getattr(ch, "youtube_channel_name", None):
+                continue  # الاسم موجود مسبقاً
+            real_name = self.fetch_youtube_channel_name(ch.youtube_channel_id)
+            if real_name:
+                ch.youtube_channel_name = real_name
+                self._save_channel(ch)
+                updated[ch.channel_id] = real_name
+                logger.info(f"🔄 Refreshed YouTube name: {ch.youtube_channel_id} -> {real_name}")
+        return updated
+
     def update_channel(self, channel_id: str, **updates) -> Optional[Channel]:
         """
         تحديث إعدادات قناة
@@ -756,13 +829,24 @@ class ChannelManager:
     def _save_channel(self, channel: Channel):
         """حفظ القناة في ملف JSON و Supabase (مع مزامنة خلفية)"""
         path = self._get_channel_path(channel.channel_id)
-        
+
         # تحديث الذاكرة فوراً
         self._channels_cache[channel.channel_id] = channel
 
+        # 🔄 جلب الاسم الحقيقي للقناة من YouTube API إذا لم يكن محفوظاً
+        if channel.platform == "youtube" and channel.youtube_channel_id:
+            if not getattr(channel, "youtube_channel_name", None):
+                try:
+                    real_name = self.fetch_youtube_channel_name(channel.youtube_channel_id)
+                    if real_name:
+                        channel.youtube_channel_name = real_name
+                        logger.info(f"✅ Fetched real YouTube name: {real_name} for {channel.youtube_channel_id}")
+                except Exception as e:
+                    logger.debug(f"Could not fetch YouTube name for {channel.youtube_channel_id}: {e}")
+
         try:
             data = channel.to_dict()
-            
+
             # محاولة تضمين محتوى التوكن للمزامنة مع Supabase
             if channel.platform == "youtube" and channel.youtube_channel_id:
                 try:
@@ -843,7 +927,9 @@ class ChannelManager:
         entry = {
             "channel_id": channel.youtube_channel_id,
             "internal_id": channel.channel_id,  # 🆕 المعرف الداخلي (UUID) للمطابقة مع المكتبة
-            "title": channel.channel_name,
+            "title": getattr(channel, "youtube_channel_name", None) or channel.channel_name,
+            "channel_name": getattr(channel, "youtube_channel_name", None) or channel.channel_name,
+            "channel_url": self.resolve_channel_url(channel),
             "enabled": channel.enabled,
             "content_type": channel.content_type,
             "lang": channel.language,

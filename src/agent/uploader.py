@@ -276,10 +276,6 @@ def _run_upload_with_timeout(
         _shutdown_executor_nowait(executor)
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/blogger"]
-# All scopes the bot may grant (including Drive) — used for flexible token validation
-ALL_KNOWN_SCOPES = SCOPES + ["https://www.googleapis.com/auth/drive.readonly"]
-# Minimum scopes required for YouTube upload functionality
-REQUIRED_UPLOAD_SCOPES = {"https://www.googleapis.com/auth/youtube.upload"}
 TOKEN_PATH_DEFAULT = ".data/youtube_token.json"
 
 # Upload timeout configuration (in seconds)
@@ -642,21 +638,10 @@ def get_credentials(cfg: Config, interactive: bool = False) -> Credentials:
         try:
             creds = Credentials.from_authorized_user_file(token_path, SCOPES)
         except ValueError as e:
+            # إذا تغيرت الصلاحيات، نحذف التوكن القديم لإجبار المصادقة من جديد
             if "Scope has changed" in str(e):
-                # تحميل التوكن بدون تحقق صارم من الصلاحيات
-                # (يحدث عند إضافة صلاحية drive.readonly عبر include_granted_scopes)
-                logger.info(f"Scope changed detected, reloading token without strict scope check: {e}")
-                try:
-                    creds = Credentials.from_authorized_user_file(token_path)
-                    # التحقق من وجود الصلاحيات الأساسية المطلوبة
-                    token_scopes = set(creds.scopes or [])
-                    if not REQUIRED_UPLOAD_SCOPES.issubset(token_scopes):
-                        logger.warning(f"Token missing required scopes. Has: {token_scopes}, Needs: {REQUIRED_UPLOAD_SCOPES}")
-                        os.remove(token_path)
-                        creds = None
-                except Exception:
-                    os.remove(token_path)
-                    creds = None
+                os.remove(token_path)
+                creds = None
             else:
                 raise e
     
@@ -934,101 +919,35 @@ def oauth_add_account(cfg: Config) -> dict:
         "token_content": json.loads(token_json)
     }
 
-def _recover_token_from_db(token_path: str, channel_id: str) -> bool:
-    """محاولة استعادة ملف التوكن من قاعدة البيانات (Supabase) إذا كان مفقوداً من القرص.
-    
-    يحدث هذا عادة على Render عند إعادة التشغيل حيث يفقد النظام الملفات المؤقتة.
-    
-    Returns:
-        True إذا تم استعادة الملف بنجاح, False إذا فشلت الاستعادة
-    """
-    try:
-        from ..bot.channel_manager import ChannelManager
-        cm = ChannelManager()
-        # البحث عن القناة بالمعرف المستخرج من اسم الملف أو المعرف الفعلي
-        channels, _ = cm.list_channels(limit=1000)
-        ch = next((c for c in channels if c.youtube_channel_id == channel_id or c.channel_id == channel_id), None)
-        
-        if ch and ch.platform_credentials:
-            creds_data = ch.platform_credentials
-            # التحقق من أن البيانات تحتوي على حقول توكن صالحة
-            if isinstance(creds_data, dict) and (creds_data.get("token") or creds_data.get("refresh_token") or creds_data.get("client_id")):
-                os.makedirs(os.path.dirname(token_path), exist_ok=True)
-                with open(token_path, "w", encoding="utf-8") as f:
-                    json.dump(creds_data, f)
-                logger.info(f"🔄 Recovered missing token file from DB for: {channel_id}")
-                return True
-            elif isinstance(creds_data, str):
-                # If it's a JSON string from DB
-                try:
-                    parsed = json.loads(creds_data)
-                    if isinstance(parsed, dict):
-                        os.makedirs(os.path.dirname(token_path), exist_ok=True)
-                        with open(token_path, "w", encoding="utf-8") as f:
-                            json.dump(parsed, f)
-                        logger.info(f"🔄 Recovered missing token file (from string) for: {channel_id}")
-                        return True
-                except Exception:
-                    pass
-            logger.warning(f"⚠️ Channel {channel_id} has platform_credentials but no valid token data")
-        else:
-            logger.debug(f"No platform_credentials found in DB for channel {channel_id}")
-    except Exception as e:
-        logger.debug(f"Failed to recover token for {channel_id}: {e}")
-    return False
-
-
 def _creds_from_token_file(token_path: str) -> Credentials:
     channel_id = os.path.splitext(os.path.basename(token_path))[0]
     
     # محاولة استعادة التوكن من قاعدة البيانات إذا غاب الملف
     if not os.path.exists(token_path):
-        _recover_token_from_db(token_path, channel_id)
+        try:
+            from ..bot.channel_manager import ChannelManager
+            cm = ChannelManager()
+            # البحث عن القناة بالمعرف المستخرج من اسم الملف أو المعرف الفعلي
+            # ملاحظة: channel_id هنا قد يكون youtube_channel_id
+            channels, _ = cm.list_channels(limit=1000)
+            ch = next((c for c in channels if c.youtube_channel_id == channel_id or c.channel_id == channel_id), None)
+            
+            if ch and ch.platform_credentials:
+                os.makedirs(os.path.dirname(token_path), exist_ok=True)
+                with open(token_path, "w", encoding="utf-8") as f:
+                    creds = ch.platform_credentials
+                    if isinstance(creds, dict):
+                        json.dump(creds, f)
+                    else:
+                        # If it's a string (JSON string from DB), write it directly
+                        f.write(str(creds))
+
+                logger.info(f"🔄 Recovered missing token file from DB for: {channel_id}")
+        except Exception as e:
+            logger.debug(f"Failed to recover token for {channel_id}: {e}")
 
     try:
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    except ValueError as e:
-        if "Scope has changed" in str(e):
-            # تحميل بدون تحقق صارم من الصلاحيات — يحدث عند إضافة drive.readonly
-            logger.info(f"🔄 Scope mismatch for {channel_id}, reloading without strict check: {e}")
-            try:
-                creds = Credentials.from_authorized_user_file(token_path)
-                token_scopes = set(creds.scopes or [])
-                if not REQUIRED_UPLOAD_SCOPES.issubset(token_scopes):
-                    logger.warning(f"Token for {channel_id} missing required upload scopes. Has: {token_scopes}")
-                    raise AuthenticationRequiredError(
-                        "التوكن لا يحتوي على صلاحيات الرفع المطلوبة. يرجى إعادة المصادقة.",
-                        token_path, channel_id
-                    )
-                # إعادة حفظ التوكن بالصلاحيات الموسعة لتجنب الخطأ مستقبلاً
-                try:
-                    with open(token_path, "w", encoding="utf-8") as f:
-                        f.write(creds.to_json())
-                    logger.info(f"✅ Re-saved token with expanded scopes for {channel_id}")
-                except Exception:
-                    pass
-            except AuthenticationRequiredError:
-                raise
-            except Exception as inner_e:
-                if os.path.exists(token_path):
-                    try:
-                        os.remove(token_path)
-                    except Exception:
-                        pass
-                raise AuthenticationRequiredError(
-                    f"تلف ملف المصادقة أو مفقود. يرجى إعادة ربط القناة.",
-                    token_path, channel_id
-                ) from inner_e
-        else:
-            if os.path.exists(token_path):
-                try:
-                    os.remove(token_path)
-                except Exception:
-                    pass
-            raise AuthenticationRequiredError(
-                f"تلف ملف المصادقة أو مفقود. يرجى إعادة ربط القناة.",
-                token_path, channel_id
-            ) from e
     except Exception as e:
         # Token file corrupted or missing after failed recovery
         if os.path.exists(token_path):
@@ -1169,6 +1088,22 @@ def upload_video_with_token(cfg: Config, token_path: str, file_path: str, title:
             def _do_upload():
                 creds = _creds_from_token_file(token_path)
                 youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+                # 🔒 التحقق من أن التوكن ينتمي للقناة المتوقعة
+                if channel_id:
+                    try:
+                        ch_resp = youtube.channels().list(part="id", mine=True).execute()
+                        token_channels = [item.get("id", "") for item in (ch_resp.get("items") or [])]
+                        if token_channels and channel_id not in token_channels:
+                            raise RuntimeError(
+                                f"❌ توكن ينتمي لقناة مختلفة ({token_channels[0][:20]}...) بدلاً من ({channel_id[:20]}...). "
+                                f"يُرجى إعادة ربط القناة بالتوكن الصحيح."
+                            )
+                    except RuntimeError:
+                        raise
+                    except Exception as verify_err:
+                        # لا نمنع النشر إذا فشل التحقق
+                        logger.debug(f"Could not verify token channel ownership: {verify_err}")
                 
                 # إذا كان هناك موعد نشر مجدول، يجب أن تكون الخصوصية private
                 effective_privacy = "private" if publish_at else privacy
