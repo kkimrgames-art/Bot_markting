@@ -721,17 +721,10 @@ async def _process_next_upload(update, context) -> int:
 async def _get_channel_token_path(channel_id: str) -> str:
     """الحصول على مسار توكن القناة"""
     try:
-        from src.bot.channel_manager import ChannelManager
-        manager = ChannelManager()
-        channel = await asyncio.to_thread(manager.get_channel, channel_id)
-        if channel:
-            for path in manager._channel_token_candidates(channel):
-                if hasattr(manager, '_resolve_storage_path'):
-                    resolved = manager._resolve_storage_path(path)
-                else:
-                    resolved = path
-                if os.path.exists(resolved):
-                    return resolved
+        from src.bot.channel_manager import resolve_youtube_token_path
+        path = await asyncio.to_thread(resolve_youtube_token_path, channel_id)
+        if path and os.path.exists(path):
+            return path
     except Exception as e:
         logger.error(f"Failed to get channel token: {e}")
 
@@ -744,21 +737,45 @@ async def _get_channel_token_path(channel_id: str) -> str:
 
 
 async def _upload_to_youtube(channel_token_path, file_path, title, description, thumbnail_path, channel_id) -> dict:
-    """رفع فيديو على YouTube"""
+    """رفع فيديو على YouTube بجودة عالية بدون فقدان"""
     from src.agent.uploader import upload_video_with_token
+    from src.agent.config import load_config
+
+    cfg = load_config()
 
     result = await asyncio.to_thread(
         upload_video_with_token,
-        token_path=channel_token_path,
-        file_path=file_path,
-        title=title,
-        description=description,
-        tags=[],
-        category_id="22",
-        privacy_status="public",
-        thumbnail_path=thumbnail_path if thumbnail_path else None,
+        cfg,
+        channel_token_path,
+        file_path,
+        title,
+        description,
+        [],
+        "public",
     )
-    return result
+
+    # رفع الصورة المصغرة بعد نجاح الرفع
+    if result and thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaFileUpload
+
+            def _upload_thumb():
+                from src.agent.uploader import _creds_from_token_file
+                creds = _creds_from_token_file(channel_token_path)
+                youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+                youtube.thumbnails().set(
+                    videoId=result,
+                    media_body=MediaFileUpload(thumbnail_path, mimetype="image/jpeg"),
+                ).execute()
+
+            await asyncio.to_thread(_upload_thumb)
+            logger.info(f"✅ Thumbnail uploaded for video {result}")
+        except Exception as e:
+            logger.warning(f"⚠️ Thumbnail upload failed (non-critical): {e}")
+
+    return {"video_id": result}
 
 
 async def _show_upload_results(update, context, results: list) -> int:
