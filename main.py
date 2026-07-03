@@ -376,6 +376,7 @@ async def keep_alive_pinger(url):
     """Pings the web service periodically to prevent Render sleep"""
     import aiohttp
     from src.agent.heartbeat import get_heartbeat_monitor
+    from src.agent import hibernation_manager
 
     hb = get_heartbeat_monitor()
     hb.register("keep_alive", max_silence_seconds=900)  # 15 min
@@ -384,6 +385,17 @@ async def keep_alive_pinger(url):
     consecutive_fails = 0
 
     while True:
+        # ========== فحص وضع السبات ==========
+        # حتى الـ keep-alive يجب أن يتوقف أثناء السبات — فالـ DB هو ما يهم.
+        # استثناء: إذا كان البوت على Render، نريد إبقاء الـ web service مستيقظاً،
+        # لكن مع تعطيل كل المنطق الذي يعتمد على DB. لذا نسمح للـ keep-alive
+        # بالاستمرار فقط لإبقاء الـ HTTP server حياً، لكن نشغل hibernation_manager
+        # بدلاً من الـ keep-alive العادي.
+        try:
+            await hibernation_manager.wait_if_hibernating()
+        except Exception:
+            pass
+
         await asyncio.sleep(300)  # Ping every 5 minutes (was 10)
         hb.beat("keep_alive")
 
@@ -423,6 +435,7 @@ async def periodic_maintenance():
     from src.agent.memory_guard import periodic_maintenance as mem_maintenance
     from src.agent.error_tracker import get_error_tracker
     from src.agent.alert_system import get_alert_system
+    from src.agent import hibernation_manager
 
     hb = get_heartbeat_monitor()
     hb.register("maintenance", max_silence_seconds=7200)  # 2 hours
@@ -433,6 +446,13 @@ async def periodic_maintenance():
     logger.info("🔧 Periodic maintenance loop started.")
 
     while True:
+        # ========== فحص وضع السبات ==========
+        # لا داعي للصيانة أثناء السبات — كل المهام متوقفة أصلاً.
+        try:
+            await hibernation_manager.wait_if_hibernating()
+        except Exception:
+            pass
+
         await asyncio.sleep(600)  # كل 10 دقائق
         hb.beat("maintenance")
 
@@ -454,11 +474,20 @@ async def periodic_maintenance():
                     )
                     hb.mark_alert_sent(name)
 
-            # 4. تقرير يومي (كل 24 ساعة)
-            now = time.time()
-            if now - last_daily_report > 86400:
-                await alert.daily_report()
-                last_daily_report = now
+            # 4. تقرير يومي (كل 24 ساعة) — باستخدام النظام الجديد المتنوع
+            try:
+                from src.agent import daily_report_generator
+                await daily_report_generator.send_daily_report_if_due()
+            except Exception as rep_err:
+                logger.warning(f"⚠️ Daily report generator failed: {rep_err}")
+                # Fallback to legacy daily_report if new system crashes
+                try:
+                    now = time.time()
+                    if now - last_daily_report > 86400:
+                        await alert.daily_report()
+                        last_daily_report = now
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.error(f"Maintenance error: {e}")
@@ -687,7 +716,43 @@ async def main():
 
     # 4. تسجيل المهام المراقبة
 
-    # 4a. Keep-Alive
+    # 4a. DB Health Monitor (Hibernation manager) — runs FIRST so it's always alive
+    from src.agent import hibernation_manager
+    await supervisor.register(
+        "db_health_monitor",
+        hibernation_manager.db_health_monitor_loop,
+        max_restarts=100,
+        base_restart_delay=10,
+    )
+
+    # 4a-bis. YouTube Proxy Pool — pre-warm + background refresh
+    # CRITICAL for Render: datacenter IPs are blocked by YouTube.
+    # This task discovers, tests, and maintains a pool of working proxies
+    # that are shared across all bot instances via Supabase.
+    try:
+        from src.agent import youtube_resilient_fetcher
+        # Pre-warm synchronously before starting the background task
+        # (so the first download attempt has proxies available)
+        logger.info("🔥 Pre-warming YouTube proxy pool...")
+        proxy_count = await asyncio.to_thread(youtube_resilient_fetcher.pre_warm_pool)
+        logger.info(f"✅ Proxy pool pre-warmed: {proxy_count} working proxies")
+
+        # Register background refresh task
+        async def _proxy_refresh_wrapper():
+            """Wrapper to run the sync background loop in a thread."""
+            pool = youtube_resilient_fetcher.get_proxy_pool()
+            await asyncio.to_thread(pool.background_refresh_loop)
+
+        await supervisor.register(
+            "proxy_pool_refresh",
+            _proxy_refresh_wrapper,
+            max_restarts=100,
+            base_restart_delay=30,
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ YouTube proxy pool initialization failed (non-blocking): {e}")
+
+    # 4b. Keep-Alive
     if external_url:
         await supervisor.register(
             "keep_alive",
@@ -696,7 +761,7 @@ async def main():
             base_restart_delay=10,
         )
 
-    # 4b. Auto-Fetch Loop
+    # 4c. Auto-Fetch Loop
     from src.agent.auto_mod_fetcher import start_auto_fetch_loop
     await supervisor.register(
         "auto_fetch",
@@ -705,7 +770,7 @@ async def main():
         base_restart_delay=15,
     )
 
-    # 4c. Periodic Maintenance
+    # 4d. Periodic Maintenance
     await supervisor.register(
         "maintenance",
         periodic_maintenance,
