@@ -6525,8 +6525,6 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(ads_delete, pattern=r"^am_ads_del:"),
         CallbackQueryHandler(ads_upload_start, pattern=r"^am_ads_upload:"),
         CallbackQueryHandler(ads_list_all, pattern=r"^am_ads_list$"),
-        # Ready videos (Google Drive → YouTube)
-        CallbackQueryHandler(_open_ready_videos, pattern=r"^am_ready_videos$"),
     ]
 
 

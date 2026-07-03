@@ -63,9 +63,7 @@ def build_application(token: str):
 
     application.add_handler(CallbackQueryHandler(handle_raw_review_callback, pattern=r"^rawrev:"))
 
-    from .handlers.auto_mod_handlers import get_auto_mod_conversation_handler
-    application.add_handler(get_auto_mod_conversation_handler())
-
+    # ===== Ready Videos Conversation (BEFORE auto_mod to catch rv_* callbacks) =====
     from .handlers.ready_videos_handlers import (
         start_ready_videos, start_drive_auth, check_drive_auth,
         list_drive_videos, paginate_videos, select_drive_video,
@@ -79,7 +77,7 @@ def build_application(token: str):
 
     ready_videos_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(start_ready_videos, pattern=r"^am_ready_videos$"),
+            CallbackQueryHandler(start_ready_videos, pattern=r"^(am_ready_videos|rv_menu)$"),
         ],
         states={
             RV_MENU: [
@@ -140,6 +138,9 @@ def build_application(token: str):
         per_message=False,
     )
     application.add_handler(ready_videos_conv)
+
+    from .handlers.auto_mod_handlers import get_auto_mod_conversation_handler
+    application.add_handler(get_auto_mod_conversation_handler())
 
     from .handlers.ai_manager_handler import get_ai_manager_conv
     application.add_handler(get_ai_manager_conv())
