@@ -1026,18 +1026,58 @@ def _normalize_mistral_model_name(model: str) -> str:
     return m
 
 
+def _mistral_models_list() -> List[str]:
+    """Build the Mistral model list priority:
+       1. User-saved models via ai_models_store
+       2. MISTRAL_MODEL env (single)
+       3. Default
+    """
+    models: List[str] = []
+    try:
+        from . import ai_models_store
+        saved = ai_models_store.get_models("mistral")
+        if saved:
+            models.extend(saved)
+    except Exception:
+        pass
+    if not models:
+        single_env = (os.getenv("MISTRAL_MODEL") or "").strip()
+        if single_env:
+            models = [single_env]
+        else:
+            models = ["mistral-large-latest"]
+    return models
+
+
 def _call_mistral_chat(cfg: Config, prompt: str, system_prompt: Optional[str] = None) -> Tuple[Optional[str], int, Optional[int], str]:
+    """Call Mistral API.
+
+    Iterates through all available Mistral keys × all configured models.
+    Returns the first successful response. On model-level failures (404, 400,
+    deprecation), tries the next model with the same key. On key-level
+    failures (invalid_key, rate_limit, quota_exhausted), tries the next key.
+    """
     try:
         if _is_ai_backed_off(cfg):
             return None, 0, None, "backoff"
 
         mistral_api_keys = _load_mistral_api_keys(cfg)
         endpoint = _mistral_endpoint(cfg)
-        if not endpoint:
+        if not endpoint or not mistral_api_keys:
             return None, 0, None, "no_key"
 
-        model_raw = (os.getenv("MISTRAL_MODEL") or "mistral-large-2512").strip()
-        model = _normalize_mistral_model_name(model_raw)
+        models = _mistral_models_list()
+        # Normalize each model name
+        models = [_normalize_mistral_model_name(m) for m in models if (m or "").strip()]
+        # De-duplicate preserving order
+        seen = set()
+        deduped: List[str] = []
+        for m in models:
+            if m and m not in seen:
+                seen.add(m)
+                deduped.append(m)
+        models = deduped or ["mistral-large-latest"]
+
         try:
             max_tokens = int(os.getenv("MISTRAL_MAX_TOKENS", "420") or 420)
         except Exception:
@@ -1050,69 +1090,121 @@ def _call_mistral_chat(cfg: Config, prompt: str, system_prompt: Optional[str] = 
             temperature = 0.8
         temperature = max(0.0, min(1.5, temperature))
 
+        try:
+            max_keys = int(os.getenv("MISTRAL_MAX_KEYS_PER_REQUEST", "2") or "2")
+        except Exception:
+            max_keys = 2
+        max_keys = max(1, min(5, max_keys))
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        headers = {
-            "Content-Type": "application/json",
-        }
-        if mistral_api_keys:
-            headers["Authorization"] = f"Bearer {mistral_api_keys[0]}"
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-
         timeout = int(os.getenv("MISTRAL_TIMEOUT", "25") or 25)
-        resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
-        status = int(getattr(resp, "status_code", 0) or 0)
-        retry_after = None
-        try:
-            ra = resp.headers.get("Retry-After") if getattr(resp, "headers", None) else None
-            if ra:
-                retry_after = int(float(str(ra).strip()))
-        except Exception:
-            retry_after = None
 
-        if status >= 400:
-            err_text = ""
-            try:
-                j = resp.json() or {}
-                err_text = (j.get("message") or (j.get("error") or {}).get("message") or "")
-            except Exception:
+        last_status = 0
+        last_retry_after: Optional[int] = None
+        last_category = "empty"
+
+        tried_keys = set()
+        for _ in range(min(max_keys, len(mistral_api_keys))):
+            # Rotate to next key
+            api_key = None
+            for k in mistral_api_keys:
+                if k not in tried_keys:
+                    api_key = k
+                    break
+            if not api_key:
+                break
+            tried_keys.add(api_key)
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+
+            for model in models:
+                logger.info(f"🤖 Trying Mistral (Key: ...{api_key[-8:]}, Model: {model})")
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
                 try:
-                    err_text = (resp.text or "")[:500]
-                except Exception:
-                    err_text = ""
-            et = err_text.lower() if err_text else ""
-            if status in {401, 403}:
-                return None, status, retry_after, "invalid_key"
-            if status == 429:
-                if "quota" in et or "exceeded" in et:
-                    return None, status, retry_after, "quota_exhausted"
-                return None, status, retry_after, "rate_limit"
-            if status >= 500:
-                return None, status, retry_after, "transient"
-            if status == 400:
-                return None, status, retry_after, "bad_request"
-            return None, status, retry_after, "other"
+                    resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                except requests.exceptions.Timeout:
+                    last_status, last_retry_after, last_category = 0, None, "timeout"
+                    continue  # Try next model
+                except requests.exceptions.RequestException:
+                    last_status, last_retry_after, last_category = 0, None, "network"
+                    continue  # Try next model
 
-        data = resp.json() or {}
-        choices = data.get("choices") or []
-        if not choices:
-            return None, status, retry_after, "empty"
-        msg = (choices[0].get("message") or {})
-        out = (msg.get("content") or "").strip()
-        return (out or None), status, retry_after, ("ok" if out else "empty")
-    except requests.exceptions.Timeout:
-        return None, 0, None, "timeout"
-    except requests.exceptions.RequestException:
-        return None, 0, None, "network"
+                status = int(getattr(resp, "status_code", 0) or 0)
+                retry_after = None
+                try:
+                    ra = resp.headers.get("Retry-After") if getattr(resp, "headers", None) else None
+                    if ra:
+                        retry_after = int(float(str(ra).strip()))
+                except Exception:
+                    retry_after = None
+
+                if status == 200:
+                    try:
+                        data = resp.json() or {}
+                    except Exception:
+                        data = {}
+                    choices = data.get("choices") or []
+                    if choices:
+                        msg = (choices[0].get("message") or {})
+                        out = (msg.get("content") or "").strip()
+                        if out:
+                            return out, status, retry_after, "ok"
+                    last_status, last_retry_after, last_category = status, retry_after, "empty"
+                    continue  # Try next model
+
+                # Error handling
+                err_text = ""
+                try:
+                    j = resp.json() or {}
+                    err_text = (j.get("message") or (j.get("error") or {}).get("message") or "")
+                except Exception:
+                    try:
+                        err_text = (resp.text or "")[:500]
+                    except Exception:
+                        err_text = ""
+                et = err_text.lower() if err_text else ""
+
+                last_status, last_retry_after, last_category = status, retry_after, "other"
+
+                if status in {401, 403}:
+                    last_category = "invalid_key"
+                    # Try next key
+                    break
+                if status == 429:
+                    last_category = "quota_exhausted" if ("quota" in et or "exceeded" in et) else "rate_limit"
+                    # Try next key
+                    break
+                if status >= 500:
+                    last_category = "transient"
+                    # Try next model
+                    continue
+                if status == 400:
+                    last_category = "bad_request"
+                    # Model likely unsupported — try next model
+                    continue
+                # Other 4xx — try next model
+                continue
+
+            # If we broke out of the model loop due to key-level error, try next key
+            if last_category in {"invalid_key", "quota_exhausted", "rate_limit"}:
+                continue
+            # If we got an OK we would have returned already.
+            # If all models failed with bad_request / transient, no point trying same key set
+            # — but try next key anyway for transient cases.
+
+        return None, last_status, last_retry_after, last_category
     except Exception:
         return None, 0, None, "exception"
 
@@ -1197,6 +1289,8 @@ def _call_gemini_with_key(
 def _call_gemini(cfg: Config, prompt: str) -> Optional[str]:
     """
     استدعاء Gemini مع نظام إدارة المفاتيح الاحترافي 🆕
+    يدعم قائمة نماذج متعددة يحدها المستخدم (via Telegram UI) — عند فشل أحد
+    النماذج (rate limit / quota / 404 / 400) ينتقل تلقائياً إلى النموذج التالي.
     """
     try:
         if _is_ai_backed_off(cfg):
@@ -1205,12 +1299,36 @@ def _call_gemini(cfg: Config, prompt: str) -> Optional[str]:
 
         max_attempts = int(os.getenv("GEMINI_MAX_ATTEMPTS", "2") or "2")
         base_sleep = float(os.getenv("GEMINI_RETRY_BASE_SLEEP", "0.2") or "0.2")
-        model_list_env = os.getenv("GEMINI_MODEL_LIST") or ""
-        models = [m.strip() for m in model_list_env.replace("\n", ",").split(",") if m.strip()] or [
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-1.5-flash-latest",
-        ]
+
+        # Build the model list priority:
+        #   1. User-saved models from ai_models_store (Telegram UI)
+        #   2. GEMINI_MODEL_LIST env var
+        #   3. GEMINI_MODEL env var (single)
+        #   4. Hardcoded defaults
+        models: List[str] = []
+        try:
+            from . import ai_models_store
+            saved = ai_models_store.get_models("gemini")
+            if saved:
+                models.extend(saved)
+        except Exception:
+            pass
+
+        if not models:
+            model_list_env = os.getenv("GEMINI_MODEL_LIST") or ""
+            env_models = [m.strip() for m in model_list_env.replace("\n", ",").split(",") if m.strip()]
+            if env_models:
+                models = env_models
+            else:
+                single_env = (os.getenv("GEMINI_MODEL") or "").strip()
+                if single_env:
+                    models = [single_env]
+                else:
+                    models = [
+                        "gemini-1.5-flash",
+                        "gemini-1.5-flash-8b",
+                        "gemini-1.5-flash-latest",
+                    ]
 
         tried = set()
 
@@ -1227,6 +1345,10 @@ def _call_gemini(cfg: Config, prompt: str) -> Optional[str]:
             status = 0
             retry_after = None
             category = "empty"
+
+            # Try each model with this key; break only on key-level failures
+            # (invalid_key, rate_limit, quota_exhausted). On model-level failures
+            # (404 Not Found / 400 Bad Request) — try the NEXT model with same key.
             for mdl in models:
                 result, status, retry_after, category = _call_gemini_with_key(
                     prompt,
@@ -1234,13 +1356,22 @@ def _call_gemini(cfg: Config, prompt: str) -> Optional[str]:
                     model=mdl,
                     timeout=int(os.getenv("GEMINI_TIMEOUT", "25") or "25"),
                 )
-                if result or category in {"rate_limit", "quota_exhausted", "invalid_key"}:
+                if result:
+                    key_manager.mark_request(api_key, success=True, status_code=status, error_category="ok")
+                    return result
+
+                # Key-level failures → don't try other models with this key
+                if category in {"rate_limit", "quota_exhausted", "invalid_key"}:
                     break
 
-            if result:
-                key_manager.mark_request(api_key, success=True, status_code=status, error_category="ok")
-                return result
+                # bad_request / 404 / 500 / transient / network / timeout / empty
+                # → try the next model with the same key
+                logger.info(
+                    f"🔄 Gemini model '{mdl}' returned category={category} (status={status}); "
+                    f"trying next model if available."
+                )
 
+            # Mark the key with the final failure category
             key_manager.mark_request(api_key, success=False, status_code=status, error_category=category, retry_after_seconds=retry_after)
 
             if category in {"bad_request"}:
@@ -1266,200 +1397,224 @@ def _generate_content_with_failover(cfg: Config, prompt: str) -> Optional[str]:
     """
     Robust generation strategy with automatic service detection:
     - Skips services without API keys
-    - Tries available services in configured order
+    - Skips providers/keys currently in backoff (via ai_quota_tracker)
+    - Tries available services in smart order (most available keys first)
     - Falls back gracefully between providers
+    - Marks provider/key failures so they're not retried until their backoff expires
     """
-    
+    from . import ai_quota_tracker
+
     if _is_ai_backed_off(cfg):
-        logger.info("⏸️ AI is in backoff mode, skipping generation.")
+        logger.info("⏸️ AI is in global backoff mode, skipping generation.")
         return None
 
-    default_order = "smart"
-    order = (os.getenv("AI_PROVIDER_ORDER") or default_order).strip().lower()
-    providers = ["mistral_first", "openrouter_first", "groq_first", "clarifai_first", "all", "smart"]
+    # Periodic cleanup of expired entries (cheap — only mutates if needed)
+    try:
+        ai_quota_tracker.cleanup_expired()
+    except Exception:
+        pass
+
+    order = (os.getenv("AI_PROVIDER_ORDER") or "smart").strip().lower()
+    valid_orders = {"mistral_first", "openrouter_first", "groq_first",
+                    "clarifai_first", "gemini_first", "all", "smart"}
     if order == "gemini_first":
-        logger.warning("⚠️ AI_PROVIDER_ORDER=gemini_first is no longer supported; falling back to smart mode.")
+        # Gemini is now fully supported — gemini_first is a valid mode
+        pass
+    elif order not in valid_orders:
         order = "smart"
-    elif order not in providers:
-        order = "smart"  # Default to smart mode - tries available services
-    
+
     system_prompt = "You are a creative social media manager specializing in Minecraft and YouTube Shorts. Output exactly what is requested."
-    
-    # Helper function to check if a service has keys
+
+    # ─── Gather available keys per provider ───
+    orm = get_openrouter_manager()
+    groqm = get_groq_manager()
+    clarqm = get_clarifai_manager()
+    gemini_km = get_key_manager()
+
+    openrouter_keys = list(orm.api_keys or [])
+    groq_keys = list(groqm.api_keys or [])
+    clarifai_keys = list(clarqm.api_keys or [])
+    gemini_keys = list(gemini_km.api_keys or gemini_km.keys or [])
+    mistral_keys = _load_mistral_api_keys(cfg)
+
+    # ─── Helper: provider key availability check ───
     def _has_openrouter_keys():
-        orm = get_openrouter_manager()
-        return bool(orm.api_keys)
-    
+        return bool(ai_quota_tracker.get_available_keys("openrouter", openrouter_keys))
+
     def _has_groq_keys():
-        groqm = get_groq_manager()
-        return bool(groqm.api_keys)
-    
+        return bool(ai_quota_tracker.get_available_keys("groq", groq_keys))
+
     def _has_clarifai_keys():
-        clarqm = get_clarifai_manager()
-        return bool(clarqm.api_keys)
-    
+        return bool(ai_quota_tracker.get_available_keys("clarifai", clarifai_keys))
+
     def _has_gemini_keys():
-        key_manager = get_key_manager()
-        try:
-            return key_manager.has_configured_keys()
-        except Exception:
-            return bool(getattr(key_manager, "keys", []))
+        return bool(ai_quota_tracker.get_available_keys("gemini", gemini_keys))
 
     def _has_mistral_keys():
         if (os.getenv("DISABLE_MISTRAL") or "").strip().lower() in {"1", "true", "yes", "on"}:
             return False
-        return bool(_load_mistral_api_keys(cfg) or cfg.MISTRAL_PROXY_URL)
+        return bool(ai_quota_tracker.get_available_keys("mistral", mistral_keys))
 
+    # ─── Try functions: mark quota tracker on success/failure ───
     def _try_mistral():
         if not _has_mistral_keys():
-            logger.debug("⏭️ Skipping Mistral (no key configured)")
+            logger.debug("⏭️ Skipping Mistral (no available keys)")
             return None
         _ai_throttle(cfg)
         content, status, retry_after, category = _call_mistral_chat(cfg, prompt, system_prompt=system_prompt)
         if content:
+            ai_quota_tracker.mark_provider_success("mistral")
+            # Mistral keys are managed internally — also mark success for the first key
+            # (the manager handles its own rotation, but we track provider-level state here)
             logger.info("✅ Mistral successful.")
             return content
-        logger.info("⚠️ Mistral failed or key exhausted.")
+        logger.info(f"⚠️ Mistral failed (category={category}).")
         if category in {"rate_limit", "quota_exhausted"}:
-            try:
-                _set_ai_backoff(cfg, int(os.getenv("AI_BACKOFF_SECONDS", "120") or "120"))
-            except Exception:
-                pass
+            ai_quota_tracker.mark_provider_failure("mistral", error_category=category)
+        elif category in {"invalid_key", "transient", "network", "timeout"}:
+            ai_quota_tracker.mark_provider_failure("mistral", error_category=category)
         return None
-    
-    # Try OpenRouter
+
     def _try_openrouter():
         if not _has_openrouter_keys():
-            logger.debug("⏭️ Skipping OpenRouter (no keys configured)")
+            logger.debug("⏭️ Skipping OpenRouter (no available keys)")
             return None
-        orm = get_openrouter_manager()
         _ai_throttle(cfg)
         content = orm.completion_with_fallback(prompt, system_prompt=system_prompt)
         if content:
+            ai_quota_tracker.mark_provider_success("openrouter")
             logger.info("✅ OpenRouter successful.")
             return content
-        logger.info("⚠️ OpenRouter failed or keys exhausted.")
+        logger.info("⚠️ OpenRouter failed (all keys/models exhausted).")
+        # Heuristic: if all keys/models failed, treat as quota-exhausted
+        ai_quota_tracker.mark_provider_failure("openrouter", error_category="quota_exhausted")
         return None
-    
-    # Try Groq  
+
     def _try_groq():
         if not _has_groq_keys():
-            logger.debug("⏭️ Skipping Groq (no keys configured)")
+            logger.debug("⏭️ Skipping Groq (no available keys)")
             return None
-        groqm = get_groq_manager()
         _ai_throttle(cfg)
         content = groqm.completion_with_fallback(
-            prompt, 
+            prompt,
             system_prompt=system_prompt,
-            model=os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+            model=os.getenv("GROQ_MODEL") or None,  # None → use saved models list
         )
         if content:
+            ai_quota_tracker.mark_provider_success("groq")
             logger.info("✅ Groq successful.")
             return content
-        logger.info("⚠️ Groq failed or keys exhausted.")
+        logger.info("⚠️ Groq failed (all keys/models exhausted).")
+        ai_quota_tracker.mark_provider_failure("groq", error_category="quota_exhausted")
         return None
-    
-    # Try Clarifai
+
     def _try_clarifai():
         if not _has_clarifai_keys():
-            logger.debug("⏭️ Skipping Clarifai (no keys configured)")
+            logger.debug("⏭️ Skipping Clarifai (no available keys)")
             return None
-        clarqm = get_clarifai_manager()
         _ai_throttle(cfg)
         content = clarqm.completion_with_fallback(
-            prompt, 
+            prompt,
             system_prompt=system_prompt,
-            model=os.getenv("CLARIFAI_MODEL", "openai/GPT-3-5-Turbo")
+            model=os.getenv("CLARIFAI_MODEL") or None,
         )
         if content:
+            ai_quota_tracker.mark_provider_success("clarifai")
             logger.info("✅ Clarifai successful.")
             return content
-        logger.info("⚠️ Clarifai failed or keys exhausted.")
+        logger.info("⚠️ Clarifai failed (all keys/models exhausted).")
+        ai_quota_tracker.mark_provider_failure("clarifai", error_category="quota_exhausted")
         return None
-    
-    # Smart mode: Try services in order of availability
+
+    def _try_gemini():
+        if not _has_gemini_keys():
+            logger.debug("⏭️ Skipping Gemini (no available keys)")
+            return None
+        _ai_throttle(cfg)
+        content = _call_gemini(cfg, prompt)
+        if content:
+            ai_quota_tracker.mark_provider_success("gemini")
+            logger.info("✅ Gemini successful.")
+            return content
+        logger.info("⚠️ Gemini failed (all keys/models exhausted).")
+        ai_quota_tracker.mark_provider_failure("gemini", error_category="quota_exhausted")
+        return None
+
+    # ─── Provider order resolution ───
+    provider_funcs = {
+        "openrouter": _try_openrouter,
+        "groq":       _try_groq,
+        "clarifai":   _try_clarifai,
+        "mistral":    _try_mistral,
+        "gemini":     _try_gemini,
+    }
+
+    # Build the ordered list of providers to try
     if order == "smart":
-        # Check which services have keys and prioritize
-        available_services = []
-        if _has_openrouter_keys():
-            available_services.append(("OpenRouter", _try_openrouter))
-        if _has_groq_keys():
-            available_services.append(("Groq", _try_groq))
-        if _has_clarifai_keys():
-            available_services.append(("Clarifai", _try_clarifai))
-        if _has_mistral_keys():
-            available_services.append(("Mistral", _try_mistral))
-        
-        if not available_services:
+        # Smart mode: use quota_tracker to prioritize providers
+        provider_keys_map = {
+            "openrouter": openrouter_keys,
+            "groq":       groq_keys,
+            "clarifai":   clarifai_keys,
+            "mistral":    mistral_keys,
+            "gemini":     gemini_keys,
+        }
+        # Only consider providers that have at least one key configured
+        candidate_providers = [p for p, keys in provider_keys_map.items() if keys]
+        if not candidate_providers:
             logger.error("❌ No AI services have API keys configured!")
             return None
-        
-        logger.info(f"🤖 Available AI services: {[s[0] for s in available_services]}")
-        
-        for name, try_func in available_services:
-            content = try_func()
-            if content:
-                return content
 
-    elif order == "mistral_first":
-        content = _try_mistral()
-        if content:
-            return content
-        content = _try_openrouter()
-        if content:
-            return content
-        content = _try_groq()
-        if content:
-            return content
-        content = _try_clarifai()
-        if content:
-            return content
-    
-    elif order == "openrouter_first":
-        content = _try_openrouter()
-        if content:
-            return content
-        content = _try_groq()
-        if content:
-            return content
-        content = _try_clarifai()
-        if content:
-            return content
-        content = _try_mistral()
-        if content:
-            return content
-            
-    elif order == "groq_first":
-        content = _try_groq()
-        if content: return content
-        content = _try_openrouter()
-        if content: return content
-        content = _try_clarifai()
-        if content: return content
-        content = _try_mistral()
-        if content: return content
-            
-    elif order == "clarifai_first":
-        content = _try_clarifai()
-        if content: return content
-        content = _try_openrouter()
-        if content: return content
-        content = _try_groq()
-        if content: return content
-        content = _try_mistral()
-        if content: return content
-            
-    elif order == "all":
-        # Try all supported providers in the free/default sequence without Gemini.
-        content = _try_openrouter()
-        if content: return content
-        content = _try_groq()
-        if content: return content
-        content = _try_clarifai()
-        if content: return content
-        content = _try_mistral()
-        if content: return content
-    
+        # Filter to providers that are NOT currently blocked
+        available_providers = [p for p in candidate_providers
+                               if ai_quota_tracker.is_provider_available(p)]
+        if not available_providers:
+            logger.warning("⏸️ All configured providers are currently in backoff. Skipping AI generation.")
+            return None
+
+        # Get smart order (most available keys first, with quota penalty)
+        ordered = ai_quota_tracker.get_smart_provider_order(available_providers, provider_keys_map)
+        if not ordered:
+            logger.warning("⏸️ No providers with available keys right now. Skipping AI generation.")
+            return None
+
+        logger.info(f"🤖 Smart AI provider order: {ordered}")
+
+        for prov_name in ordered:
+            try:
+                content = provider_funcs[prov_name]()
+                if content:
+                    return content
+            except Exception as e:
+                logger.error(f"❌ {prov_name} raised exception: {e}")
+                ai_quota_tracker.mark_provider_failure(prov_name, error_category="other")
+                continue
+
+    else:
+        # Explicit ordering modes (still skip providers in backoff)
+        order_map = {
+            "mistral_first":     ["mistral", "openrouter", "groq", "clarifai", "gemini"],
+            "openrouter_first":  ["openrouter", "groq", "clarifai", "mistral", "gemini"],
+            "groq_first":        ["groq", "openrouter", "clarifai", "mistral", "gemini"],
+            "clarifai_first":    ["clarifai", "openrouter", "groq", "mistral", "gemini"],
+            "gemini_first":      ["gemini", "openrouter", "groq", "clarifai", "mistral"],
+            "all":               ["openrouter", "groq", "clarifai", "mistral", "gemini"],
+        }
+        ordered = order_map.get(order, order_map["all"])
+        for prov_name in ordered:
+            # Skip if provider is in backoff
+            if not ai_quota_tracker.is_provider_available(prov_name):
+                logger.debug(f"⏭️ Skipping {prov_name} (in provider-level backoff)")
+                continue
+            try:
+                content = provider_funcs[prov_name]()
+                if content:
+                    return content
+            except Exception as e:
+                logger.error(f"❌ {prov_name} raised exception: {e}")
+                ai_quota_tracker.mark_provider_failure(prov_name, error_category="other")
+                continue
+
     logger.error("❌ All AI generation methods failed.")
     try:
         _set_ai_backoff(cfg, int(os.getenv("AI_BACKOFF_SECONDS", "300") or "300"))

@@ -254,17 +254,41 @@ class OpenRouterManager:
         return ranked
 
     def get_models(self) -> List[str]:
-        """Returns the dynamic ranked list or fallbacks."""
+        """Returns the effective model list.
+
+        Priority order:
+          1. User-saved models via ai_models_store (Telegram UI)
+          2. Dynamically discovered free models (cached in state)
+          3. Hardcoded DEFAULT_FREE_MODELS
+        """
+        # User-saved models always take priority — admin explicitly added them.
+        try:
+            from . import ai_models_store
+            user_models = ai_models_store.get_models("openrouter")
+            if user_models:
+                # Make sure dynamic list is still appended as fallback tail.
+                dynamic = self._sanitize_models(self.state.get("dynamic_models") or [])
+                merged: List[str] = []
+                for m in list(user_models) + list(dynamic):
+                    if m and m not in merged:
+                        merged.append(m)
+                return merged
+        except Exception:
+            pass
+
         dynamic = self._sanitize_models(self.state.get("dynamic_models") or [])
         if dynamic:
             return dynamic
         return list(self.DEFAULT_FREE_MODELS)
 
     def get_next_key(self) -> Optional[str]:
-        """Finds a key that isn't blocked, using rotation."""
+        """Finds a key that isn't blocked, using rotation.
+
+        Also consults ai_quota_tracker for unified backoff state.
+        """
         now = datetime.now()
-        
-        # Clean up blocks
+
+        # Clean up expired blocks
         updated = False
         for key, data in self.state["keys"].items():
             if data["is_blocked"] and data["block_until"]:
@@ -275,101 +299,148 @@ class OpenRouterManager:
                 if now >= until:
                     data["is_blocked"] = False
                     data["block_until"] = None
-                    data["usage_limit_reached"] = False 
+                    data["usage_limit_reached"] = False
                     data["consecutive_errors"] = 0
                     updated = True
-        
+
         if updated:
             self._save_state()
 
         available = [k for k, d in self.state["keys"].items() if not d["is_blocked"] and not d.get("usage_limit_reached", False)]
-        
-        if not available:
-            softened = [k for k, d in self.state["keys"].items() if (not d.get("is_blocked", False))]
+
+        # Apply unified quota tracker filter
+        try:
+            from . import ai_quota_tracker
+            if available:
+                available = ai_quota_tracker.get_available_keys("openrouter", available)
+        except Exception:
+            pass
+
+        if available:
+            return random.choice(available)
+
+        # Fallback: softened (legacy self-heal logic for backward compat)
+        softened = [k for k, d in self.state["keys"].items() if (not d.get("is_blocked", False))]
+        # Also apply quota_tracker filter to softened
+        try:
+            from . import ai_quota_tracker
             if softened:
-                return random.choice(softened)
+                softened = ai_quota_tracker.get_available_keys("openrouter", softened)
+        except Exception:
+            pass
+        if softened:
+            return random.choice(softened)
 
-            keys_state = self.state.get("keys", {})
-            if keys_state:
-                best_key = None
-                best_until = None
-                for k, d in keys_state.items():
-                    until_s = d.get("block_until")
-                    if not until_s:
-                        continue
-                    try:
-                        until = datetime.fromisoformat(until_s).replace(tzinfo=None)
-                    except Exception:
-                        continue
-                    if best_until is None or until < best_until:
-                        best_until = until
-                        best_key = k
+        keys_state = self.state.get("keys", {})
+        if keys_state:
+            best_key = None
+            best_until = None
+            for k, d in keys_state.items():
+                until_s = d.get("block_until")
+                if not until_s:
+                    continue
+                try:
+                    until = datetime.fromisoformat(until_s).replace(tzinfo=None)
+                except Exception:
+                    continue
+                if best_until is None or until < best_until:
+                    best_until = until
+                    best_key = k
 
-                if best_key and best_until:
-                    if best_until <= (now + timedelta(seconds=30)):
-                        keys_state[best_key]["is_blocked"] = False
-                        keys_state[best_key]["block_until"] = None
-                        keys_state[best_key]["usage_limit_reached"] = False
-                        keys_state[best_key]["consecutive_errors"] = 0
-                        self.state["keys"] = keys_state
-                        self._save_state()
-                        return best_key
-
-                last_heal = self.state.get("last_self_heal")
-                do_heal = True
-                if last_heal:
-                    try:
-                        lh = datetime.fromisoformat(str(last_heal)).replace(tzinfo=None)
-                        if now - lh < timedelta(minutes=10):
-                            do_heal = False
-                    except Exception:
-                        do_heal = True
-
-                if do_heal:
-                    self.state["last_self_heal"] = now.isoformat()
-                    k = random.choice(list(keys_state.keys()))
-                    keys_state[k]["is_blocked"] = False
-                    keys_state[k]["block_until"] = None
-                    keys_state[k]["usage_limit_reached"] = False
-                    keys_state[k]["consecutive_errors"] = 0
+            if best_key and best_until:
+                if best_until <= (now + timedelta(seconds=30)):
+                    keys_state[best_key]["is_blocked"] = False
+                    keys_state[best_key]["block_until"] = None
+                    keys_state[best_key]["usage_limit_reached"] = False
+                    keys_state[best_key]["consecutive_errors"] = 0
                     self.state["keys"] = keys_state
                     self._save_state()
-                    return k
+                    return best_key
 
-            logger.warning("⚠️ No available OpenRouter keys! All keys exhausted or blocked.")
-            return None
-            
-        # Rotate: pick the one with the oldest last_check or just random
-        # To be simple and effective like Gemini manager:
-        return random.choice(available)
+            last_heal = self.state.get("last_self_heal")
+            do_heal = True
+            if last_heal:
+                try:
+                    lh = datetime.fromisoformat(str(last_heal)).replace(tzinfo=None)
+                    if now - lh < timedelta(minutes=10):
+                        do_heal = False
+                except Exception:
+                    do_heal = True
+
+            if do_heal:
+                self.state["last_self_heal"] = now.isoformat()
+                k = random.choice(list(keys_state.keys()))
+                keys_state[k]["is_blocked"] = False
+                keys_state[k]["block_until"] = None
+                keys_state[k]["usage_limit_reached"] = False
+                keys_state[k]["consecutive_errors"] = 0
+                self.state["keys"] = keys_state
+                self._save_state()
+                return k
+
+        logger.warning("⚠️ No available OpenRouter keys! All keys exhausted or blocked.")
+        return None
 
     def mark_key_success(self, key: str):
         if key in self.state["keys"]:
             self.state["keys"][key]["consecutive_errors"] = 0
             self.state["keys"][key]["last_check"] = datetime.now().isoformat()
+            self.state["keys"][key]["usage_limit_reached"] = False
+            self.state["keys"][key]["is_blocked"] = False
+            self.state["keys"][key]["block_until"] = None
             self._save_state()
+        try:
+            from . import ai_quota_tracker
+            ai_quota_tracker.mark_key_success("openrouter", key)
+        except Exception:
+            pass
 
     def mark_key_error(self, key: str, status_code: int = 0):
         if key not in self.state["keys"]:
             return
-            
+
         data = self.state["keys"][key]
         data["consecutive_errors"] += 1
         data["last_check"] = datetime.now().isoformat()
-        
+
         if status_code == 402:
             # Quota exhausted
             self.mark_key_limit_reached(key)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("openrouter", key, status_code=status_code, error_category="quota_exhausted")
+            except Exception:
+                pass
             return
 
         if status_code == 429:
             # Usually rate limit (temporary). Do NOT mark usage_limit_reached.
             self.block_key_seconds(key, seconds=120, reason="rate-limit")
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("openrouter", key, status_code=status_code, error_category="rate_limit", retry_after_seconds=120)
+            except Exception:
+                pass
+            return
+
+        if status_code in {401, 403}:
+            # Invalid key
+            self.block_key(key, minutes=1440)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("openrouter", key, status_code=status_code, error_category="invalid_key")
+            except Exception:
+                pass
             return
 
         if data["consecutive_errors"] >= 5:
             # General errors - temporary cool down
             self.block_key(key, minutes=10)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("openrouter", key, status_code=status_code, error_category="other")
+            except Exception:
+                pass
             return
 
         self._save_state()
@@ -431,7 +502,8 @@ class OpenRouterManager:
     def completion_with_fallback(self, prompt: str, system_prompt: Optional[str] = None) -> Optional[str]:
         """
         Tries to generate content using OpenRouter.
-        Iterates through available keys, and for each key, iterates through models.
+        Iterates through available keys, and for each key, iterates through ALL
+        configured models (user-saved first, then dynamic) until one succeeds.
         """
         models = self.get_models()
 
@@ -441,10 +513,11 @@ class OpenRouterManager:
             max_keys = 1
         max_keys = max(1, min(5, max_keys))
 
+        # How many models to try per key (default: all of them, capped to 10)
         try:
-            max_models = int(os.getenv("OPENROUTER_MAX_MODELS_PER_KEY", "2") or "2")
+            max_models = int(os.getenv("OPENROUTER_MAX_MODELS_PER_KEY", "5") or "5")
         except Exception:
-            max_models = 2
+            max_models = 5
         max_models = max(1, min(10, max_models))
 
         try:
@@ -452,13 +525,14 @@ class OpenRouterManager:
         except Exception:
             timeout_s = 20
         timeout_s = max(8, min(60, timeout_s))
-        
+
         tried_keys = set()
-        for _ in range(min(max_keys, len(self.state["keys"]))):
+        total_keys_available = max(1, len(self.state.get("keys", {})))
+        for _ in range(min(max_keys, total_keys_available)):
             api_key = self.get_next_key()
             if not api_key or api_key in tried_keys:
                 break
-            
+
             tried_keys.add(api_key)
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -472,7 +546,7 @@ class OpenRouterManager:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
-            # For each key, try a limited number of models
+            # For each key, try every model in priority order (user-saved first)
             for model in (models[:max_models] if models else []):
                 logger.info(f"🤖 Trying OpenRouter (Key: ...{api_key[-8:]}, Model: {model})")
                 payload = {
@@ -481,7 +555,7 @@ class OpenRouterManager:
                     "temperature": 0.7,
                     "max_tokens": 1000,
                 }
-                
+
                 try:
                     resp = requests.post(
                         "https://openrouter.ai/api/v1/chat/completions",
@@ -489,7 +563,7 @@ class OpenRouterManager:
                         headers=headers,
                         timeout=timeout_s
                     )
-                    
+
                     if resp.status_code == 200:
                         data = resp.json()
                         choices = data.get("choices", [])
@@ -504,27 +578,31 @@ class OpenRouterManager:
                     if cat == "invalid_key":
                         logger.error(f"❌ Invalid OpenRouter Key: ...{api_key[-8:]}")
                         self.block_key(api_key, minutes=1440)
-                        break
+                        break  # Move to next key
 
                     if cat == "quota_exhausted":
                         logger.warning(f"⚠️ OpenRouter quota exhausted ({status}) for model {model}")
                         self.mark_key_error(api_key, status_code=402)
-                        break
+                        break  # Move to next key
 
                     if cat == "rate_limit":
                         logger.warning(f"⚠️ OpenRouter rate limit ({status}) for model {model}")
                         self.block_key_seconds(api_key, seconds=int(retry_after or 90), reason="rate-limit")
-                        break
+                        break  # Move to next key
 
-                    logger.warning(f"⚠️ OpenRouter Error {status} with model {model}: {(resp.text or '')[:200]}")
+                    # For 404 / 400 / 500 / other — try the NEXT model with same key
+                    logger.warning(
+                        f"⚠️ OpenRouter Error {status} with model {model}: {(resp.text or '')[:200]}. "
+                        f"Will try next model if available."
+                    )
                     self.mark_key_error(api_key, status_code=status)
-                    continue # Try next model with same key
+                    continue  # Try next model with same key
 
                 except Exception as e:
                     logger.error(f"❌ Exception calling OpenRouter {model}: {e}")
                     self.mark_key_error(api_key)
-                    continue # Try next model
-                    
+                    continue  # Try next model
+
         return None
 
     def check_key_health(self, key: str) -> bool:

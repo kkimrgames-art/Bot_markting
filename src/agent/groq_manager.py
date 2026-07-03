@@ -36,10 +36,19 @@ class GroqManager:
         
         # Initialize/Sync keys in state
         self._initialize_keys()
-        
-        # Use default models
-        self.state["models"] = self.DEFAULT_MODELS
-        self._save_state()
+
+    def _user_models(self) -> List[str]:
+        """User-saved model IDs from ai_models_store (with fallback to defaults)."""
+        try:
+            from . import ai_models_store
+            return ai_models_store.get_models("groq")
+        except Exception:
+            return list(self.DEFAULT_MODELS)
+
+    def _env_model_override(self) -> Optional[str]:
+        """Honor GROQ_MODEL env if set (single-model override)."""
+        raw = (os.getenv("GROQ_MODEL") or "").strip()
+        return raw or None
 
     def _parse_keys_from_env(self) -> List[str]:
         raw = os.getenv("GROQ_API_KEYS") or os.getenv("GROQ_API_KEY") or ""
@@ -146,14 +155,26 @@ class GroqManager:
         self._save_state()
 
     def get_models(self) -> List[str]:
-        """Returns the available models."""
-        return self.state.get("models") or self.DEFAULT_MODELS
+        """Returns the effective model list (user-saved first, then defaults)."""
+        # Priority: explicit env override > user-saved models > defaults
+        env_override = self._env_model_override()
+        if env_override:
+            return [env_override]
+        user_models = self._user_models()
+        if user_models:
+            return list(user_models)
+        return self.state.get("models") or list(self.DEFAULT_MODELS)
 
     def get_next_key(self) -> Optional[str]:
-        """Finds a key that isn't blocked, using rotation."""
+        """Finds a key that isn't blocked, using rotation.
+
+        Also consults ai_quota_tracker for unified backoff state — if a key
+        was marked as quota_exhausted by the unified tracker (e.g. during a
+        cross-provider failover), it will be skipped here too.
+        """
         now = datetime.now()
-        
-        # Clean up blocks
+
+        # Clean up expired blocks (legacy state cleanup)
         updated = False
         for key, data in self.state["keys"].items():
             if data["is_blocked"] and data["block_until"]:
@@ -164,50 +185,92 @@ class GroqManager:
                 if now >= until:
                     data["is_blocked"] = False
                     data["block_until"] = None
-                    data["usage_limit_reached"] = False 
+                    data["usage_limit_reached"] = False
                     data["consecutive_errors"] = 0
                     updated = True
-        
+
         if updated:
             self._save_state()
 
-        available = [k for k, d in self.state["keys"].items() 
+        # Legacy filter
+        available = [k for k, d in self.state["keys"].items()
                     if not d["is_blocked"] and not d.get("usage_limit_reached", False)]
-        
+
+        # Apply unified quota tracker filter (cross-provider coordination)
+        try:
+            from . import ai_quota_tracker
+            available = ai_quota_tracker.get_available_keys("groq", available)
+        except Exception:
+            pass
+
         if not available:
             logger.warning("⚠️ No available Groq keys! All keys exhausted or blocked.")
             return None
-            
-        # Rotate: pick randomly from available
+
+        # Rotate: pick randomly from available (but prefer least-recently-used)
         return random.choice(available)
 
     def mark_key_success(self, key: str):
         if key in self.state["keys"]:
             self.state["keys"][key]["consecutive_errors"] = 0
             self.state["keys"][key]["last_check"] = datetime.now().isoformat()
+            self.state["keys"][key]["usage_limit_reached"] = False
+            self.state["keys"][key]["is_blocked"] = False
+            self.state["keys"][key]["block_until"] = None
             self._save_state()
+        # Also notify unified quota tracker
+        try:
+            from . import ai_quota_tracker
+            ai_quota_tracker.mark_key_success("groq", key)
+        except Exception:
+            pass
 
     def mark_key_error(self, key: str, status_code: int = 0):
         if key not in self.state["keys"]:
             return
-            
+
         data = self.state["keys"][key]
         data["consecutive_errors"] += 1
         data["last_check"] = datetime.now().isoformat()
-        
+
         if status_code == 402:
             # Quota exhausted
             self.mark_key_limit_reached(key)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("groq", key, status_code=status_code, error_category="quota_exhausted")
+            except Exception:
+                pass
             return
 
         if status_code == 429:
             # Rate limit
             self.block_key_seconds(key, seconds=120, reason="rate-limit")
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("groq", key, status_code=status_code, error_category="rate_limit", retry_after_seconds=120)
+            except Exception:
+                pass
+            return
+
+        if status_code in {401, 403}:
+            # Invalid key
+            self.block_key(key, minutes=1440)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("groq", key, status_code=status_code, error_category="invalid_key")
+            except Exception:
+                pass
             return
 
         if data["consecutive_errors"] >= 5:
             # General errors - temporary cool down
             self.block_key(key, minutes=10)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("groq", key, status_code=status_code, error_category="other")
+            except Exception:
+                pass
             return
 
         self._save_state()
@@ -267,8 +330,20 @@ class GroqManager:
                                 model: Optional[str] = None) -> Optional[str]:
         """
         Tries to generate content using Groq API.
+        Strategy:
+          - If an explicit model is passed, try it first.
+          - Then iterate through every available model in get_models() (user-saved order).
+          - If a model returns 404 / "model_not_found" / "deprecation" → try the next model.
+          - If a key is invalid/rate-limited/quota-exhausted → try the next key.
+          - This ensures graceful degradation when one model is unavailable.
         """
-        models = [model] if model else self.get_models()
+        # Build the ordered list of models to try
+        candidate_models: List[str] = []
+        if model:
+            candidate_models.append(model)
+        for m in self.get_models():
+            if m not in candidate_models:
+                candidate_models.append(m)
 
         try:
             max_keys = int(os.getenv("GROQ_MAX_KEYS_PER_REQUEST", "1") or "1")
@@ -281,13 +356,14 @@ class GroqManager:
         except Exception:
             timeout_s = 20
         timeout_s = max(8, min(60, timeout_s))
-        
+
         tried_keys = set()
-        for _ in range(min(max_keys, len(self.state["keys"]))):
+        total_keys_available = max(1, len(self.state.get("keys", {})))
+        for _ in range(min(max_keys, total_keys_available)):
             api_key = self.get_next_key()
             if not api_key or api_key in tried_keys:
                 break
-            
+
             tried_keys.add(api_key)
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -299,16 +375,16 @@ class GroqManager:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
-            # Try each model
-            for model in models:
-                logger.info(f"🤖 Trying Groq (Key: ...{api_key[-8:]}, Model: {model})")
+            # Try each model with this key
+            for m in candidate_models:
+                logger.info(f"🤖 Trying Groq (Key: ...{api_key[-8:]}, Model: {m})")
                 payload = {
-                    "model": model,
+                    "model": m,
                     "messages": messages,
                     "temperature": 0.7,
                     "max_tokens": 1000,
                 }
-                
+
                 try:
                     resp = requests.post(
                         "https://api.groq.com/openai/v1/chat/completions",
@@ -316,7 +392,7 @@ class GroqManager:
                         headers=headers,
                         timeout=timeout_s
                     )
-                    
+
                     if resp.status_code == 200:
                         data = resp.json()
                         choices = data.get("choices", [])
@@ -331,27 +407,31 @@ class GroqManager:
                     if cat == "invalid_key":
                         logger.error(f"❌ Invalid Groq Key: ...{api_key[-8:]}")
                         self.block_key(api_key, minutes=1440)
-                        break
+                        break  # Move to next key
 
                     if cat == "quota_exhausted":
-                        logger.warning(f"⚠️ Groq quota exhausted ({status}) for model {model}")
+                        logger.warning(f"⚠️ Groq quota exhausted ({status}) for model {m}")
                         self.mark_key_error(api_key, status_code=402)
-                        break
+                        break  # Move to next key
 
                     if cat == "rate_limit":
-                        logger.warning(f"⚠️ Groq rate limit ({status}) for model {model}")
+                        logger.warning(f"⚠️ Groq rate limit ({status}) for model {m}")
                         self.block_key_seconds(api_key, seconds=int(retry_after or 90), reason="rate-limit")
-                        break
+                        break  # Move to next key
 
-                    logger.warning(f"⚠️ Groq Error {status} with model {model}: {(resp.text or '')[:200]}")
+                    # For 404 / 400 / 500 / other — try the NEXT model with same key
+                    logger.warning(
+                        f"⚠️ Groq Error {status} with model {m}: {(resp.text or '')[:200]}. "
+                        f"Will try next model if available."
+                    )
                     self.mark_key_error(api_key, status_code=status)
-                    continue # Try next model with same key
+                    continue  # Try next model with same key
 
                 except Exception as e:
-                    logger.error(f"❌ Exception calling Groq {model}: {e}")
+                    logger.error(f"❌ Exception calling Groq {m}: {e}")
                     self.mark_key_error(api_key)
-                    continue # Try next model
-                    
+                    continue  # Try next model
+
         return None
 
     def check_key_health(self, key: str) -> bool:

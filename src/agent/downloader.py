@@ -172,13 +172,24 @@ def _build_retry_opts(base_opts: dict, attempt: int, error_type: str) -> dict:
 
 
 def _download_with_retry(ydl_opts: dict, url: str, max_retries: int = 5) -> dict:
-    """Attempt to download with automatic retry on common errors."""
+    """Attempt to download with automatic retry on common errors.
+
+    Enhanced: when bot detection is encountered, automatically rotates through
+    proxies from the youtube_resilient_fetcher ProxyPool.
+    """
     last_error = None
     
     for attempt in range(max_retries + 1):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+                # Mark proxy as successful if one was used
+                if ydl_opts.get("proxy"):
+                    try:
+                        from .youtube_resilient_fetcher import get_proxy_pool
+                        get_proxy_pool().mark_success(ydl_opts["proxy"])
+                    except Exception:
+                        pass
                 return info
         except Exception as e:
             last_error = e
@@ -191,7 +202,30 @@ def _download_with_retry(ydl_opts: dict, url: str, max_retries: int = 5) -> dict
             
             logger.warning(f"yt-dlp retryable error ({error_type}), attempt {attempt + 1}/{max_retries + 1}: {error_msg}")
             
-            # Build retry options
+            # ─── PROXY ROTATION for bot detection ───
+            # When YouTube's bot detection triggers, the only reliable solution
+            # is to route through a different IP (proxy). This is especially
+            # critical for datacenter-hosted bots.
+            if error_type in ("youtube_botcheck", "403_forbidden", "signature"):
+                try:
+                    from .youtube_resilient_fetcher import get_proxy_pool
+                    pool = get_proxy_pool()
+                    proxy_url = pool.get_proxy()
+                    if proxy_url:
+                        # Mark the failed proxy (if any) as failed
+                        if ydl_opts.get("proxy"):
+                            pool.mark_failure(ydl_opts["proxy"], reason=error_type)
+                        # Use the new proxy
+                        ydl_opts["proxy"] = proxy_url
+                        logger.info(f"🔄 Rotated to proxy: {proxy_url[:40]}...")
+                        # Don't sleep — try immediately with new proxy
+                        continue
+                    else:
+                        logger.warning("⚠️ No working proxies available for bot detection bypass")
+                except Exception as proxy_err:
+                    logger.warning(f"⚠️ Proxy rotation failed: {proxy_err}")
+            
+            # Build retry options (existing logic)
             ydl_opts = _build_retry_opts(ydl_opts, attempt + 1, error_type)
             
             # Exponential backoff with jitter

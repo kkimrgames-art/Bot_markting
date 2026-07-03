@@ -7441,6 +7441,17 @@ class AutoModFetcher:
                 schedule_total = len(schedules)
             except SupabaseInfrastructureError as infra_err:
                 logger.critical(f"🛑 [AutoMod] Infrastructure Error (DB Unreachable): {infra_err}")
+                # Report to hibernation manager — may trigger hibernation after threshold
+                try:
+                    from . import hibernation_manager
+                    hibernation_triggered = hibernation_manager.record_db_failure(error=infra_err)
+                    if hibernation_triggered:
+                        logger.warning("💤 Hibernation triggered by SupabaseInfrastructureError")
+                        # If hibernation was just triggered, skip the notification here
+                        # (the hibernation manager will send its own notification)
+                        return {"status": "hibernating", "message": f"DB Infrastructure Error triggered hibernation: {infra_err.message}"}
+                except Exception as hm_err:
+                    logger.warning(f"Failed to notify hibernation manager: {hm_err}")
                 await _notify(
                     "🚨 *البوت متوقف حالياً بسبب عطل في قاعدة البيانات!*\n\n"
                     f"⚠️ السبب: `{infra_err.message}`\n"
@@ -7540,6 +7551,115 @@ class AutoModFetcher:
                         )
                     continue
 
+                # ========== الفحص المسبق الشامل قبل البدء بأي معالجة ==========
+                # تحقق من: القناة موجودة + مفعّلة، التوكن صالح، المصادر متوفرة،
+                # المساحة كافية، ffmpeg متاح، خدمات AI متاحة، الاتصال بالإنترنت، إلخ.
+                # عند فشل فحص حرج: أوقف جدول هذه القناة فقط + أرسل إشعار للمالك.
+                try:
+                    from . import preflight_checks as _pf
+                    # Skip preflight in preview_mode (admin manually testing) or in
+                    # targeted-resume scenarios (admin explicitly asked to retry).
+                    skip_preflight = bool(preview_mode or approved_target_resume)
+                    if not skip_preflight:
+                        # First: check cooldown — if we recently failed preflight for
+                        # this channel, skip it silently (saves resources + reduces noise).
+                        in_cd, cd_entry = _pf.is_channel_in_cooldown(channel_id)
+                        if in_cd and not schedule_force:
+                            results["skipped"] += 1
+                            cd_seconds = cd_entry.get("seconds_remaining", 0) if cd_entry else 0
+                            logger.info(
+                                f"⏭ [AutoMod] Skipping schedule {sch_idx}: in preflight cooldown "
+                                f"(channel={channel_id[:10]}..., {cd_seconds}s remaining)"
+                            )
+                            if meta_notifications_enabled:
+                                try:
+                                    cd_reason = cd_entry.get("reason", "غير معروف") if cd_entry else ""
+                                    await _notify(
+                                        f"⏭ الجدول {sch_idx}: *تخطي* — القناة في فترة هدنة بعد فشل سابق.\n"
+                                        f"   📺 القناة: `{channel_id[:20]}...`\n"
+                                        f"   ⏱ المتبقي: ~{cd_seconds}s\n"
+                                        f"   📛 السبب: `{cd_reason[:80]}`"
+                                    )
+                                except Exception:
+                                    pass
+                            continue
+
+                        # Run preflight checks (channel-level — source checks happen per-source below)
+                        preflight_report = _pf.run_preflight_checks(
+                            channel_id=channel_id,
+                            schedule=schedule,
+                            source=None,  # We'll re-run per-source checks inside the source loop
+                            skip_network=False,
+                            skip_db=False,
+                            skip_ai=False,
+                            skip_resource=False,
+                        )
+
+                        if not preflight_report.all_passed:
+                            # Critical failure — pause this schedule + notify admin
+                            results["skipped"] += 1
+                            results["failed"] += 1
+                            failures = preflight_report.critical_failures
+                            logger.warning(
+                                f"🛑 [AutoMod] Preflight FAILED for schedule {sch_idx} "
+                                f"(channel={channel_id[:10]}..., failures={[f.name for f in failures]})"
+                            )
+                            # Mark cooldown so we don't retry this channel for a while
+                            try:
+                                off_reason_msg = "; ".join(f"{f.name}: {f.message[:50]}" for f in failures[:3])
+                                _pf.mark_channel_preflight_failed(
+                                    channel_id,
+                                    reason=off_reason_msg,
+                                    cooldown_seconds=int(os.getenv("PREFLIGHT_COOLDOWN_SECONDS", "1800") or "1800"),
+                                )
+                            except Exception:
+                                pass
+                            # Pause this schedule (channel-level)
+                            try:
+                                schedule["enabled"] = False
+                                self.db._save_existing_schedule(schedule, {"enabled": False})
+                                logger.warning(
+                                    f"🛑 [AutoMod] Schedule paused due to preflight failure "
+                                    f"(channel={channel_id[:20]}..., content_type={content_type})."
+                                )
+                            except Exception as db_err:
+                                logger.error(f"Failed to pause schedule after preflight failure: {db_err}")
+                            # Send pause notification
+                            try:
+                                pause_msg = preflight_report.failure_text()
+                                await _notify(pause_msg)
+                            except Exception:
+                                pass
+                            # Skip this schedule entirely
+                            continue
+                        else:
+                            # Preflight passed — log summary
+                            logger.info(
+                                f"✅ [AutoMod] Preflight passed for schedule {sch_idx} "
+                                f"(channel={channel_id[:10]}..., {preflight_report.duration_seconds:.2f}s, "
+                                f"{len(preflight_report.checks)} checks, {len(preflight_report.warnings)} warnings)"
+                            )
+                            if meta_notifications_enabled and preflight_report.warnings:
+                                try:
+                                    warnings_text = "\n".join(
+                                        f"⚠️ {w.name}: {w.message}" for w in preflight_report.warnings[:3]
+                                    )
+                                    await _notify(
+                                        f"✅ الجدول {sch_idx}: الفحص المسبق ناجح مع تحذيرات.\n{warnings_text}"
+                                    )
+                                except Exception:
+                                    pass
+                except Exception as pf_err:
+                    # If preflight itself crashes, log + continue (don't block the bot)
+                    logger.warning(f"⚠️ [AutoMod] Preflight check crashed (non-blocking): {pf_err}")
+                    if meta_notifications_enabled:
+                        try:
+                            await _notify(
+                                f"⚠️ الجدول {sch_idx}: تعطل الفحص المسبق ({str(pf_err)[:80]}). سيتم المتابعة بحذر."
+                            )
+                        except Exception:
+                            pass
+
                 logger.info(f"📡 [AutoMod] Processing schedule {sch_idx}... (Channel: {channel_id[:10]}...)")
                 await _notify(
                     f"📡 الجدول {sch_idx}: *بدء المعالجة*\n"
@@ -7586,6 +7706,65 @@ class AutoModFetcher:
                     source_id = str(source.get("id") or f"{channel_id}:{legacy_src_url}")
                     if not source.get("enabled") and not (preview_mode and source_id == str(target_source_id)):
                         continue
+
+                    # ========== فحص مسبق لكل مصدر (source-level preflight) ==========
+                    # تحقق سريع: المصدر مفعّل، المنصة مدعومة، الروابط صالحة.
+                    # عند الفشل: تعطيل هذا المصدر فقط + إشعار + متابعة باقي المصادر.
+                    if not preview_mode and not approved_target_resume:
+                        try:
+                            from . import preflight_checks as _pf_src
+                            src_preflight = _pf_src.run_preflight_checks(
+                                channel_id=channel_id,
+                                schedule=schedule,
+                                source=source,
+                                skip_network=True,    # Already checked at channel level
+                                skip_db=True,         # Already checked at channel level
+                                skip_ai=True,         # Already checked at channel level
+                                skip_resource=True,   # Already checked at channel level
+                            )
+                            src_critical_failures = src_preflight.critical_failures
+                            if src_critical_failures:
+                                logger.warning(
+                                    f"🛑 [AutoMod] Source-level preflight FAILED "
+                                    f"(source={src_name[:20]}, channel={channel_id[:10]}..., "
+                                    f"failures={[f.name for f in src_critical_failures]})"
+                                )
+                                # Disable this source (NOT the whole channel)
+                                try:
+                                    source["enabled"] = False
+                                    self.db._save_existing_source(source_id, {"enabled": False})
+                                    logger.warning(
+                                        f"🛑 [AutoMod] Source disabled due to preflight failure "
+                                        f"(source={src_name[:20]}..., channel={channel_id[:20]}...)."
+                                    )
+                                except Exception as db_err:
+                                    logger.error(f"Failed to disable source after preflight failure: {db_err}")
+                                # Send admin notification (source-level, not as critical as channel-level)
+                                try:
+                                    pause_msg = (
+                                        f"🛑 <b>تم تعطيل مصدر تلقائياً بعد فشل الفحص المسبق</b>\n\n"
+                                        f"📺 القناة: <code>{channel_id[:25]}...</code>\n"
+                                        f"🎯 المصدر: <code>{src_name[:30]}</code>\n"
+                                        f"🆔 المصدر: <code>{source_id[:25]}...</code>\n\n"
+                                    )
+                                    for f in src_critical_failures[:3]:
+                                        pause_msg += f"🔍 <b>{f.name}</b>: <code>{f.message}</code>\n"
+                                        if f.suggested_fix:
+                                            pause_msg += f"   💡 {f.suggested_fix}\n"
+                                    pause_msg += (
+                                        f"\n⏸ تم تعطيل هذا المصدر فقط.\n"
+                                        f"✅ القناة وبقية المصادر سيواصلون العمل.\n"
+                                        f"🔧 بعد إصلاح المشكلة، أعد تفعيل المصدر من إعدادات الأتمتة."
+                                    )
+                                    await _notify(pause_msg)
+                                except Exception:
+                                    pass
+                                # Continue to next source (don't break the schedule)
+                                continue
+                        except Exception as src_pf_err:
+                            logger.warning(
+                                f"⚠️ [AutoMod] Source-level preflight crashed (non-blocking): {src_pf_err}"
+                            )
 
                     fetch_sources = []
                     try:
@@ -8303,6 +8482,51 @@ class AutoModFetcher:
 
                                 await _notify("✅ تمت المعالجة بنجاح.")
 
+                            # ========== إزالة الحواف (Border Removal) ==========
+                            # إذا كان المصدر لديه ميزة إزالة الحواف مفعّلة، يتم فحص الفيديو
+                            # وإزالة أي حواف (سوداء/بيضاء/ملوّنة) واستبدالها بحواف سوداء نظيفة.
+                            border_removal_enabled = bool(source_settings.get("border_removal_enabled", False))
+                            if not border_removal_enabled:
+                                # Also check channel-level setting
+                                try:
+                                    from src.bot.channel_manager import ChannelManager as _CM_br
+                                    _ch_br = _CM_br().get_channel(channel_id)
+                                    if _ch_br:
+                                        _extra_br = getattr(_ch_br, "extra_data", {}) or {}
+                                        border_removal_enabled = bool(_extra_br.get("border_removal_enabled", False))
+                                except Exception:
+                                    pass
+
+                            if border_removal_enabled and out_path and ResilientFS.exists(out_path):
+                                try:
+                                    await _notify("🔲 *جاري فحص وإزالة الحواف...*")
+                                    from src.agent import border_detector as _bd
+                                    
+                                    _br_out_dir = _project_local_path(".output", "auto_mod_border")
+                                    ResilientFS.makedirs(_br_out_dir, exist_ok=True)
+                                    _br_out = os.path.join(_br_out_dir, f"{vid_id}_noborder.mp4")
+                                    
+                                    loop = asyncio.get_running_loop()
+                                    import functools as _ft_br
+                                    _br_func = _ft_br.partial(_bd.remove_borders, out_path, _br_out)
+                                    
+                                    try:
+                                        _br_timeout = int(os.getenv("AUTO_MOD_BORDER_REMOVAL_TIMEOUT_SECONDS", "120") or "120")
+                                        await asyncio.wait_for(loop.run_in_executor(None, _br_func), timeout=float(_br_timeout))
+                                        if ResilientFS.exists(_br_out):
+                                            borders_info = _bd.detect_borders.__doc__ or ""
+                                            self._cleanup_file(out_path)
+                                            out_path = _br_out
+                                            await _notify("✅ تم إزالة الحواف بنجاح.")
+                                        else:
+                                            await _notify("⚠️ فشل إزالة الحواف، سيتم المتابعة بدونها.")
+                                    except asyncio.TimeoutError:
+                                        logger.warning(f"⚠️ Border removal timed out for {vid_id}")
+                                        await _notify("⚠️ نفذ وقت إزالة الحواف.")
+                                except Exception as br_err:
+                                    logger.warning(f"Border removal failed: {br_err}")
+                                    await _notify(f"⚠️ فشل إزالة الحواف: `{str(br_err)[:60]}`")
+
                             # ========== نص مخصص (Custom Overlay Text) ==========
                             source_overlay = pick_source_overlay_config(source_settings) if vid_type == "shorts" else None
                             channel_overlay = None
@@ -8310,20 +8534,81 @@ class AutoModFetcher:
                                 try:
                                     from src.bot.channel_manager import ChannelManager as _CM
                                     _ch = _CM().get_channel(channel_id)
-                                    _overlay_texts = getattr(_ch, "custom_overlay_texts", None) or [] if _ch else []
+                                    _overlay_texts = (getattr(_ch, "custom_overlay_texts", None) or []) if _ch else []
                                     if _overlay_texts:
-                                        selected_overlay = str(random.choice(_overlay_texts) or "").strip()
-                                        if selected_overlay:
-                                            channel_overlay = {
-                                                "text": selected_overlay,
-                                                "timing": "full",
-                                                "duration": 2.0,
-                                                "screen_position": "top",
-                                                "intro_animation": {"enabled": False, "type": "none", "duration": 0.0},
-                                                "outro_animation": {"enabled": False, "type": "none", "duration": 0.0},
-                                            }
+                                        _picked = random.choice(_overlay_texts)
+                                        # custom_overlay_texts entries are normally dicts with keys:
+                                        #   {text, timing, duration, screen_position, intro_animation?, outro_animation?}
+                                        # but older versions stored plain strings — handle both gracefully.
+                                        if isinstance(_picked, dict):
+                                            _ov_text_val = str(_picked.get("text") or "").strip()
+                                            if _ov_text_val:
+                                                # Preserve the user-selected timing / duration / position
+                                                try:
+                                                    _ov_dur_val = float(_picked.get("duration") or 2.0)
+                                                except Exception:
+                                                    _ov_dur_val = 2.0
+                                                channel_overlay = {
+                                                    "text": _ov_text_val,
+                                                    "timing": str(_picked.get("timing") or "full"),
+                                                    "duration": _ov_dur_val,
+                                                    "screen_position": str(_picked.get("screen_position") or "top"),
+                                                    "intro_animation": _picked.get("intro_animation") or {"enabled": False, "type": "none", "duration": 0.0},
+                                                    "outro_animation": _picked.get("outro_animation") or {"enabled": False, "type": "none", "duration": 0.0},
+                                                }
+                                        elif isinstance(_picked, str):
+                                            _ov_text_val = _picked.strip()
+                                            if _ov_text_val:
+                                                channel_overlay = {
+                                                    "text": _ov_text_val,
+                                                    "timing": "full",
+                                                    "duration": 2.0,
+                                                    "screen_position": "top",
+                                                    "intro_animation": {"enabled": False, "type": "none", "duration": 0.0},
+                                                    "outro_animation": {"enabled": False, "type": "none", "duration": 0.0},
+                                                }
                                 except Exception:
                                     channel_overlay = None
+
+                            # Fallback: simple channel-level overlay_text (extra_data["overlay_text"])
+                            # This is the text set via the "🅰️ إعداد نص التعليق" menu (minecraft content type).
+                            # It is only used when no source-level or custom_overlay_texts entry was chosen.
+                            if not source_overlay and not channel_overlay and vid_type == "shorts":
+                                try:
+                                    from src.bot.channel_manager import ChannelManager as _CM
+                                    _ch = _CM().get_channel(channel_id)
+                                    if _ch:
+                                        _extra = getattr(_ch, "extra_data", {}) or {}
+                                        if _extra.get("overlay_enabled", True):
+                                            _simple_text = str(_extra.get("overlay_text") or "").strip()
+                                            if _simple_text:
+                                                _simple_pos = str(_extra.get("overlay_position") or "bottom_center").lower()
+                                                # Map bottom_* / top_* to the renderer's expected values
+                                                if _simple_pos.startswith("bottom"):
+                                                    _simple_screen_pos = "bottom"
+                                                elif _simple_pos.startswith("top"):
+                                                    _simple_screen_pos = "top"
+                                                elif "center" in _simple_pos or "middle" in _simple_pos:
+                                                    _simple_screen_pos = "center"
+                                                else:
+                                                    _simple_screen_pos = "top"
+                                                try:
+                                                    _simple_size = int(_extra.get("overlay_font_size") or 64)
+                                                except Exception:
+                                                    _simple_size = 64
+                                                channel_overlay = {
+                                                    "text": _simple_text,
+                                                    "timing": "full",
+                                                    "duration": 0.0,
+                                                    "screen_position": _simple_screen_pos,
+                                                    "intro_animation": {"enabled": False, "type": "none", "duration": 0.0},
+                                                    "outro_animation": {"enabled": False, "type": "none", "duration": 0.0},
+                                                    # Pass through font size hint for downstream usage
+                                                    "_font_size_hint": _simple_size,
+                                                    "_overlay_font_path": _extra.get("overlay_font_path"),
+                                                }
+                                except Exception:
+                                    pass
 
                             overlay_cfg = source_overlay or channel_overlay
                             if overlay_cfg and vid_type == "shorts":
@@ -8352,17 +8637,31 @@ class AutoModFetcher:
 
                                             loop = asyncio.get_running_loop()
                                             import functools
+
+                                            # Font settings (used by the simple overlay_text fallback path):
+                                            # the user can choose a custom font + size via the "🅰️ إعداد نص التعليق" menu.
+                                            _ov_font_size = 56
+                                            try:
+                                                _fs_hint = overlay_cfg.get("_font_size_hint")
+                                                if _fs_hint:
+                                                    _ov_font_size = max(20, min(200, int(_fs_hint)))
+                                            except Exception:
+                                                pass
+                                            _ov_custom_font = overlay_cfg.get("_overlay_font_path") or None
+
                                             _ov_func = functools.partial(
                                                 _mvp_ov.add_custom_overlay_text,
                                                 input_path=out_path,
                                                 output_path=_ov_out,
                                                 text=_ov_text,
                                                 timing=overlay_cfg.get("timing", "full"),
-                                                duration=float(overlay_cfg.get("duration", 2.0)),
+                                                duration=float(overlay_cfg.get("duration", 2.0) or 0.0),
                                                 screen_position=overlay_cfg.get("screen_position", "top"),
                                                 overlay_image_path=overlay_cfg.get("image_path"),
                                                 intro_animation=overlay_cfg.get("intro_animation"),
                                                 outro_animation=overlay_cfg.get("outro_animation"),
+                                                custom_font=_ov_custom_font,
+                                                font_size=_ov_font_size,
                                             )
 
                                             try:
@@ -8445,6 +8744,48 @@ class AutoModFetcher:
                                 except Exception as fc_err:
                                     logger.warning(f"Facecam overlay failed: {fc_err}")
                                     await _notify(f"⚠️ فشل الفيس كام: `{str(fc_err)[:80]}`")
+
+                            # ========== إدراج الإعلان (Ad Insertion) ==========
+                            try:
+                                from src.agent import ad_manager
+                                ad_cfg = ad_manager.get_ad_config(source_id)
+                                # Also check channel-level ad
+                                if not ad_cfg.get("enabled"):
+                                    ad_cfg = ad_manager.get_ad_config(channel_id)
+
+                                if ad_cfg.get("enabled") and ad_cfg.get("has_video"):
+                                    await _notify(f"📺 *جاري إضافة إعلان:* position={ad_cfg['position']}, timing={ad_cfg['timing']}s")
+                                    from src.agent.mod_video_processor import ModVideoProcessor as _MVP_Ad
+                                    _mvp_ad = _MVP_Ad(temp_dir=_project_local_path(".temp", "auto_mod"))
+                                    _ad_out_dir = _project_local_path(".output", "auto_mod_ad")
+                                    ResilientFS.makedirs(_ad_out_dir, exist_ok=True)
+                                    _ad_out = os.path.join(_ad_out_dir, f"{vid_id}_ad.mp4")
+
+                                    loop = asyncio.get_running_loop()
+                                    import functools as _ft_ad
+                                    _ad_func = _ft_ad.partial(
+                                        _mvp_ad.insert_ad_video,
+                                        input_path=out_path,
+                                        output_path=_ad_out,
+                                        ad_video_path=ad_cfg["video_path"],
+                                        position=ad_cfg.get("position", "end"),
+                                        timing=float(ad_cfg.get("timing", 5.0)),
+                                        continue_after_ad=bool(ad_cfg.get("continue_after_ad", True)),
+                                    )
+                                    try:
+                                        _ad_timeout = int(os.getenv("AUTO_MOD_AD_INSERTION_TIMEOUT_SECONDS", "180") or "180")
+                                        await asyncio.wait_for(loop.run_in_executor(None, _ad_func), timeout=float(_ad_timeout))
+                                        if ResilientFS.exists(_ad_out):
+                                            self._cleanup_file(out_path)
+                                            out_path = _ad_out
+                                            await _notify("✅ تم إضافة الإعلان بنجاح.")
+                                        else:
+                                            await _notify("⚠️ فشل إضافة الإعلان، سيتم الرفع بدونه.")
+                                    except asyncio.TimeoutError:
+                                        logger.warning(f"⚠️ Ad insertion timed out for {vid_id}")
+                                        await _notify("⚠️ نفذ وقت إضافة الإعلان.")
+                            except Exception as ad_err:
+                                logger.warning(f"Ad insertion failed: {ad_err}")
 
                             if preview_mode:
                                 await _notify(
@@ -9024,6 +9365,14 @@ async def start_auto_fetch_loop(interval_seconds: int = 3600):
         logger.warning(f"⚠️ Failed to initialize AutoMod config: {e}")
 
     while True:
+        # ========== فحص وضع السبات ==========
+        # إذا كانت قاعدة البيانات متعطلة، توقف تماماً حتى تعود.
+        try:
+            from . import hibernation_manager
+            await hibernation_manager.wait_if_hibernating()
+        except Exception:
+            pass
+
         loop_started_monotonic = time.monotonic()
         hb.beat("auto_fetch")  # نبضة في كل دورة
         

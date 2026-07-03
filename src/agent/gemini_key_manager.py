@@ -333,6 +333,14 @@ class GeminiKeyManager:
                 ):
                     available_keys.append(key)
 
+            # Apply unified quota tracker filter (cross-provider coordination)
+            try:
+                from . import ai_quota_tracker
+                if available_keys:
+                    available_keys = ai_quota_tracker.get_available_keys("gemini", available_keys)
+            except Exception:
+                pass
+
             if not self.state["keys"]:
                 logger.warning("⚠️ Gemini is not configured with any API keys.")
                 return None
@@ -379,6 +387,12 @@ class GeminiKeyManager:
                 data["last_error_category"] = None
                 data["last_error_time"] = None
                 self._save_state()
+                # Notify unified quota tracker
+                try:
+                    from . import ai_quota_tracker
+                    ai_quota_tracker.mark_key_success("gemini", key)
+                except Exception:
+                    pass
                 return
 
             data["last_error_category"] = (error_category or "other")
@@ -388,6 +402,12 @@ class GeminiKeyManager:
 
             if cat in {"network", "timeout", "transient", "exception", "empty"} or int(status_code or 0) >= 500:
                 self._save_state()
+                # Notify unified quota tracker (transient)
+                try:
+                    from . import ai_quota_tracker
+                    ai_quota_tracker.mark_key_failure("gemini", key, status_code=status_code, error_category=cat)
+                except Exception:
+                    pass
                 return
 
             if cat == "bad_request":
@@ -417,6 +437,18 @@ class GeminiKeyManager:
                     logger.warning(f"🚫 Key blocked for 2 minutes (transient): ...{key[-10:]}")
 
             self._save_state()
+
+            # Notify unified quota tracker (for the categories we actually blocked on)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure(
+                    "gemini", key,
+                    status_code=status_code,
+                    error_category=cat,
+                    retry_after_seconds=retry_after_seconds,
+                )
+            except Exception:
+                pass
     
     def get_stats(self) -> dict:
         """الحصول على إحصائيات المفاتيح"""

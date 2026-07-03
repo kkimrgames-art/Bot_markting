@@ -37,10 +37,19 @@ class ClarifaiManager:
         
         # Initialize/Sync keys in state
         self._initialize_keys()
-        
-        # Use default models
-        self.state["models"] = self.DEFAULT_MODELS
-        self._save_state()
+
+    def _user_models(self) -> List[str]:
+        """User-saved model IDs from ai_models_store (with fallback to defaults)."""
+        try:
+            from . import ai_models_store
+            return ai_models_store.get_models("clarifai")
+        except Exception:
+            return list(self.DEFAULT_MODELS)
+
+    def _env_model_override(self) -> Optional[str]:
+        """Honor CLARIFAI_MODEL env if set (single-model override)."""
+        raw = (os.getenv("CLARIFAI_MODEL") or "").strip()
+        return raw or None
 
     def _parse_keys_from_env(self) -> List[str]:
         raw = os.getenv("CLARIFAI_API_KEYS") or os.getenv("CLARIFAI_API_KEY") or ""
@@ -147,13 +156,23 @@ class ClarifaiManager:
         self._save_state()
 
     def get_models(self) -> List[str]:
-        """Returns the available models."""
-        return self.state.get("models") or self.DEFAULT_MODELS
+        """Returns the effective model list (user-saved first, then defaults)."""
+        # Priority: explicit env override > user-saved models > defaults
+        env_override = self._env_model_override()
+        if env_override:
+            return [env_override]
+        user_models = self._user_models()
+        if user_models:
+            return list(user_models)
+        return self.state.get("models") or list(self.DEFAULT_MODELS)
 
     def get_next_key(self) -> Optional[str]:
-        """Finds a key that isn't blocked, using rotation."""
+        """Finds a key that isn't blocked, using rotation.
+
+        Also consults ai_quota_tracker for unified backoff state.
+        """
         now = datetime.now()
-        
+
         # Clean up blocks
         updated = False
         for key, data in self.state["keys"].items():
@@ -165,26 +184,28 @@ class ClarifaiManager:
                 if now >= until:
                     data["is_blocked"] = False
                     data["block_until"] = None
-                    data["usage_limit_reached"] = False 
+                    data["usage_limit_reached"] = False
                     data["consecutive_errors"] = 0
                     updated = True
-        
+
         if updated:
             self._save_state()
 
-        available = [k for k, d in self.state["keys"].items() 
+        available = [k for k, d in self.state["keys"].items()
                     if not d["is_blocked"] and not d.get("usage_limit_reached", False)]
-        
-        if not available:
-            # Wait a bit before trying again to allow for unblocking
-            time.sleep(1)
-            available = [k for k, d in self.state["keys"].items() 
-                        if not d["is_blocked"] and not d.get("usage_limit_reached", False)]
-        
+
+        # Apply unified quota tracker filter
+        try:
+            from . import ai_quota_tracker
+            if available:
+                available = ai_quota_tracker.get_available_keys("clarifai", available)
+        except Exception:
+            pass
+
         if not available:
             logger.warning("⚠️ No available Clarifai keys! All keys exhausted or blocked.")
             return None
-            
+
         # Rotate: pick randomly from available
         return random.choice(available)
 
@@ -192,29 +213,58 @@ class ClarifaiManager:
         if key in self.state["keys"]:
             self.state["keys"][key]["consecutive_errors"] = 0
             self.state["keys"][key]["last_check"] = datetime.now().isoformat()
+            self.state["keys"][key]["usage_limit_reached"] = False
+            self.state["keys"][key]["is_blocked"] = False
+            self.state["keys"][key]["block_until"] = None
             self._save_state()
+        try:
+            from . import ai_quota_tracker
+            ai_quota_tracker.mark_key_success("clarifai", key)
+        except Exception:
+            pass
 
     def mark_key_error(self, key: str, status_code: int = 0):
         if key not in self.state["keys"]:
             return
-            
+
         data = self.state["keys"][key]
         data["consecutive_errors"] += 1
         data["last_check"] = datetime.now().isoformat()
-        
+
         if status_code == 402:
-            # Quota exhausted
             self.mark_key_limit_reached(key)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("clarifai", key, status_code=status_code, error_category="quota_exhausted")
+            except Exception:
+                pass
             return
 
         if status_code == 429:
-            # Rate limit
             self.block_key_seconds(key, seconds=120, reason="rate-limit")
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("clarifai", key, status_code=status_code, error_category="rate_limit", retry_after_seconds=120)
+            except Exception:
+                pass
+            return
+
+        if status_code in {401, 403}:
+            self.block_key(key, minutes=1440)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("clarifai", key, status_code=status_code, error_category="invalid_key")
+            except Exception:
+                pass
             return
 
         if data["consecutive_errors"] >= 5:
-            # General errors - temporary cool down
-            self.block_key(key, minutes=2)  # Reduce block time to make testing easier
+            self.block_key(key, minutes=2)
+            try:
+                from . import ai_quota_tracker
+                ai_quota_tracker.mark_key_failure("clarifai", key, status_code=status_code, error_category="other")
+            except Exception:
+                pass
             return
 
         self._save_state()
@@ -274,9 +324,16 @@ class ClarifaiManager:
                                 model: Optional[str] = None) -> Optional[str]:
         """
         Tries to generate content using Clarifai API.
-        Based on the API response, models are accessed directly by ID without the full path
+        Iterates through available keys, and for each key, iterates through ALL
+        configured models (user-saved first) until one succeeds.
         """
-        models = [model] if model else self.get_models()
+        # Build candidate models list (explicit model first, then configured)
+        candidate_models: List[str] = []
+        if model:
+            candidate_models.append(model)
+        for m in self.get_models():
+            if m not in candidate_models:
+                candidate_models.append(m)
 
         try:
             max_keys = int(os.getenv("CLARIFAI_MAX_KEYS_PER_REQUEST", "1") or "1")
@@ -289,35 +346,36 @@ class ClarifaiManager:
         except Exception:
             timeout_s = 30
         timeout_s = max(8, min(60, timeout_s))
-        
+
         tried_keys = set()
-        for _ in range(min(max_keys, len(self.state["keys"]))):
+        total_keys_available = max(1, len(self.state.get("keys", {})))
+        for _ in range(min(max_keys, total_keys_available)):
             api_key = self.get_next_key()
             if not api_key or api_key in tried_keys:
                 break
-            
+
             tried_keys.add(api_key)
-            
+
             # Format the request for Clarifai
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-            
+
             # Format the prompt for Clarifai
             formatted_prompt = ""
             for msg in messages:
                 formatted_prompt += f"{msg['role'].upper()}: {msg['content']}\n"
-            
-            # Try different known model endpoints based on common patterns
-            for model in models:
-                logger.info(f"🤖 Trying Clarifai (Key: ...{api_key[-8:]}, Model: {model})")
-                
+
+            # Try every candidate model
+            for m in candidate_models:
+                logger.info(f"🤖 Trying Clarifai (Key: ...{api_key[-8:]}, Model: {m})")
+
                 headers = {
                     "Authorization": f"Key {api_key}",
                     "Content-Type": "application/json"
                 }
-                
+
                 # Clarifai API requires user_app_id in the payload
                 payload = {
                     "inputs": [
@@ -336,14 +394,13 @@ class ClarifaiManager:
                 }
 
                 # Try different API endpoint patterns based on the app information from the API
-                # Some models may require app-specific paths
                 possible_endpoints = [
-                    f"https://api.clarifai.com/v2/models/{model}/outputs",  # Standard model access
-                    f"https://api.clarifai.com/v2/models/minimax/chat-completion/models/{model}/outputs",  # Minimax models
-                    f"https://api.clarifai.com/v2/models/mistralai/completion/models/{model}/outputs",  # Mistral models
-                    f"https://api.clarifai.com/v2/models/zai/completion/models/{model}/outputs",  # Zai models like GLM_4_6
+                    f"https://api.clarifai.com/v2/models/{m}/outputs",  # Standard model access
+                    f"https://api.clarifai.com/v2/models/minimax/chat-completion/models/{m}/outputs",
+                    f"https://api.clarifai.com/v2/models/mistralai/completion/models/{m}/outputs",
+                    f"https://api.clarifai.com/v2/models/zai/completion/models/{m}/outputs",
                 ]
-                
+
                 # Try each possible endpoint until one works
                 response = None
                 success_url = None
@@ -355,7 +412,7 @@ class ClarifaiManager:
                             json=payload,
                             timeout=timeout_s
                         )
-                        
+
                         if response.status_code == 200:
                             success_url = url
                             break
@@ -366,7 +423,7 @@ class ClarifaiManager:
                     except Exception as e:
                         logger.debug(f"Endpoint failed: {url}, error: {e}")
                         continue
-                
+
                 if response and response.status_code == 200:
                     data = response.json()
                     if 'outputs' in data and len(data['outputs']) > 0:
@@ -384,22 +441,28 @@ class ClarifaiManager:
                     if cat == "invalid_key":
                         logger.error(f"❌ Invalid Clarifai Key: ...{api_key[-8:]}")
                         self.block_key(api_key, minutes=1440)
-                        break
+                        break  # Move to next key
 
                     if cat == "quota_exhausted":
-                        logger.warning(f"⚠️ Clarifai quota exhausted ({status}) for model {model}")
+                        logger.warning(f"⚠️ Clarifai quota exhausted ({status}) for model {m}")
                         self.mark_key_error(api_key, status_code=402)
-                        break
+                        break  # Move to next key
 
                     if cat == "rate_limit":
-                        logger.warning(f"⚠️ Clarifai rate limit ({status}) for model {model}")
+                        logger.warning(f"⚠️ Clarifai rate limit ({status}) for model {m}")
                         self.block_key_seconds(api_key, seconds=int(retry_after or 90), reason="rate-limit")
-                        break
+                        break  # Move to next key
 
-                    logger.warning(f"⚠️ Clarifai Error {status} with model {model} at {success_url if success_url else 'unknown url'}: {(response.text or '')[:200]}")
-                
+                    # For 404 / 400 / 500 / other — try the NEXT model with same key
+                    logger.warning(
+                        f"⚠️ Clarifai Error {status} with model {m} at "
+                        f"{success_url if success_url else 'unknown url'}: "
+                        f"{(response.text or '')[:200]}. "
+                        f"Will try next model if available."
+                    )
+
                 self.mark_key_error(api_key, status_code=response.status_code if response else 0)
-                continue # Try next model with same key
+                continue  # Try next model with same key
 
         return None
 

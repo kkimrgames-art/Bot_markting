@@ -1,4 +1,4 @@
-﻿"""
+"""
 معالج فيديوهات المودات - نظام منفصل عن المحتوى الحالي
 يتضمن: قص الثواني الأولى والأخيرة، إضافة نص دعوة، تحويل لشورتس
 """
@@ -2446,6 +2446,189 @@ class ModVideoProcessor:
                     overlay_path.unlink()
             except Exception:
                 pass
+
+    # ==================== إدراج الإعلانات (Ad Insertion) ====================
+
+    def insert_ad_video(
+        self,
+        input_path: str,
+        output_path: str,
+        ad_video_path: str,
+        *,
+        position: str = "end",
+        timing: float = 5.0,
+        continue_after_ad: bool = True,
+    ) -> bool:
+        """Insert an ad video into the main video.
+
+        Args:
+            input_path: path to the main video (already processed).
+            output_path: path for the output video with ad inserted.
+            ad_video_path: path to the ad video file.
+            position: "end" (ad plays at the end) or "middle" (ad plays at midpoint).
+            timing: how many seconds of the ad to show (ad is trimmed to this duration).
+            continue_after_ad:
+                True  = ad plays, then remaining main video continues.
+                False = ad plays, then video ends (main video is truncated).
+
+        Returns:
+            True if ad was inserted successfully, False otherwise.
+        """
+        if not ad_video_path or not os.path.exists(ad_video_path):
+            logger.warning("⚠️ Ad video not found — skipping ad insertion")
+            return False
+
+        try:
+            main_duration = self._get_video_duration(input_path)
+            main_w, main_h = self._get_video_dimensions(input_path)
+            main_fps = self._get_video_fps(input_path)
+            if not main_fps or main_fps <= 0:
+                main_fps = 30.0
+
+            ad_duration = self._get_video_duration(ad_video_path)
+            ad_clip_duration = min(timing, ad_duration)
+
+            # Prepare the trimmed + scaled ad clip
+            ad_clip_path = self.temp_dir / f"ad_clip_{uuid.uuid4().hex}.mp4"
+            try:
+                scale_filter = f"scale={main_w}:{main_h}:force_original_aspect_ratio=decrease,pad={main_w}:{main_h}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+                ad_trim_cmd = [
+                    ffmpeg_bin(), "-y", *_ffmpeg_memory_guard_args(),
+                    "-i", ad_video_path,
+                    "-t", f"{ad_clip_duration:.2f}",
+                    "-vf", scale_filter,
+                    "-r", f"{main_fps:.6f}",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-shortest",
+                    str(ad_clip_path),
+                ]
+                rc, stderr = _run_ffmpeg_with_idle_timeout(
+                    ad_trim_cmd, timeout_s=120, idle_timeout_s=60, label="AdTrim"
+                )
+                if rc != 0:
+                    raise RuntimeError(f"Ad trim failed: {(stderr or '')[-500:]}")
+                if not ad_clip_path.exists() or ad_clip_path.stat().st_size == 0:
+                    raise RuntimeError("Ad clip output missing or empty")
+            except Exception as e:
+                logger.error(f"❌ Ad clip preparation failed: {e}")
+                return False
+
+            # Determine the split point
+            if position == "middle":
+                split_point = main_duration / 2.0
+            else:
+                split_point = max(0, main_duration - ad_clip_duration)
+
+            part1_path = self.temp_dir / f"ad_part1_{uuid.uuid4().hex}.mp4"
+            part2_path = self.temp_dir / f"ad_part2_{uuid.uuid4().hex}.mp4" if continue_after_ad else None
+            concat_list_path = self.temp_dir / f"ad_concat_{uuid.uuid4().hex}.txt"
+
+            try:
+                # Part 1: beginning of main video up to split point
+                part1_duration = split_point
+                if part1_duration > 0.1:
+                    part1_cmd = [
+                        ffmpeg_bin(), "-y", *_ffmpeg_memory_guard_args(),
+                        "-i", input_path,
+                        "-t", f"{part1_duration:.2f}",
+                        "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
+                        "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "128k",
+                        "-r", f"{main_fps:.6f}",
+                        str(part1_path),
+                    ]
+                    rc, stderr = _run_ffmpeg_with_idle_timeout(
+                        part1_cmd, timeout_s=180, idle_timeout_s=60, label="AdPart1"
+                    )
+                    if rc != 0:
+                        raise RuntimeError(f"Part 1 extraction failed: {(stderr or '')[-500:]}")
+                else:
+                    part1_cmd = [
+                        ffmpeg_bin(), "-y",
+                        "-f", "lavfi",
+                        "-i", f"color=c=black:s={main_w}x{main_h}:d=0.1:r={main_fps}",
+                        "-c:v", "libx264", "-preset", "superfast", "-pix_fmt", "yuv420p",
+                        str(part1_path),
+                    ]
+                    _run_ffmpeg_with_idle_timeout(
+                        part1_cmd, timeout_s=30, idle_timeout_s=15, label="AdPart1Black"
+                    )
+
+                # Part 2: remaining main video (only if continue_after_ad)
+                if part2_path and continue_after_ad:
+                    remaining = main_duration - split_point
+                    if remaining > 0.1:
+                        part2_cmd = [
+                            ffmpeg_bin(), "-y", *_ffmpeg_memory_guard_args(),
+                            "-i", input_path,
+                            "-ss", f"{split_point:.2f}",
+                            "-t", f"{remaining:.2f}",
+                            "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
+                            "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", "-b:a", "128k",
+                            "-r", f"{main_fps:.6f}",
+                            str(part2_path),
+                        ]
+                        rc, stderr = _run_ffmpeg_with_idle_timeout(
+                            part2_cmd, timeout_s=180, idle_timeout_s=60, label="AdPart2"
+                        )
+                        if rc != 0:
+                            logger.warning(f"Part 2 extraction failed (skipping): {(stderr or '')[-300:]}")
+                            part2_path = None
+
+                # Build concat list
+                concat_files = []
+                if part1_path.exists() and part1_path.stat().st_size > 0:
+                    concat_files.append(str(part1_path))
+                if ad_clip_path.exists() and ad_clip_path.stat().st_size > 0:
+                    concat_files.append(str(ad_clip_path))
+                if part2_path and part2_path.exists() and part2_path.stat().st_size > 0:
+                    concat_files.append(str(part2_path))
+
+                if len(concat_files) < 2:
+                    logger.warning("⚠️ Not enough segments for ad concat — skipping")
+                    return False
+
+                with open(concat_list_path, "w", encoding="utf-8") as f:
+                    for fp in concat_files:
+                        f.write(f"file '{fp}'\n")
+
+                # Concat all parts
+                concat_cmd = [
+                    ffmpeg_bin(), "-y", *_ffmpeg_memory_guard_args(),
+                    "-f", "concat", "-safe", "0",
+                    "-i", str(concat_list_path),
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "18",
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-r", f"{main_fps:.6f}",
+                    str(output_path),
+                ]
+                rc, stderr = _run_ffmpeg_with_idle_timeout(
+                    concat_cmd, timeout_s=300, idle_timeout_s=90, label="AdConcat"
+                )
+                if rc != 0:
+                    raise RuntimeError(f"Ad concat failed: {(stderr or '')[-500:]}")
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    raise RuntimeError("Ad output file missing or empty")
+
+                logger.info(f"✅ Ad inserted: position={position}, timing={timing}s, continue={continue_after_ad}")
+                return True
+
+            finally:
+                for tmp in [ad_clip_path, part1_path, part2_path, concat_list_path]:
+                    if tmp and tmp.exists():
+                        try:
+                            tmp.unlink()
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            logger.error(f"❌ Ad insertion failed: {e}")
+            return False
+
     def add_watermark_text(self, input_path: str, output_path: str, text: str, seed: Optional[str] = None, custom_font: Optional[str] = None) -> None:
         """إضافة Watermark شفاف (اسم القناة) على فيديو الشورتس"""
         is_ar = bool(re.search(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]", text or ""))
