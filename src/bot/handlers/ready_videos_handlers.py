@@ -88,7 +88,7 @@ async def start_ready_videos(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # التحقق من حالة المصادقة
     try:
-        from ...agent.gdrive_manager import get_credentials
+        from src.agent.gdrive_manager import get_credentials
         creds = await get_credentials()
         is_authenticated = creds is not None and creds.valid
     except Exception:
@@ -127,7 +127,7 @@ async def start_drive_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _safe_answer(query, text="⏳ جاري إعداد رابط المصادقة...")
 
     try:
-        from ...agent.gdrive_manager import create_auth_flow
+        from src.agent.gdrive_manager import create_auth_flow
 
         flow, auth_url, redirect_uri = await asyncio.to_thread(create_auth_flow)
         context.user_data["rv_flow"] = flow
@@ -135,7 +135,7 @@ async def start_drive_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data["rv_auth_url"] = auth_url
 
         # مسح النتائج القديمة
-        from .shared_state import oauth_callback_results
+        from src.bot.shared_state import oauth_callback_results
         oauth_callback_results.pop("latest", None)
 
         keyboard = [
@@ -183,7 +183,7 @@ async def check_drive_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return RV_MENU
 
     # محاولة الحصول على الكود من shared_state
-    from .shared_state import oauth_callback_results
+    from src.bot.shared_state import oauth_callback_results
     callback_url = oauth_callback_results.pop("latest", None)
 
     if not callback_url:
@@ -200,7 +200,7 @@ async def check_drive_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return RV_AUTH_WAIT
 
     try:
-        from ...agent.gdrive_manager import exchange_code as gdrive_exchange_code, save_credentials
+        from src.agent.gdrive_manager import exchange_code as gdrive_exchange_code, save_credentials
 
         creds = await asyncio.to_thread(gdrive_exchange_code, flow, callback_url)
         await save_credentials(creds)
@@ -239,7 +239,7 @@ async def list_drive_videos(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _safe_answer(query, text="⏳ جاري تحميل القائمة...")
 
     try:
-        from ...agent.gdrive_manager import list_videos_in_folder
+        from src.agent.gdrive_manager import list_videos_in_folder
 
         videos = await list_videos_in_folder()
 
@@ -364,7 +364,7 @@ async def confirm_video_selection(update: Update, context: ContextTypes.DEFAULT_
 async def _show_channel_selection(update, context) -> int:
     """عرض قائمة القنوات للاختيار"""
     try:
-        from ...bot.channel_manager import ChannelManager
+        from src.bot.channel_manager import ChannelManager
 
         manager = ChannelManager()
         channels, total = await asyncio.to_thread(manager.list_channels, offset=0, limit=100)
@@ -670,7 +670,7 @@ async def _process_next_upload(update, context) -> int:
         video_id = video.get("id", "")
         video_name = video.get("name", "video.mp4")
 
-        from ...agent.gdrive_manager import download_video as gdrive_download
+        from src.agent.gdrive_manager import download_video as gdrive_download
         import tempfile as _tf
 
         tmp_dir = _tf.mkdtemp(prefix="rv_upload_")
@@ -721,7 +721,7 @@ async def _process_next_upload(update, context) -> int:
 async def _get_channel_token_path(channel_id: str) -> str:
     """الحصول على مسار توكن القناة"""
     try:
-        from ...bot.channel_manager import ChannelManager
+        from src.bot.channel_manager import ChannelManager
         manager = ChannelManager()
         channel = await asyncio.to_thread(manager.get_channel, channel_id)
         if channel:
@@ -745,7 +745,7 @@ async def _get_channel_token_path(channel_id: str) -> str:
 
 async def _upload_to_youtube(channel_token_path, file_path, title, description, thumbnail_path, channel_id) -> dict:
     """رفع فيديو على YouTube"""
-    from ...agent.uploader import upload_video_with_token
+    from src.agent.uploader import upload_video_with_token
 
     result = await asyncio.to_thread(
         upload_video_with_token,

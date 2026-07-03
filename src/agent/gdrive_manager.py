@@ -156,7 +156,7 @@ async def _load_token_from_supabase() -> Optional[Credentials]:
             return None
 
         result = await asyncio.to_thread(
-            supabase_select_one, GDRIVE_AUTH_TABLE, {"id": "gdrive_main"}
+            supabase_select_one, GDRIVE_AUTH_TABLE, "id", "gdrive_main"
         )
         if not result:
             return None
@@ -172,7 +172,7 @@ async def _load_token_from_supabase() -> Optional[Credentials]:
         logger.info("✅ Google Drive token loaded from Supabase.")
         return creds
     except Exception as e:
-        logger.debug(f"Failed to load token from Supabase: {e}")
+        logger.warning(f"⚠️ Failed to load Google Drive token from Supabase: {e}")
         return None
 
 
@@ -420,7 +420,7 @@ async def ensure_auth_table_exists() -> bool:
         # إذا لم يكن موجوداً، سنحتاج لإنشائه يدوياً
         from .supabase_client import supabase_select_one
         result = await asyncio.to_thread(
-            supabase_select_one, GDRIVE_AUTH_TABLE, {"id": "gdrive_main"}
+            supabase_select_one, GDRIVE_AUTH_TABLE, "id", "gdrive_main"
         )
         # النتيجة قد تكون None إذا لم يكن هناك سجل، لكن هذا يعني أن الجدول موجود
         logger.info("✅ gdrive_auth table verified.")
