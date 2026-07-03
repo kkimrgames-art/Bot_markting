@@ -53,8 +53,12 @@ async def _open_api_keys_menu_from_auto_mod(update: Update, context: ContextType
 
 
 async def _open_ready_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """إنهاء محادثة auto_mod والانتقال لمحادثة ready_videos"""
+    query = update.callback_query
+    await _safe_answer(query)
     from .ready_videos_handlers import start_ready_videos
-    return await start_ready_videos(update, context)
+    await start_ready_videos(update, context)
+    return ConversationHandler.END
 
 
 

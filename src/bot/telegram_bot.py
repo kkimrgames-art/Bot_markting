@@ -72,7 +72,7 @@ def build_application(token: str):
         confirm_video_selection, toggle_channel_selection, confirm_channel_selection,
         receive_video_title, receive_video_description, skip_description,
         receive_video_thumbnail, skip_thumbnail, start_upload,
-        cancel_ready_videos, reauth_drive, copy_auth_url,
+        cancel_ready_videos, reauth_drive,
         RV_MENU, RV_AUTH_WAIT, RV_VIDEO_LIST, RV_VIDEO_DETAIL,
         RV_SELECT_CHANNELS, RV_TITLE, RV_DESCRIPTION, RV_THUMBNAIL, RV_CONFIRM_UPLOAD,
     )
@@ -90,7 +90,6 @@ def build_application(token: str):
             ],
             RV_AUTH_WAIT: [
                 CallbackQueryHandler(check_drive_auth, pattern=r"^rv_check_auth$"),
-                CallbackQueryHandler(copy_auth_url, pattern=r"^rv_copy_auth_url$"),
                 CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_menu$"),
                 CallbackQueryHandler(list_drive_videos, pattern=r"^rv_list_videos$"),
             ],
