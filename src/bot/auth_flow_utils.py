@@ -48,9 +48,8 @@ def _maybe_allow_insecure_transport(redirect_uri: str) -> None:
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/blogger"]
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-# جميع الصلاحيات التي قد يمنحها البوت — يستخدم عند إنشاء Flow لتجنب خطأ Scope has changed
-ALL_SCOPES = SCOPES + DRIVE_SCOPES
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+ALL_SCOPES = SCOPES
 
 class OAuthCallbackServer:
     """خادم محلي بسيط لاستقبال رد كود المصادقة"""
@@ -193,7 +192,7 @@ def create_flow_from_file_scopes(
     client_secrets_file: str,
     scopes: list[str],
     *,
-    include_granted_scopes: bool = True,
+    include_granted_scopes: bool = False,
 ) -> Tuple[Flow, str, OAuthCallbackServer]:
     """إنشاء Flow وبدء الخادم وإرجاع رابط المصادقة"""
     
@@ -362,7 +361,7 @@ def start_auth_flow_scopes(
     client_secrets_file: str,
     scopes: list[str],
     *,
-    include_granted_scopes: bool = True,
+    include_granted_scopes: bool = False,
 ) -> Tuple[str, OAuthCallbackServer, Flow]:
     flow, auth_url, server = create_flow_from_file_scopes(
         client_secrets_file,
@@ -417,7 +416,7 @@ def create_manual_auth_flow(client_secrets_file: str) -> Tuple[Flow, str]:
     auth_url, _ = flow.authorization_url(
         prompt='consent',
         access_type='offline',
-        include_granted_scopes='true'
+        include_granted_scopes='false'
     )
     
     logger.info(f"تم إنشاء رابط مصادقة يدوي: {auth_url[:80]}...")

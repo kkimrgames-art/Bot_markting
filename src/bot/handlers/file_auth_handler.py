@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 
 from ..auth_flow_utils import create_flow_from_file, exchange_code_and_get_creds, get_channel_info_from_creds, start_auth_flow
-from ...agent.config import load_config
+from ...agent.config import load_config, get_project_root
 from ...agent.uploader import _find_client_secrets_file
 from ..channel_manager import ChannelManager
 from ..language_manager import LanguageManager
@@ -210,7 +210,7 @@ async def receive_auth_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_FILE
         
     # تحميل الملف
-    temp_dir = Path(".temp/auth")
+    temp_dir = Path(get_project_root()) / ".temp" / "auth"
     temp_dir.mkdir(parents=True, exist_ok=True)
     file_path = temp_dir / f"secret_{update.effective_user.id}.json"
 
@@ -372,8 +372,7 @@ async def process_auth_result(update: Update, context: ContextTypes.DEFAULT_TYPE
              )
              return
 
-    # Load config to get paths
-    from ...agent.config import load_config
+     # Load config to get paths
     cfg = load_config()
     base_dir = os.path.dirname(cfg.TELEGRAM_DB_PATH) or ".data"
 

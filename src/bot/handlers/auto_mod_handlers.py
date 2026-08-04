@@ -1241,6 +1241,8 @@ async def auto_mod_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 التقارير اليومية", callback_data="am_reports")],
         [InlineKeyboardButton("🌐 جلب YouTube", callback_data="am_youtube")],
         [InlineKeyboardButton("📺 إدارة الإعلانات", callback_data="am_ads")],
+        [InlineKeyboardButton("📝 ناشر مقالات مع فيديو", callback_data="am_blogger")],
+        [InlineKeyboardButton("☁️ رفع سحابي + اختصار روابط", callback_data="am_cloud_upload")],
         [InlineKeyboardButton(toggle_text, callback_data="am_toggle"),
          InlineKeyboardButton("🚀 تشغيل الآن", callback_data="am_run_now"),
          InlineKeyboardButton("🧪 اختبار", callback_data="am_test_render")],
@@ -1802,7 +1804,10 @@ async def youtube_test_download(update: Update, context: ContextTypes.DEFAULT_TY
 # ==================== إدارة الإعلانات (Ad Management) ====================
 
 # Conversation states for ad management
-AD_SELECT_SOURCE, AD_UPLOAD_VIDEO, AD_SET_POSITION, AD_SET_TIMING, AD_SET_CONTINUE = range(5)
+# ملاحظة مهمة: يجب ألا تتعارض هذه القيم مع قيم حالات AM_* (0..23)
+# لأنها جميعاً في نفس مساحة أسماء المحادثة. كانت سابقاً range(5) فتتعارض
+# مع AM_MENU/AM_SOURCES/... وتسبب اختفاء أزرار إدارة المصادر.
+AD_SELECT_SOURCE, AD_UPLOAD_VIDEO, AD_SET_POSITION, AD_SET_TIMING, AD_SET_CONTINUE = range(100, 105)
 
 
 async def show_ads_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2300,7 +2305,11 @@ async def test_render_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🧪 <b>اختبار وتطوير</b>\n\n"
         "اختر مصدرًا لتوليد فيديو نهائي تجريبي باستخدام نفس خط المعالجة الحقيقي،\n"
-        "لكن <b>بدون نشره على YouTube</b> وبدون تعديل أي حالة نشر رسمية."
+        "لكن <b>بدون نشره على YouTube</b> وبدون تعديل أي حالة نشر رسمية.\n\n"
+        "⚙️ سيتم اختبار كل الميزات المفعّلة تلقائيًا:\n"
+        "• ☁️ الرفع السحابي + اختصار الروابط\n"
+        "• 📝 نشر مقال البلوجر\n"
+        "• 🎬 المعالجة والتحويل"
     )
 
     keyboard = []
@@ -2348,12 +2357,34 @@ async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif results.get("status") == "busy":
             result_text = "⏳ توجد دورة معالجة أخرى تعمل الآن، لذا تم تأجيل فيديو الاختبار لمنع التداخل."
         elif preview_path and os.path.exists(preview_path):
+            # بناء تقرير اختبار شامل يضم كل الميزات
+            _cloud = str(results.get('cloud_download_url') or '')
+            _short = str(results.get('shortened_url') or '')
+            _blog = str(results.get('blog_link_text') or '')
+            _blog_urls = []
+            if _blog:
+                import re as _test_re
+                _blog_urls = _test_re.findall(r'https?://[\S]+', _blog)
+
             caption = (
                 "🧪 <b>فيديو الاختبار جاهز</b>\n"
                 f"📺 المصدر: <code>{html.escape(str(results.get('preview_source_name') or 'مصدر'))}</code>\n"
                 f"🎬 الفيديو: <code>{html.escape(str(results.get('preview_video_title') or 'بدون عنوان')[:80])}</code>\n"
-                "🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
             )
+            # نتائج الميزات الإضافية
+            if _cloud:
+                caption += f"\n☁️ رابط السحابة: <code>{html.escape(_cloud[:100])}</code>"
+                if _short:
+                    caption += f"\n🔗 الرابط المختصر: <code>{html.escape(_short[:100])}</code>"
+                else:
+                    caption += "\n🔗 اختصار الروابط: غير مفعّل"
+            else:
+                caption += "\n☁️ الرفع السحابي: غير مفعّل"
+            if _blog_urls:
+                caption += f"\n📝 مقال البلوجر: <code>{html.escape(_blog_urls[0][:100])}</code>"
+            elif _cloud:
+                caption += "\n📝 مقال البلوجر: غير مفعّل أو فشل"
+            caption += "\n\n🚫 لم يتم النشر على YouTube ولم يتم تعديل الحالة الرسمية."
             try:
                 with open(preview_path, "rb") as video_file:
                     telegram_video = BytesIO(video_file.read())
@@ -2373,6 +2404,13 @@ async def test_render_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "✅ <b>تم إنشاء فيديو الاختبار وإرساله هنا في تيليجرام.</b>\n\n"
                     "لم يتم رفع الفيديو إلى YouTube، ولم يتم تحديث حالة النشر أو الجدولة أو الأتمتة الرسمية."
                 )
+                # إضافة ملخص نتائج الميزات الإضافية
+                if _cloud:
+                    result_text += f"\n\n☁️ السحابة: {_cloud[:80]}"
+                    if _short:
+                        result_text += f"\n🔗 المختصر: {_short[:80]}"
+                if _blog_urls:
+                    result_text += f"\n📝 البلوجر: {_blog_urls[0][:80]}"
             except Exception as send_e:
                 video_size_mb = os.path.getsize(preview_path) / (1024 * 1024)
                 if "413" in str(send_e) or "Entity Too Large" in str(send_e) or video_size_mb > 49.5:
@@ -6525,7 +6563,86 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(ads_delete, pattern=r"^am_ads_del:"),
         CallbackQueryHandler(ads_upload_start, pattern=r"^am_ads_upload:"),
         CallbackQueryHandler(ads_list_all, pattern=r"^am_ads_list$"),
+        # موجه عام: يلتقط أي زر am_* لم يُعالج أعلاه ويرسله للمعالج الصحيح
+        CallbackQueryHandler(_am_router, pattern=r"^am_"),
     ]
+
+
+# ==================== موجه أزرار am_* العام ====================
+# سبب المشكلة: أزرار الحالات (مثل am_edit_ov_anim_dur) كانت مسجلة داخل حالة محادثة
+# محددة فقط، فإذا فقدت حالة المحادثة (إعادة تشغيل البوت أو التنقل من قائمة قديمة)
+# يصبح الزر "ميتاً" رغم أنه يبدو سليماً. هذا الموجّه يسجل كل الأزرار في مكان واحد
+# ويعيد توجيهها إلى المعالج الصحيح بغض النظر عن الحالة الحالية.
+
+_AM_CALLBACK_REGISTRY: list = []  # [(pattern_compiled, handler), ...]
+_AM_CALLBACK_REGISTRY_READY = False
+
+
+async def _am_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """توجيه أي زر am_* إلى المعالج الصحيح مهما كانت حالة المحادثة."""
+    query = update.callback_query
+    if not query or not query.data:
+        return None
+    data = query.data
+    for pat, handler in _AM_CALLBACK_REGISTRY:
+        try:
+            if pat.match(data):
+                try:
+                    return await handler(update, context)
+                except Exception as e:
+                    logger.error(f"⚠️ am_router: handler {getattr(handler, '__name__', handler)} failed: {e}", exc_info=True)
+                    break
+        except Exception:
+            continue
+    await _safe_answer(query)
+    return None
+
+
+def _build_am_callback_registry(*handler_lists) -> None:
+    """جمع كل معالجات أزرار am_* (من حالات المحادثة ونقاط الدخول) في سجل واحد.
+
+    يُستدعى مرة واحدة عند بناء التطبيق، ويضمن أن الموجّه العام يعرف كل الأزرار.
+    """
+    global _AM_CALLBACK_REGISTRY, _AM_CALLBACK_REGISTRY_READY
+    if _AM_CALLBACK_REGISTRY_READY:
+        return
+    import re as _re
+    seen = set()
+    registry = []
+    for handler_group in handler_lists:
+        if isinstance(handler_group, dict):
+            group_items = []
+            for v in handler_group.values():
+                group_items.extend(v)
+        else:
+            group_items = handler_group or []
+        for h in group_items:
+            if not isinstance(h, CallbackQueryHandler):
+                continue
+            if getattr(h, "callback", None) is _am_router:
+                continue
+            pat = getattr(h, "pattern", None)
+            if pat is None:
+                continue
+            pat_str = pat.pattern if hasattr(pat, "pattern") else str(pat)
+            if pat_str in seen:
+                continue
+            seen.add(pat_str)
+            try:
+                registry.append((_re.compile(pat_str), h.callback))
+            except Exception:
+                continue
+    _AM_CALLBACK_REGISTRY = registry
+    _AM_CALLBACK_REGISTRY_READY = True
+
+
+def get_auto_mod_global_callback_handler() -> CallbackQueryHandler:
+    """معالج عام لأزرار am_* يعمل حتى خارج المحادثة (بعد إعادة التشغيل مثلاً).
+
+    يُضاف في telegram_bot.py بعد ConversationHandler الأوتو مود،
+    فيلتقط أي زر لم يتعامل معه المحادثة بسبب فقدان الحالة.
+    """
+    return CallbackQueryHandler(_am_router, pattern=r"^am_")
 
 
 def get_auto_mod_conversation_handler() -> ConversationHandler:
@@ -6534,13 +6651,7 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
     from telegram.warnings import PTBUserWarning
     warnings.filterwarnings("ignore", category=PTBUserWarning, message=r"If 'per_message=False'.*")
     
-    return ConversationHandler(
-        entry_points=[
-            CommandHandler("start", auto_mod_menu),
-            CommandHandler("menu", auto_mod_menu),
-            CallbackQueryHandler(auto_mod_menu, pattern=r"^(am_menu|auto_mod)$"),
-        ],
-        states={
+    states = {
             AM_MENU: [
                 *_auto_mod_common_nav_handlers(),
             ],
@@ -6740,7 +6851,16 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.ALL, ads_receive_video),
                 *_auto_mod_common_nav_handlers(),
             ],
-        },
+        }
+    entry_points = [
+        CommandHandler("start", auto_mod_menu),
+        CommandHandler("menu", auto_mod_menu),
+        CallbackQueryHandler(auto_mod_menu, pattern=r"^(am_menu|auto_mod)$"),
+        CallbackQueryHandler(add_source_start, pattern=r"^am_add_source$"),
+    ]
+    conv = ConversationHandler(
+        entry_points=entry_points,
+        states=states,
         fallbacks=[
             CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
             CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^am_end$"),
@@ -6750,4 +6870,6 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
         allow_reentry=True,
         per_message=False
     )
+    _build_am_callback_registry(entry_points, states)
+    return conv
 

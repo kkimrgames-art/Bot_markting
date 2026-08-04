@@ -418,6 +418,11 @@ def build_application(token: str):
     application.add_handler(CallbackQueryHandler(api_key_handlers.delete_key_menu, pattern="^api_key_delete_menu$"))
     application.add_handler(CallbackQueryHandler(api_key_handlers.delete_key_confirm, pattern="^api_key_delete:"))
 
+    # موجه عام لأزرار am_*: يضمن استجابة الأزرار حتى لو فقدت حالة المحادثة
+    # (مثل إعادة تشغيل البوت أو الضغط على زر من قائمة قديمة).
+    from .handlers.auto_mod_handlers import get_auto_mod_global_callback_handler
+    application.add_handler(get_auto_mod_global_callback_handler())
+
     async def _on_application_error(update, context):
         err = context.error
         if _is_expired_callback_query_error(err):

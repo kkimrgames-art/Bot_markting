@@ -6525,7 +6525,83 @@ def _auto_mod_common_nav_handlers() -> list:
         CallbackQueryHandler(ads_delete, pattern=r"^am_ads_del:"),
         CallbackQueryHandler(ads_upload_start, pattern=r"^am_ads_upload:"),
         CallbackQueryHandler(ads_list_all, pattern=r"^am_ads_list$"),
+        # موجه عام: يلتقط أي زر am_* لم يُعالج أعلاه ويرسله للمعالج الصحيح
+        CallbackQueryHandler(_am_router, pattern=r"^am_"),
     ]
+
+
+# ==================== موجه أزرار am_* العام ====================
+# سبب المشكلة: أزرار الحالات (مثل am_edit_ov_anim_dur) كانت مسجلة داخل حالة محادثة
+# محددة فقط، فإذا فقدت حالة المحادثة (إعادة تشغيل البوت أو التنقل من قائمة قديمة)
+# يصبح الزر "ميتاً" رغم أنه يبدو سليماً. هذا الموجّه يسجل كل الأزرار في مكان واحد
+# ويعيد توجيهها إلى المعالج الصحيح بغض النظر عن الحالة الحالية.
+
+_AM_CALLBACK_REGISTRY: list = []  # [(pattern_compiled, handler), ...]
+_AM_CALLBACK_REGISTRY_READY = False
+
+
+async def _am_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """توجيه أي زر am_* إلى المعالج الصحيح مهما كانت حالة المحادثة."""
+    query = update.callback_query
+    if not query or not query.data:
+        return None
+    data = query.data
+    for pat, handler in _AM_CALLBACK_REGISTRY:
+        try:
+            if pat.match(data):
+                try:
+                    return await handler(update, context)
+                except Exception as e:
+                    logger.error(f"⚠️ am_router: handler {getattr(handler, '__name__', handler)} failed: {e}", exc_info=True)
+                    try:
+                        await query.answer("❌ حدث خطأ أثناء المعالجة", show_alert=True)
+                    except Exception:
+                        pass
+                    break
+        except Exception:
+            continue
+    await _safe_answer(query)
+    return None
+
+
+def _build_am_callback_registry(*handler_lists) -> None:
+    """جمع كل معالجات أزرار am_* (من حالات المحادثة ونقاط الدخول) في سجل واحد."""
+    global _AM_CALLBACK_REGISTRY, _AM_CALLBACK_REGISTRY_READY
+    if _AM_CALLBACK_REGISTRY_READY:
+        return
+    import re as _re
+    seen = set()
+    registry = []
+    for handler_group in handler_lists:
+        if isinstance(handler_group, dict):
+            group_items = []
+            for v in handler_group.values():
+                group_items.extend(v)
+        else:
+            group_items = handler_group or []
+        for h in group_items:
+            if not isinstance(h, CallbackQueryHandler):
+                continue
+            if getattr(h, "callback", None) is _am_router:
+                continue
+            pat = getattr(h, "pattern", None)
+            if pat is None:
+                continue
+            pat_str = pat.pattern if hasattr(pat, "pattern") else str(pat)
+            if pat_str in seen:
+                continue
+            seen.add(pat_str)
+            try:
+                registry.append((_re.compile(pat_str), h.callback))
+            except Exception:
+                continue
+    _AM_CALLBACK_REGISTRY = registry
+    _AM_CALLBACK_REGISTRY_READY = True
+
+
+def get_auto_mod_global_callback_handler() -> CallbackQueryHandler:
+    """معالج عام لأزرار am_* يعمل حتى خارج المحادثة (بعد إعادة التشغيل مثلاً)."""
+    return CallbackQueryHandler(_am_router, pattern=r"^am_")
 
 
 def get_auto_mod_conversation_handler() -> ConversationHandler:
@@ -6534,13 +6610,12 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
     from telegram.warnings import PTBUserWarning
     warnings.filterwarnings("ignore", category=PTBUserWarning, message=r"If 'per_message=False'.*")
     
-    return ConversationHandler(
-        entry_points=[
+    entry_points = [
             CommandHandler("start", auto_mod_menu),
             CommandHandler("menu", auto_mod_menu),
             CallbackQueryHandler(auto_mod_menu, pattern=r"^(am_menu|auto_mod)$"),
-        ],
-        states={
+        ]
+    states = {
             AM_MENU: [
                 *_auto_mod_common_nav_handlers(),
             ],
@@ -6740,7 +6815,10 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.ALL, ads_receive_video),
                 *_auto_mod_common_nav_handlers(),
             ],
-        },
+        }
+    conv = ConversationHandler(
+        entry_points=entry_points,
+        states=states,
         fallbacks=[
             CallbackQueryHandler(auto_mod_menu, pattern=r"^am_menu$"),
             CallbackQueryHandler(_end_auto_mod_conversation, pattern=r"^am_end$"),
@@ -6750,4 +6828,6 @@ def get_auto_mod_conversation_handler() -> ConversationHandler:
         allow_reentry=True,
         per_message=False
     )
+    _build_am_callback_registry(entry_points, states)
+    return conv
 

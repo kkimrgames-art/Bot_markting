@@ -145,6 +145,14 @@ def build_application(token: str):
     from .handlers.ai_manager_handler import get_ai_manager_conv
     application.add_handler(get_ai_manager_conv())
 
+    # ===== Cloud Upload & Link Shortener Conversation =====
+    from .handlers.cloud_upload_handlers import get_cloud_upload_conversation_handler
+    application.add_handler(get_cloud_upload_conversation_handler())
+
+    # ===== Blogger Article Publisher Conversation =====
+    from .handlers.blogger_handlers import get_blogger_conversation_handler
+    application.add_handler(get_blogger_conversation_handler())
+
     file_auth_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(file_auth_handler.start_add_channel_file, pattern="^add_channel_file$"),
@@ -417,6 +425,13 @@ def build_application(token: str):
     application.add_handler(CallbackQueryHandler(api_key_handlers.api_keys_menu, pattern="^api_keys_menu$"))
     application.add_handler(CallbackQueryHandler(api_key_handlers.delete_key_menu, pattern="^api_key_delete_menu$"))
     application.add_handler(CallbackQueryHandler(api_key_handlers.delete_key_confirm, pattern="^api_key_delete:"))
+
+    # موجه عام لأزرار am_*: يضمن استجابة الأزرار حتى لو فقدت حالة المحادثة
+    # (مثل إعادة تشغيل البوت أو الضغط على زر من قائمة قديمة).
+    # يُسجل في النهاية حتى تحصل المحادثات الأخرى (مثل رفع سحابي/بلوجر)
+    # على أولوية معالجة أزرارها الخاصة أولاً.
+    from .handlers.auto_mod_handlers import get_auto_mod_global_callback_handler
+    application.add_handler(get_auto_mod_global_callback_handler())
 
     async def _on_application_error(update, context):
         err = context.error
