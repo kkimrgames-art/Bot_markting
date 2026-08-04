@@ -2854,3 +2854,77 @@ def _generate_fallback_hashtags(
                     hashtags.append(tag)
     
     return hashtags[:count]
+
+
+# ==================== Blogger Article Generation ====================
+
+def generate_ai_article_for_blogger(
+    custom_prompt: str,
+    context_info: str,
+    language: str = "ar",
+) -> Optional[Dict[str, Any]]:
+    """
+    توليد مقال بلوجر بالذكاء الاصطناعي.
+    يستخدم _generate_content_with_failover مع برومت متخصص.
+    يعيد {"title": "...", "content": "...", "labels": [...]} أو None.
+    """
+    from .config import load_config
+    cfg = load_config()
+
+    lang_instruction = {
+        "ar": "اكتب المقال باللغة العربية فقط.",
+        "en": "Write the article in English only.",
+        "tr": "Makaleyi yalnızca Türkçe yazın.",
+        "fr": "Écrivez l'article en français uniquement.",
+        "es": "Escribe el artículo solo en español.",
+    }.get(language, "Write the article in the same language as the content.")
+
+    prompt = f"""{custom_prompt}
+
+--- معلومات السياق ---
+{context_info}
+
+--- التعليمات ---
+{lang_instruction}
+
+أجب بصيغة JSON فقط (بدون markdown أو backticks) بالشكل التالي:
+{{"title": "عنوان المقال", "content": "محتوى المقال بصيغة HTML", "labels": ["tag1", "tag2", "tag3"]}}
+
+ملاحظات مهمة:
+- العنوان يجب أن يكون جذاباً ومناسباً لمحركات البحث (SEO)
+- المحتوى يجب أن يكون بصيغة HTML صالح (استخدم <p>, <h2>, <h3>, <ul>, <li>, <b>, <i> إلخ)
+- لا تستخدم backticks أو markdown في المحتوى
+- اكتب مقالاً كاملاً بحد أدنى 3 فقرات
+- أضف 3-5 تاقات/علامات مناسبة
+- لا تضع أي نص خارج JSON"""
+
+    try:
+        content = _generate_content_with_failover(cfg, prompt)
+        if not content:
+            return None
+
+        # محاولة استخراج JSON من الرد
+        import re
+        # إزالة backticks إن وجدت
+        cleaned = re.sub(r'^```(?:json)?\s*', '', content.strip())
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+        cleaned = cleaned.strip()
+
+        # محاولة العثور على JSON في النص
+        json_match = re.search(r'\{[\s\S]*\}', cleaned)
+        if json_match:
+            parsed = json.loads(json_match.group())
+        else:
+            parsed = json.loads(cleaned)
+
+        return {
+            "title": str(parsed.get("title", ""))[:200],
+            "content": str(parsed.get("content", "")),
+            "labels": list(parsed.get("labels", []))[:10],
+        }
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.warning(f"Failed to parse AI blogger article response: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"AI blogger article generation error: {e}")
+        return None

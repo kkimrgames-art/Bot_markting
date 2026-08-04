@@ -6848,17 +6848,28 @@ class AutoModFetcher:
             if self._reached_daily_limit(schedule):
                 continue
 
-            # 2.5) Skip scheduling if no sources exist (e.g., user deleted sources).
+            # 2.5) Skip scheduling if no enabled sources exist (e.g., user deleted sources or all sources disabled).
             try:
-                sources_list = self.db.get_sources(channel_id, content_type)
+                all_sources = self.db.get_sources(channel_id, content_type)
+                # تصفية المصادر المعطلة: نتحقق فقط من المصادر المفعلة
+                enabled_sources = [s for s in (all_sources or []) if s.get("enabled")]
             except Exception:
-                sources_list = []
-            if not sources_list:
-                logger.info(
-                    "⏭️ [AutoMod] Schedule skipped because no sources exist (channel=%s, content_type=%s)",
-                    channel_id[:10],
-                    content_type,
-                )
+                all_sources = []
+                enabled_sources = []
+            if not enabled_sources:
+                if all_sources:
+                    logger.info(
+                        "⏭️ [AutoMod] Schedule skipped because all %d sources are DISABLED (channel=%s, content_type=%s)",
+                        len(all_sources),
+                        channel_id[:10],
+                        content_type,
+                    )
+                else:
+                    logger.info(
+                        "⏭️ [AutoMod] Schedule skipped because no sources exist (channel=%s, content_type=%s)",
+                        channel_id[:10],
+                        content_type,
+                    )
                 continue
                 
             # 3. Add to queue
@@ -7102,8 +7113,17 @@ class AutoModFetcher:
                         )
                     continue
 
+                # تصفية المصادر المعطلة قبل العد
+                enabled_sources_for_notify = [s for s in sources_list if s.get("enabled")]
+                if not enabled_sources_for_notify:
+                    # جميع المصادر معطلة - تخطي بصمت بدون إشعار تيليجرام
+                    logger.info(
+                        "⏭️ [AutoMod] Skipping schedule %d: all %d sources are disabled (channel=%s)",
+                        sch_idx, len(sources_list), channel_id[:10],
+                    )
+                    continue
                 if meta_notifications_enabled:
-                    await _notify(f"🔍 تم العثور على *{len(sources_list)}* مصدر للبحث.")
+                    await _notify(f"🔍 تم العثور على *{len(enabled_sources_for_notify)}* مصدر نشط للبحث.")
 
                 schedule_done = False
                 for source in sources_list:
@@ -7698,6 +7718,90 @@ class AutoModFetcher:
                                     f"   📐 النوع: `{type_label}`"
                                 )
 
+                                # ============================================================
+                                # === رفع سحابي + اختصار روابط + مقال بلوجر (قبل المعالجة) ===
+                                # الترتيب: تحميل ← رفع سحابي ← اختصار ← مقال بلوجر ← معالجة ← يوتيوب
+                                # ============================================================
+                                cloud_download_url = ""
+                                shortened_url = ""
+                                blog_link_text = ""
+                                if source_id and dl_path:
+                                    try:
+                                        from src.agent.cloud_upload_db import get_active_cloud_configs_for_source
+                                        from src.agent.cloud_uploader import upload_video_to_cloud
+                                        from src.agent.link_shortener import shorten_with_fallback
+                                        from src.agent.blogger_publisher import create_blog_article_before_publish
+
+                                        cu_configs = get_active_cloud_configs_for_source(source_id)
+                                        _blogger_position = "bottom"
+
+                                        for _cu_cfg in cu_configs:
+                                            # 1) رفع الفيديو الخام للسحابة
+                                            await _notify("☁️ جاري رفع نسخة للسحابة...")
+                                            _upload_res = upload_video_to_cloud(
+                                                config=_cu_cfg,
+                                                video_path=dl_path,
+                                                video_title=video.get("title", ""),
+                                            )
+                                            if _upload_res and _upload_res.get("url"):
+                                                _raw_url = _upload_res["url"]
+                                                cloud_download_url = _raw_url
+                                                await _notify(
+                                                    f"☁️ تم الرفع للسحابة ({_upload_res.get('service', '')})"
+                                                )
+
+                                                # 2) اختصار الرابط إذا مفعّل
+                                                if _cu_cfg.get("shorten_link"):
+                                                    await _notify("🔗 جاري اختصار الرابط...")
+                                                    _short = shorten_with_fallback(
+                                                        url=_raw_url,
+                                                        api_token=_cu_cfg.get("shorten_api_token", ""),
+                                                        title=video.get("title", ""),
+                                                    )
+                                                    if _short and _short != _raw_url:
+                                                        shortened_url = _short
+                                                        cloud_download_url = _short
+                                                        await _notify("🔗 تم اختصار الرابط")
+                                                    else:
+                                                        await _notify("⚠️ فشل اختصار الرابط، سيستخدم الأصلي")
+
+                                                # 3) إنشاء مقال بلوجر بالرابط المختصر
+                                                if _cu_cfg.get("link_to_blogger"):
+                                                    _blogger_position = _cu_cfg.get("blogger_link_position", "bottom")
+                                                    await _notify("📝 جاري إنشاء مقال البلوجر...")
+                                                    _blog_result = create_blog_article_before_publish(
+                                                        source_id=source_id,
+                                                        channel_id=channel_id,
+                                                        video_title=video.get("title", ""),
+                                                        video_description=video.get("description", ""),
+                                                        content_type=content_type,
+                                                        source_name=source.get("source_name", ""),
+                                                        tags=[content_type] if content_type else [],
+                                                        download_url=cloud_download_url,
+                                                        download_link_position=_blogger_position,
+                                                    )
+                                                    if _blog_result:
+                                                        blog_link_text = _blog_result
+                                                        await _notify("📝 تم نشر مقال البلوجر بنجاح")
+                                                    else:
+                                                        await _notify("⚠️ فشل نشر مقال البلوجر")
+
+                                            break  # إعداد واحد كافي
+
+                                        # حفظ نتائج الاختبار
+                                        if not cu_configs and not preview_mode:
+                                            pass  # لا توجد إعدادات سحابية
+                                    except Exception as _pre_err:
+                                        logger.warning(f"Pre-processing cloud/blogger failed (non-critical): {_pre_err}")
+                                        if preview_mode:
+                                            await _notify(f"⚠️ خطأ في الرفع السحابي/البلوجر: `{str(_pre_err)[:100]}`")
+
+                                # تخزين النتائج في results (مفيد للاختبار)
+                                results["cloud_download_url"] = cloud_download_url
+                                results["shortened_url"] = shortened_url
+                                results["blog_link_text"] = blog_link_text
+                                # === نهاية الرفع السحابي + اختصار + بلوجر ===
+
                                 from src.agent.ffmpeg_utils import ffmpeg_bin
                                 if not ffmpeg_bin():
                                      err_msg = "⚠️ *تنبيه:* FFmpeg غير موجود على النظام. لا يمكن معالجة الشورتس بدون FFmpeg. يرجى تثبيته لضمان عمل البوت."
@@ -7960,11 +8064,36 @@ class AutoModFetcher:
                                     await _notify(f"⚠️ فشل الفيس كام: `{str(fc_err)[:80]}`")
 
                             if preview_mode:
-                                await _notify(
+                                # بناء تقرير اختبار شامل
+                                _test_report = (
                                     f"🧪 *اكتمل فيديو الاختبار بنجاح*\n"
                                     f"📺 `{vid_title}`\n"
-                                    "لن يتم رفع هذا الفيديو إلى YouTube ولن يتم تعديل حالة النشر الرسمية."
                                 )
+                                # نتائج الرفع السحابي
+                                _cloud_url = results.get("cloud_download_url", "")
+                                if _cloud_url:
+                                    _test_report += f"☁️ رابط السحابة: {_cloud_url[:80]}\n"
+                                else:
+                                    _test_report += "☁️ الرفع السحابي: غير مفعّل أو فشل\n"
+                                # نتائج اختصار الروابط
+                                _short_url = results.get("shortened_url", "")
+                                if _short_url:
+                                    _test_report += f"🔗 الرابط المختصر: {_short_url[:80]}\n"
+                                elif _cloud_url:
+                                    _test_report += "🔗 اختصار الروابط: غير مفعّل\n"
+                                # نتائج مقال البلوجر
+                                _blog_txt = results.get("blog_link_text", "")
+                                if _blog_txt:
+                                    # استخراج الرابط من blog_link_text
+                                    import re as _re
+                                    _blog_urls = _re.findall(r'https?://[\S]+', _blog_txt)
+                                    if _blog_urls:
+                                        _test_report += f"📝 مقال البلوجر: {_blog_urls[0][:80]}\n"
+                                elif _cloud_url:
+                                    _test_report += "📝 مقال البلوجر: غير مفعّل أو فشل\n"
+
+                                _test_report += "\nلن يتم رفع هذا الفيديو إلى YouTube ولن يتم تعديل حالة النشر الرسمية."
+                                await _notify(_test_report)
                                 _clear_processing_state()
                                 results["previewed"] += 1
                                 results["status"] = "preview_ready"
@@ -8005,6 +8134,8 @@ class AutoModFetcher:
                                         "upload_date": video.get("upload_date"),
                                         "source_name": source.get("source_name", ""),
                                     },
+                                    source_id=source_id,
+                                    pre_blog_link_text=blog_link_text,
                                 )
                                 current_yt_url = yt_url or ""
 
@@ -8254,8 +8385,13 @@ class AutoModFetcher:
                                   content_type: str, is_shorts: bool = True,
                                   source_description: str = "",
                                   source_settings: Any = None,
-                                  source_video_metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        """رفع فيديو إلى YouTube عبر ChannelManager مع تجديد التوكن مسبقاً"""
+                                  source_video_metadata: Optional[Dict[str, Any]] = None,
+                                  source_id: str = "",
+                                  pre_blog_link_text: str = "") -> Optional[str]:
+        """رفع فيديو إلى YouTube عبر ChannelManager مع تجديد التوكن مسبقاً
+        
+        pre_blog_link_text: نص رابط المقال الجاهز (تم إنشاؤه قبل المعالجة)
+        """
         try:
             from src.agent.config import load_config
             from src.agent.uploader import upload_video_with_token
@@ -8316,6 +8452,36 @@ class AutoModFetcher:
                 source_settings=source_settings,
             )
             
+            # === إضافة رابط مقال البلوجر (تم إنشاؤه قبل المعالجة) ===
+            # تم نقل الرفع السحابي + اختصار + إنشاء المقال إلى قبل المعالجة في run_cycle
+            # هنا نضيف فقط رابط المقال الجاهز للوصف
+            if pre_blog_link_text:
+                if description:
+                    description = f"{description}\n\n{pre_blog_link_text}"
+                else:
+                    description = pre_blog_link_text
+                logger.info(f"📝 Blogger article link (pre-computed) added to description for source {source_id[:15]}...")
+            elif source_id:
+                # fallback: إذا لم يتم إنشاء المقال مسبقاً (حالة نادرة)، حاول الآن
+                try:
+                    from src.agent.blogger_publisher import append_blog_link_to_description
+                    tags_for_blogger = [content_type] if content_type else []
+                    description = append_blog_link_to_description(
+                        description=description,
+                        source_id=source_id,
+                        channel_id=channel_id,
+                        video_title=final_title,
+                        video_description=source_description,
+                        content_type=content_type,
+                        source_name=source_name,
+                        tags=tags_for_blogger,
+                    )
+                    if description and "http" in description:
+                        logger.info(f"📝 Blogger article link (fallback) added to description for source {source_id[:15]}...")
+                except Exception as blog_err:
+                    logger.warning(f"Blogger article creation failed (non-critical): {blog_err}")
+            # === نهاية البلوجر ===
+
             # Use per-source privacy setting if configured, otherwise channel default
             privacy = source_settings.get("privacy") or getattr(channel, "privacy", "unlisted") or "unlisted"
 

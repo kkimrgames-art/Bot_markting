@@ -80,6 +80,8 @@ def _get_event() -> asyncio.Event:
 def _state_file() -> Path:
     base = os.getenv("HIBERNATION_STATE_FILE") or ".data/hibernation_state.json"
     p = Path(base)
+    if not os.path.isabs(str(p)):
+        p = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, str(p))))
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 

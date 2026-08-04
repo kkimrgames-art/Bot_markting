@@ -402,15 +402,18 @@ def save_bot_state(state: Dict[str, Any]) -> bool:
                 lang = parts[1] if len(parts) > 1 else "en"
                 
                 for entry in (history_list or []):
-                    supabase_upsert("ai_metadata_history", {
+                    payload = {
                         "channel_internal_id": channel_id,
                         "lang": lang,
                         "video_type": video_type,
                         "title": entry.get("title"),
                         "description": entry.get("desc"),
-                        "hashtags": entry.get("hashtags"),
-                        "ts": entry.get("ts")
-                    }, "id")
+                        "ts": entry.get("ts"),
+                    }
+                    hashtags = entry.get("hashtags")
+                    if hashtags is not None:
+                        payload["hashtags"] = hashtags
+                    supabase_upsert("ai_metadata_history", payload, "id")
     
     _save_local(full_state)
     

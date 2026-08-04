@@ -85,7 +85,11 @@ _PROXY_REFRESH_INTERVAL = int(os.getenv("PROXY_REFRESH_INTERVAL", "300"))  # 5 m
 _PROXY_SYNC_INTERVAL = int(os.getenv("PROXY_SYNC_INTERVAL", "120"))  # 2 min
 
 # State file
-_STATE_FILE = os.getenv("YOUTUBE_PROXY_STATE_FILE") or ".data/youtube_proxy_pool.json"
+_RAW_STATE_FILE = os.getenv("YOUTUBE_PROXY_STATE_FILE") or ".data/youtube_proxy_pool.json"
+if os.path.isabs(_RAW_STATE_FILE):
+    _STATE_FILE = os.path.normpath(_RAW_STATE_FILE)
+else:
+    _STATE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, _RAW_STATE_FILE))
 
 # Optional paid proxy support (zero-config: if not set, uses free proxies)
 _PAID_PROXY_URL = (os.getenv("YOUTUBE_PROXY_URL") or "").strip()
