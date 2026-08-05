@@ -39,10 +39,25 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kkimrgames-art/Bot_markt
 2. يثبّت المتطلبات في بيئة معزولة
 3. يجعل أمر `botmark` متاحاً من أي مكان (ويضيف المسار إلى PATH تلقائياً)
 
+### الطريقة الأسرع على Windows — أمر واحد (PowerShell)
+
+> ⚠️ ملاحظة: `bash` غير موجود في Windows — أمر Linux أعلاه للـ Linux/macOS فقط.
+
+افتح **PowerShell** (قائمة ابدأ → اكتب `PowerShell` → افتحه) والصق هذا السطر واضغط Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/kkimrgames-art/Bot_markting/main/install.ps1 | iex
+```
+
+المثبّت يقوم بكل شيء تلقائياً:
+1. يحمّل البرنامج إلى `%USERPROFILE%\.botmark-app`
+2. يثبّت المتطلبات في بيئة معزولة
+3. يضيف المسار إلى PATH تلقائياً — ثم `botmark` يعمل من أي نافذة جديدة
+
 ### التحميل اليدوي (اختياري)
 
 - **Linux / macOS:** نزّل المشروع من GitHub (`Code` → `Download ZIP`) وفك الضغط، ثم داخل المجلد نفّذ `bash install.sh`
-- **Windows:** نزّل `install.bat` من GitHub وشغّله بنقرة مزدوجة، ثم أضف المسار `%CD%\.venv\Scripts` إلى PATH
+- **Windows:** نزّل `install.bat` من GitHub وشغّله بنقرة مزدوجة (المثبّت يضيف المسار إلى PATH تلقائياً)
 
 ---
 
