@@ -5,10 +5,14 @@
 #   irm https://raw.githubusercontent.com/kkimrgames-art/Bot_markting/main/install.ps1 | iex
 #
 # أو نزّل الملف وشغّله:  powershell -ExecutionPolicy Bypass -File install.ps1
+#
+# ملاحظة: BotMark ليس على npm — التثبيت يكون عبر هذا المثبّت فقط.
 # ============================================================
 
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+if (-not $HOME) { $HOME = $env:USERPROFILE }
+if (-not $env:LOCALAPPDATA) { $env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local" }
 
 $RepoUrl = "https://github.com/kkimrgames-art/Bot_markting.git"
 $ZipUrl  = "https://github.com/kkimrgames-art/Bot_markting/archive/refs/heads/main.zip"
@@ -59,23 +63,68 @@ if (-not (Test-Path (Join-Path $AppDir "main.py"))) {
     }
 }
 
-# ---------- 2) التحقق من بايثون ----------
-$UsePyLauncher = $false
-if (Get-Command python -ErrorAction SilentlyContinue) {
-    # ok
-} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+# ---------- 2) التحقق من بايثون (أو تثبيته تلقائياً) ----------
+$PyExe = $null          # مسار مباشر لـ python.exe
+$UsePyLauncher = $false # استخدام py -3
+
+if (-not $PyExe -and (Get-Command python -ErrorAction SilentlyContinue)) {
+    $PyExe = (Get-Command python).Source
+}
+if (-not $PyExe -and (Get-Command py -ErrorAction SilentlyContinue)) {
     $UsePyLauncher = $true
-} else {
+}
+if (-not $PyExe -and -not $UsePyLauncher) {
+    foreach ($p in @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python310\python.exe")
+    )) {
+        if (Test-Path $p) { $PyExe = $p; break }
+    }
+}
+
+if (-not $PyExe -and -not $UsePyLauncher) {
     Write-Host "  [X] Python غير مثبت على جهازك."
-    Write-Host "      ثبّته من https://www.python.org/downloads/ (فعّل خيار Add to PATH)"
-    Write-Host "      ثم أعد تشغيل المثبّت."
-    Read-Host "  اضغط Enter للخروج"
-    exit 1
+    $ans = Read-Host "      هل تريد أن يثبّت المثبّت Python تلقائياً؟ (y/n)"
+    if ($ans -match '^y') {
+        $PyVer = "3.11.9"
+        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
+        $pyUrl = "https://www.python.org/ftp/python/$PyVer/python-$PyVer-$arch.exe"
+        $Installer = Join-Path $AppDir ".install-tmp"
+        New-Item -ItemType Directory -Force -Path $Installer | Out-Null
+        $InstallerExe = Join-Path $Installer "python-setup.exe"
+        Write-Host "  ⏳ تحميل Python $PyVer (حوالي 25MB)..."
+        & curl.exe -fsSL -o $InstallerExe $pyUrl
+        Write-Host "  ⏳ تثبيت Python تلقائياً (يستغرق دقيقة)..."
+        Start-Process -Wait -FilePath $InstallerExe -ArgumentList @("/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1", "Include_test=0")
+        Remove-Item $Installer -Recurse -Force -ErrorAction SilentlyContinue
+        $known = Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"
+        if (Test-Path $known) { $PyExe = $known }
+        if (-not $PyExe) {
+            foreach ($p in @(
+                (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+                (Join-Path $env:LOCALAPPDATA "Programs\Python\Python310\python.exe")
+            )) {
+                if (Test-Path $p) { $PyExe = $p; break }
+            }
+        }
+    }
+    if (-not $PyExe -and -not $UsePyLauncher) {
+        Write-Host "  ❌ لم يتم العثور على بايثون بعد التثبيت."
+        Write-Host "      ثبّته يدوياً من: https://www.python.org/downloads/"
+        Write-Host "      ⚠️ أثناء التثبيت فعّل خيار (Add python.exe to PATH)"
+        Write-Host "      ثم أعد تشغيل نفس الأمر."
+        Read-Host "  اضغط Enter للخروج"
+        exit 1
+    }
 }
 
 function Invoke-Py {
     param([string[]]$PyArgs)
-    if ($UsePyLauncher) { & py -3 @PyArgs } else { & python @PyArgs }
+    if ($PyExe) { & $PyExe @PyArgs } else { & py -3 @PyArgs }
 }
 
 # ---------- 3) البيئة والمتطلبات ----------
