@@ -21,29 +21,37 @@ Write-Host "  =========================================="
 Write-Host ""
 
 # ---------- 1) تحميل ملفات البرنامج ----------
+# ملاحظة مهمة: لا نعتمد على $env:TEMP إطلاقاً (قد يكون معطلاً على بعض الأجهزة)،
+# بل نستخدم مجلداً مؤقتاً خاصاً داخل مجلد التطبيق نفسه.
 if (-not (Test-Path (Join-Path $AppDir "main.py"))) {
     Write-Host "  [1/4] تحميل البرنامج إلى: $AppDir"
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     if (Get-Command git -ErrorAction SilentlyContinue) {
         git clone --depth 1 $RepoUrl $AppDir
-    } elseif (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        Push-Location $env:TEMP
-        curl.exe -fsSL -o botmark.zip $ZipUrl
-        Expand-Archive -Path botmark.zip -DestinationPath botmark-x -Force
-        $src = Get-ChildItem (Join-Path $env:TEMP "botmark-x") -Directory | Select-Object -First 1
-        Copy-Item -Path (Join-Path $src.FullName "*") -Destination $AppDir -Recurse -Force
-        Remove-Item botmark.zip -Force
-        Remove-Item botmark-x -Recurse -Force
-        Pop-Location
     } else {
-        Write-Host "  [1/4] تحميل البرنامج عبر Invoke-WebRequest..."
-        $zip = Join-Path $env:TEMP "botmark.zip"
-        Invoke-WebRequest -Uri $ZipUrl -OutFile $zip
-        Expand-Archive -Path $zip -DestinationPath (Join-Path $env:TEMP "botmark-x") -Force
-        $src = Get-ChildItem (Join-Path $env:TEMP "botmark-x") -Directory | Select-Object -First 1
-        Copy-Item -Path (Join-Path $src.FullName "*") -Destination $AppDir -Recurse -Force
-        Remove-Item $zip -Force
-        Remove-Item (Join-Path $env:TEMP "botmark-x") -Recurse -Force
+        $TmpDir = Join-Path $AppDir ".install-tmp"
+        New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+        $ZipPath = Join-Path $TmpDir "botmark.zip"
+        try {
+            if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                & curl.exe -fsSL -o $ZipPath $ZipUrl
+            } else {
+                Write-Host "  [1/4] تحميل البرنامج عبر Invoke-WebRequest..."
+                Invoke-WebRequest -Uri $ZipUrl -OutFile $ZipPath
+            }
+            Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
+            $src = Get-ChildItem (Join-Path $TmpDir "Bot_markting-main") -Directory -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            if (-not $src) {
+                $src = Get-ChildItem $TmpDir -Directory | Select-Object -First 1
+            }
+            if (-not $src) {
+                throw "تعذر العثور على ملفات المشروع بعد فك الضغط."
+            }
+            Copy-Item -Path (Join-Path $src.FullName "*") -Destination $AppDir -Recurse -Force
+        } finally {
+            Remove-Item $TmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 } else {
     if (Get-Command git -ErrorAction SilentlyContinue) {
