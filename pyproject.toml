@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "botmark"
+version = "1.0.0"
+description = "BotMark — local launcher for the Auto-Mod YouTube bot (شغّل بوت الأتمتة على جهازك)"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.scripts]
+botmark = "botmark.cli:main"
+
+[tool.setuptools]
+# Only ship the small launcher package — the bot itself lives in the repo (src/, main.py).
+packages = ["botmark"]

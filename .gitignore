@@ -1,0 +1,32 @@
+# ملفات الإعدادات السرية
+.env
+*.env
+!.gitignore
+
+# بيئة بايثون
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# إعدادات BotMark المحلية
+.botmark/
+
+# بيانات وقت التشغيل
+.temp/
+outputs/
+reactions/
+background/
+.data/
+*.lock
+
+# ملفات وسائط/اختبار كبيرة
+test.mp4
+*.mp4
+*.webm
+*.part
+
+# أدوات
+.pytest_cache/
+.mypy_cache/

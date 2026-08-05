@@ -153,7 +153,13 @@ def load_config(force_reload: bool = False) -> Config:
         return _config_cache
 
     # Load only the project-local .env to avoid cwd-dependent leakage.
-    load_dotenv(dotenv_path=resolve_project_path(".env"), override=True)
+    # إذا شُغّل البوت عبر BotMark، نستخدم ملف .env الذي اختاره المستخدم (BOTMARK_ENV_FILE).
+    botmark_env = (os.getenv("BOTMARK_ENV_FILE") or "").strip()
+    if botmark_env and os.path.isfile(botmark_env):
+        env_path = os.path.abspath(botmark_env)
+    else:
+        env_path = resolve_project_path(".env")
+    load_dotenv(dotenv_path=env_path, override=True)
 
     cfg = Config(
         # AI / Mistral
@@ -284,8 +290,12 @@ def update_admin_id(user_id: int) -> bool:
         if user_id not in cfg.TELEGRAM_ALLOWED_USER_IDS:
             cfg.TELEGRAM_ALLOWED_USER_IDS.append(user_id)
         
-        # استخدم ملف .env المحلي داخل جذر المشروع فقط.
-        env_file = resolve_project_path(".env") or os.path.join(get_project_root(), ".env")
+        # استخدم ملف الإعدادات الفعّال: ملف BotMark المختار إن وُجد، وإلا .env المحلي.
+        botmark_env = (os.getenv("BOTMARK_ENV_FILE") or "").strip()
+        if botmark_env and os.path.isfile(botmark_env):
+            env_file = os.path.abspath(botmark_env)
+        else:
+            env_file = resolve_project_path(".env") or os.path.join(get_project_root(), ".env")
         
         # قراءة المحتوى الحالي
         existing_content = ""
