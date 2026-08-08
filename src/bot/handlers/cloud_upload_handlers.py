@@ -508,10 +508,12 @@ async def _show_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         lines.append(f"\U0001f5fa\ufe0f Region: <code>{html.escape(cu.get('claudflare_region', 'auto'))}</code>")
 
     shorten = cu.get("shorten_link", False)
-    lines.append(f"\U0001f517 اختصار الروابط: {'\u2705 مفعّل' if shorten else '\u274c معطّل'}")
+    shorten_status = "\u2705 مفعّل" if shorten else "\u274c معطّل"
+    lines.append(f"\U0001f517 اختصار الروابط: {shorten_status}")
 
     blogger = cu.get("link_to_blogger", False)
-    lines.append(f"\U0001f4dd ربط مع البلوجر: {'\u2705 نعم' if blogger else '\u274c لا'}")
+    blogger_status = "\u2705 نعم" if blogger else "\u274c لا"
+    lines.append(f"\U0001f4dd ربط مع البلوجر: {blogger_status}")
     if blogger:
         pos = cu.get("blogger_link_position", "bottom")
         pos_label = {"top": "\u2b06\ufe0f أعلى", "middle": "\U0001f4cf منتصف", "bottom": "\u2b07\ufe0f أسفل"}.get(pos, pos)
