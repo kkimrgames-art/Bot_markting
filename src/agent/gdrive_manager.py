@@ -40,7 +40,7 @@ _TOKEN_CACHE_PATH = _TOKEN_CACHE_DIR / "token.json"
 # جدول Supabase لتخزين بيانات المصادقة
 GDRIVE_AUTH_TABLE = "gdrive_auth"
 
-# أنواع الفيديوهات المدعومة
+# أنواع الفيديوهات المدعومة (حسب MIME)
 SUPPORTED_VIDEO_MIMETYPES = {
     "video/mp4",
     "video/quicktime",
@@ -49,6 +49,23 @@ SUPPORTED_VIDEO_MIMETYPES = {
     "video/x-matroska",
     "video/3gpp",
     "video/mpeg",
+}
+
+# امتدادات ملفات الفيديو المدعومة
+# تُستخدم لالتقاط الملفات التي يصنفها Google Drive كـ application/octet-stream
+# (وهو الشائع لملفات .mp4 المرفوعة كملفات عامة بدل فيديوهات)
+SUPPORTED_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv",
+    ".webm",
+    ".3gp",
+    ".mpeg",
+    ".mpg",
+    ".m4v",
+    ".flv",
+    ".wmv",
 }
 
 
@@ -288,11 +305,15 @@ def get_drive_service(creds: Credentials):
 
 
 async def list_videos_in_folder(
-    folder_id: str = GDRIVE_READY_VIDEOS_FOLDER_ID,
-    max_results: int = 100,
+    folder_id: Optional[str] = None,
+    max_results: int = 200,
 ) -> List[Dict[str, Any]]:
     """
-    جلب قائمة الفيديوهات من مجلد Google Drive مرتبة من الأحدث للأقدم.
+    جلب قائمة الفيديوهات من Google Drive مرتبة من الأحدث للأقدم.
+
+    - folder_id=None  ➜ يجلب من كامل الـ My Drive (الرئيسي + كل المجلدات الفرعية)
+                       وهذا ما يظهر في الرابط drive.google.com/drive/u/0/home
+    - folder_id="xxx" ➜ يجلب من مجلد محدد فقط
     """
     creds = await get_credentials()
     if not creds:
@@ -300,12 +321,14 @@ async def list_videos_in_folder(
 
     service = get_drive_service(creds)
 
-    # البحث عن الفيديوهات في المجلد
-    query = (
-        f"'{folder_id}' in parents "
-        f"and mimeType contains 'video/' "
-        f"and trashed = false"
-    )
+    # بناء الاستعلام:
+    # 1) لا نعتمد على mimeType = 'video/' وحده لأن Google Drive يصنف أحياناً
+    #    ملفات .mp4 المرفوعة كملفات عامة على أنها application/octet-stream.
+    # 2) folder_id=None يعني "كل الـ My Drive" (بدون تقييد بأب معين).
+    if folder_id:
+        query = f"'{folder_id}' in parents and trashed = false"
+    else:
+        query = "trashed = false"
 
     results = []
     page_token = None
@@ -316,6 +339,9 @@ async def list_videos_in_folder(
                 service.files().list(
                     q=query,
                     spaces="drive",
+                    corpora="user",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
                     fields="nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, thumbnailLink, webContentLink, webViewLink)",
                     pageToken=page_token,
                     pageSize=min(100, max_results - len(results)),
@@ -329,11 +355,18 @@ async def list_videos_in_folder(
         files = response.get("files", [])
         for f in files:
             mime = f.get("mimeType", "")
-            if mime not in SUPPORTED_VIDEO_MIMETYPES and not mime.startswith("video/"):
+            name = f.get("name", "")
+            ext = os.path.splitext(name)[1].lower()
+            is_video = (
+                mime in SUPPORTED_VIDEO_MIMETYPES
+                or mime.startswith("video/")
+                or ext in SUPPORTED_VIDEO_EXTENSIONS
+            )
+            if not is_video:
                 continue
             results.append({
                 "id": f["id"],
-                "name": f.get("name", "Untitled"),
+                "name": name,
                 "mime_type": mime,
                 "size": int(f.get("size", 0)),
                 "created_time": f.get("createdTime", ""),
