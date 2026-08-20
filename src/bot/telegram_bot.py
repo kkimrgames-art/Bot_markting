@@ -71,8 +71,11 @@ def build_application(token: str):
         receive_video_title, receive_video_description, skip_description,
         receive_video_thumbnail, skip_thumbnail, start_upload,
         cancel_ready_videos, reauth_drive,
+        overlay_menu_choice, receive_overlay_text, choose_overlay_position,
+        choose_overlay_timing, receive_overlay_duration,
         RV_MENU, RV_AUTH_WAIT, RV_VIDEO_LIST, RV_VIDEO_DETAIL,
         RV_SELECT_CHANNELS, RV_TITLE, RV_DESCRIPTION, RV_THUMBNAIL, RV_CONFIRM_UPLOAD,
+        RV_OVERLAY_MENU, RV_OVERLAY_TEXT, RV_OVERLAY_POSITION, RV_OVERLAY_TIMING, RV_OVERLAY_DURATION,
     )
 
     ready_videos_conv = ConversationHandler(
@@ -122,6 +125,36 @@ def build_application(token: str):
             RV_THUMBNAIL: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.ALL, receive_video_thumbnail),
                 CallbackQueryHandler(skip_thumbnail, pattern=r"^rv_skip_thumb$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_OVERLAY_MENU: [
+                CallbackQueryHandler(overlay_menu_choice, pattern=r"^rv_overlay_add$"),
+                CallbackQueryHandler(overlay_menu_choice, pattern=r"^rv_overlay_skip$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_OVERLAY_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_overlay_text),
+                CallbackQueryHandler(overlay_menu_choice, pattern=r"^rv_overlay_skip$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_OVERLAY_POSITION: [
+                CallbackQueryHandler(choose_overlay_position, pattern=r"^rv_overlay_pos:"),
+                CallbackQueryHandler(overlay_menu_choice, pattern=r"^rv_overlay_skip$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_OVERLAY_TIMING: [
+                CallbackQueryHandler(choose_overlay_timing, pattern=r"^rv_overlay_timing:"),
+                CallbackQueryHandler(overlay_menu_choice, pattern=r"^rv_overlay_skip$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
+                CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
+            ],
+            RV_OVERLAY_DURATION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_overlay_duration),
+                CallbackQueryHandler(overlay_menu_choice, pattern=r"^rv_overlay_skip$"),
                 CallbackQueryHandler(cancel_ready_videos, pattern=r"^rv_cancel_metadata$"),
                 CallbackQueryHandler(cancel_ready_videos, pattern=r"^main_menu$"),
             ],

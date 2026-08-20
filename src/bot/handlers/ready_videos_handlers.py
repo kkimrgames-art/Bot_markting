@@ -7,6 +7,7 @@ import asyncio
 import logging
 import tempfile
 import time
+import uuid
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -28,6 +29,15 @@ logger = logging.getLogger(__name__)
     RV_THUMBNAIL,
     RV_CONFIRM_UPLOAD,
 ) = range(9)
+
+# حالات إضافة النص داخل الفيديو (Overlay) لكل قناة
+(
+    RV_OVERLAY_MENU,
+    RV_OVERLAY_TEXT,
+    RV_OVERLAY_POSITION,
+    RV_OVERLAY_TIMING,
+    RV_OVERLAY_DURATION,
+) = range(9, 14)
 
 
 # ==================== مساعدات عامة ====================
@@ -113,7 +123,7 @@ async def start_ready_videos(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text = (
             "🎬 <b>الفيديوهات الجاهزة</b>\n\n"
             "⚠️ لم يتم المصادقة مع Google Drive بعد.\n\n"
-            "قم بالمصادقة أولاً لعرض الفيديوهات المتاحة في المجلد المحدد."
+            "قم بالمصادقة أولاً لعرض كل الفيديوهات المتاحة في قرص Google Drive الخاص بك."
         )
 
     await _send_or_edit(update, context, text, InlineKeyboardMarkup(keyboard))
@@ -241,7 +251,8 @@ async def list_drive_videos(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         from src.agent.gdrive_manager import list_videos_in_folder
 
-        videos = await list_videos_in_folder()
+        # جلب كل الفيديوهات من الـ My Drive (الرئيسي + المجلدات الفرعية)
+        videos = await list_videos_in_folder(folder_id=None)
 
         if not videos:
             text = "📭 <b>لا توجد فيديوهات</b>\n\nلم يتم العثور على فيديوهات في المجلد المحدد."
@@ -383,17 +394,34 @@ async def _show_channel_selection(update, context) -> int:
             f"📺 <b>اختيار القنوات للنشر</b>\n\n"
             f"📹 الفيديو: <b>{html.escape(video.get('name', ''))}</b>\n\n"
             f"اختر القنوات (يمكن اختيار عدة قنوات):\n"
+            f"🔍 يتم التحقق من جاهزية توكن كل قناة تلقائياً.\n"
         )
 
         context.user_data["rv_selected_channels"] = []
         context.user_data["rv_all_channels"] = [
-            {"id": ch.channel_id, "name": ch.channel_name} for ch in channels
+            {
+                "id": ch.channel_id,
+                "name": ch.channel_name,
+                "youtube_channel_id": getattr(ch, "youtube_channel_id", "") or "",
+            }
+            for ch in channels
         ]
+
+        # التحقق من جاهزية التوكن لكل قناة قبل العرض
+        ready_map = {}
+        for ch in channels:
+            ready, _p, reason = await _check_channel_token_ready(ch.channel_id)
+            ready_map[ch.channel_id] = (ready, reason)
 
         keyboard = []
         for ch in channels:
+            ready, reason = ready_map.get(ch.channel_id, (False, ""))
+            status_icon = "✅" if ready else "⚠️"
+            label = f"{status_icon} {html.escape(ch.channel_name[:28])}"
+            if not ready:
+                label += " (بدون توكن)"
             keyboard.append([
-                InlineKeyboardButton(f"⬜ {html.escape(ch.channel_name[:30])}", callback_data=f"rv_toggle_ch:{ch.channel_id}")
+                InlineKeyboardButton(label, callback_data=f"rv_toggle_ch:{ch.channel_id}")
             ])
         keyboard.append([InlineKeyboardButton("✅ تأكيد الاختيار", callback_data="rv_confirm_channels")])
         keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data="rv_list_videos")])
@@ -417,6 +445,20 @@ async def toggle_channel_selection(update: Update, context: ContextTypes.DEFAULT
     ch_id = query.data.split(":", 1)[1]
     selected = context.user_data.get("rv_selected_channels", [])
     all_channels = context.user_data.get("rv_all_channels", [])
+
+    # التحقق من جاهزية التوكن قبل السماح باختيار القناة
+    if ch_id not in selected:
+        ready, _p, reason = await _check_channel_token_ready(ch_id)
+        if not ready:
+            ch_name = next((c["name"] for c in all_channels if c["id"] == ch_id), ch_id)
+            await _send_or_edit(
+                update, context,
+                f"⚠️ <b>لا يمكن اختيار هذه القناة:</b>\n"
+                f"📺 {html.escape(ch_name)}\n\n"
+                f"السبب: {html.escape(reason)}\n\n"
+                f"🔑 أضف توكن القناة أولاً من إدارة القنوات، ثم عُد للمحاولة."
+            )
+            return RV_SELECT_CHANNELS
 
     if ch_id in selected:
         selected.remove(ch_id)
@@ -452,6 +494,23 @@ async def confirm_channel_selection(update: Update, context: ContextTypes.DEFAUL
     selected = context.user_data.get("rv_selected_channels", [])
     if not selected:
         await _send_or_edit(update, context, "⚠️ اختر قناة واحدة على الأقل.")
+        return RV_SELECT_CHANNELS
+
+    # فحص نهائي: تأكد أن كل قناة مختارة لديها توكن جاهز
+    not_ready = []
+    for ch_id in selected:
+        ready, _p, reason = await _check_channel_token_ready(ch_id)
+        if not ready:
+            ch_name = next((c["name"] for c in context.user_data.get("rv_all_channels", []) if c["id"] == ch_id), ch_id)
+            not_ready.append(f"• {html.escape(ch_name)}: {html.escape(reason)}")
+
+    if not_ready:
+        await _send_or_edit(
+            update, context,
+            "⚠️ <b>بعض القنوات المختارة غير جاهزة للنشر:</b>\n\n"
+            + "\n".join(not_ready)
+            + "\n\n🔑 أضف توكن القناة من إدارة القنوات ثم عُد للمحاولة."
+        )
         return RV_SELECT_CHANNELS
 
     context.user_data["rv_pending_channels"] = list(selected)
@@ -576,7 +635,7 @@ async def receive_video_thumbnail(update: Update, context: ContextTypes.DEFAULT_
         )
         return RV_THUMBNAIL
 
-    return await _advance_to_next_channel(update, context)
+    return await _ask_overlay_menu(update, context)
 
 
 async def skip_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -587,7 +646,7 @@ async def skip_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ch_id = context.user_data.get("rv_current_channel_id")
     context.user_data["rv_channel_metadata"][ch_id]["thumbnail_path"] = ""
 
-    return await _advance_to_next_channel(update, context)
+    return await _ask_overlay_menu(update, context)
 
 
 async def _advance_to_next_channel(update, context) -> int:
@@ -600,6 +659,152 @@ async def _advance_to_next_channel(update, context) -> int:
         return await _start_channel_metadata_input(update, context)
     else:
         return await _show_upload_confirmation(update, context)
+
+
+# ==================== إضافة نص داخل الفيديو (Overlay) ====================
+async def _ask_overlay_menu(update, context) -> int:
+    """سؤال المستخدم عن إضافة نص داخل الفيديو لهذه القناة"""
+    ch_id = context.user_data.get("rv_current_channel_id")
+    ch_name = next((c["name"] for c in context.user_data.get("rv_all_channels", []) if c["id"] == ch_id), ch_id)
+    text = (
+        f"📝 <b>نص داخل الفيديو (Overlay)</b>\n\n"
+        f"📺 القناة: <b>{html.escape(ch_name)}</b>\n\n"
+        f"هل تريد إضافة نص يظهر داخل الفيديو (بنفس جودة نظام المودات)؟\n"
+        f"يمكنك تحديد النص ومكانه ومدته لاحقاً."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ إضافة نص للفيديو", callback_data="rv_overlay_add")],
+        [InlineKeyboardButton("⏭️ بدون نص", callback_data="rv_overlay_skip")],
+    ])
+    await _send_or_edit(update, context, text, keyboard)
+    return RV_OVERLAY_MENU
+
+
+async def overlay_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """معالجة اختيار القائمة: إضافة نص أو تخطي"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    ch_id = context.user_data.get("rv_current_channel_id")
+    metadata = context.user_data.setdefault("rv_channel_metadata", {})
+    metadata.setdefault(ch_id, {})
+
+    if query.data == "rv_overlay_skip":
+        metadata[ch_id]["overlay"] = {"enabled": False}
+        return await _advance_to_next_channel(update, context)
+
+    text = (
+        "✍️ <b>أدخل النص الذي سيظهر داخل الفيديو</b>\n\n"
+        "أرسل النص الآن (يدعم العربية والإنجليزية ورموز الإيموجي).\n"
+        "مثال: اشترك في القناة 🔔"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ تخطي النص", callback_data="rv_overlay_skip")],
+    ])
+    await _send_or_edit(update, context, text, keyboard)
+    return RV_OVERLAY_TEXT
+
+
+async def receive_overlay_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استقبال نص الـ overlay"""
+    text = (update.message.text or "").strip()
+    if not text:
+        await update.message.reply_text("❌ النص فارغ. أرسل النص الذي تريد إظهاره داخل الفيديو:")
+        return RV_OVERLAY_TEXT
+
+    ch_id = context.user_data.get("rv_current_channel_id")
+    context.user_data["rv_channel_metadata"][ch_id].setdefault("overlay", {})["text"] = text
+
+    return await _ask_overlay_position(update, context)
+
+
+async def _ask_overlay_position(update, context) -> int:
+    """اختيار مكان النص داخل الفيديو"""
+    text = (
+        "📍 <b>مكان النص داخل الفيديو</b>\n\n"
+        "اختر المكان المفضل لظهور النص:"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬆️ أعلى الفيديو", callback_data="rv_overlay_pos:top")],
+        [InlineKeyboardButton("➡️ منتصف الفيديو", callback_data="rv_overlay_pos:center")],
+        [InlineKeyboardButton("⬇️ أسفل الفيديو", callback_data="rv_overlay_pos:bottom")],
+        [InlineKeyboardButton("⏭️ تخطي النص", callback_data="rv_overlay_skip")],
+    ])
+    await _send_or_edit(update, context, text, keyboard)
+    return RV_OVERLAY_POSITION
+
+
+async def choose_overlay_position(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """معالجة اختيار المكان"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    pos = query.data.split(":", 1)[1]
+    ch_id = context.user_data.get("rv_current_channel_id")
+    context.user_data["rv_channel_metadata"][ch_id]["overlay"]["screen_position"] = pos
+
+    return await _ask_overlay_timing(update, context)
+
+
+async def _ask_overlay_timing(update, context) -> int:
+    """اختيار توقيت ظهور النص"""
+    text = (
+        "⏱️ <b>توقيت ظهور النص</b>\n\n"
+        "اختر متى يظهر النص في الفيديو:"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏁 من البداية", callback_data="rv_overlay_timing:start")],
+        [InlineKeyboardButton("🏁 حتى النهاية", callback_data="rv_overlay_timing:end")],
+        [InlineKeyboardButton("🔁 طوال الفيديو", callback_data="rv_overlay_timing:full")],
+        [InlineKeyboardButton("⏭️ تخطي النص", callback_data="rv_overlay_skip")],
+    ])
+    await _send_or_edit(update, context, text, keyboard)
+    return RV_OVERLAY_TIMING
+
+
+async def choose_overlay_timing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """معالجة اختيار التوقيت"""
+    query = update.callback_query
+    await _safe_answer(query)
+
+    timing = query.data.split(":", 1)[1]
+    ch_id = context.user_data.get("rv_current_channel_id")
+    overlay = context.user_data["rv_channel_metadata"][ch_id]["overlay"]
+    overlay["timing"] = timing
+    overlay["enabled"] = True
+    overlay.setdefault("font_size", 56)
+
+    if timing == "full":
+        # طوال الفيديو: لا نحتاج مدة
+        overlay["duration"] = 0.0
+        return await _advance_to_next_channel(update, context)
+
+    text = (
+        "⏳ <b>مدة ظهور النص (بالثواني)</b>\n\n"
+        "أرسل المدة بالثواني، مثال: <code>3</code> أو <code>5.5</code>"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ تخطي النص", callback_data="rv_overlay_skip")],
+    ])
+    await _send_or_edit(update, context, text, keyboard)
+    return RV_OVERLAY_DURATION
+
+
+async def receive_overlay_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """استقبال مدة ظهور النص"""
+    raw = (update.message.text or "").strip().replace(",", ".")
+    try:
+        duration = max(0.5, float(raw))
+    except Exception:
+        await update.message.reply_text("❌ أدخل رقماً صحيحاً بالثواني، مثال: 3")
+        return RV_OVERLAY_DURATION
+
+    ch_id = context.user_data.get("rv_current_channel_id")
+    overlay = context.user_data["rv_channel_metadata"][ch_id]["overlay"]
+    overlay["duration"] = duration
+    overlay["enabled"] = True
+
+    return await _advance_to_next_channel(update, context)
 
 
 # ==================== تأكيد الرفع ====================
@@ -617,7 +822,19 @@ async def _show_upload_confirmation(update, context) -> int:
         ch_meta = metadata.get(ch_id, {})
         title = html.escape(ch_meta.get("title", "بدون عنوان"))
         has_thumb = "✅" if ch_meta.get("thumbnail_path") else "❌"
-        text += f"📺 <b>{html.escape(ch_name)}</b>\n   📝 {title}\n   🖼️ {has_thumb}\n\n"
+        overlay = ch_meta.get("overlay") or {}
+        if overlay.get("enabled") and overlay.get("text"):
+            ov_text = html.escape(overlay.get("text", ""))
+            ov_pos = overlay.get("screen_position", "top")
+            ov_timing = overlay.get("timing", "full")
+            if ov_timing == "full":
+                ov_dur = "طوال الفيديو"
+            else:
+                ov_dur = f"{overlay.get('duration', 2.0)} ث"
+            ov_line = f"✍️ {ov_text} | 📍 {ov_pos} | ⏱️ {ov_timing} ({ov_dur})"
+        else:
+            ov_line = "❌"
+        text += f"📺 <b>{html.escape(ch_name)}</b>\n   📝 {title}\n   🖼️ {has_thumb}\n   📝 نص: {ov_line}\n\n"
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 بدء الرفع", callback_data="rv_start_upload")],
@@ -678,6 +895,40 @@ async def _process_next_upload(update, context) -> int:
 
         await gdrive_download(video_id, local_path)
 
+        # تطبيق النص داخل الفيديو (Overlay) بنفس جودة نظام المودات
+        overlay = ch_meta.get("overlay") or {}
+        if overlay.get("enabled") and overlay.get("text"):
+            try:
+                from src.agent.mod_video_processor import ModVideoProcessor
+
+                processor = ModVideoProcessor()
+                overlaid_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}_overlay.mp4")
+                await asyncio.to_thread(
+                    processor.add_custom_overlay_text,
+                    local_path,
+                    overlaid_path,
+                    overlay["text"],
+                    overlay.get("timing", "full"),
+                    float(overlay.get("duration", 2.0) or 0.0),
+                    overlay.get("screen_position", "top"),
+                    None,  # overlay_image_path
+                    None,  # intro_animation
+                    None,  # outro_animation
+                    None,  # custom_font
+                    int(overlay.get("font_size", 56) or 56),
+                )
+                if os.path.exists(overlaid_path) and os.path.getsize(overlaid_path) > 0:
+                    local_path = overlaid_path
+                    logger.info(f"✅ Overlay text applied for channel {ch_name}")
+                else:
+                    logger.warning(f"⚠️ Overlay output empty, uploading original video for {ch_name}")
+            except Exception as ov_err:
+                logger.error(f"Overlay text failed for {ch_name}: {ov_err}", exc_info=True)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ تعذّر إضافة النص داخل الفيديو لـ {ch_name}، سيتم رفع الفيديو الأصلي."
+                )
+
         channel_token_path = await _get_channel_token_path(ch_id)
 
         if not channel_token_path:
@@ -718,16 +969,56 @@ async def _process_next_upload(update, context) -> int:
     return await _process_next_upload(update, context)
 
 
-async def _get_channel_token_path(channel_id: str) -> str:
-    """الحصول على مسار توكن القناة"""
+async def _check_channel_token_ready(channel_id: str) -> tuple[bool, str, str]:
+    """
+    التحقق من وجود توكن صالح للقناة وجاهزيته للنشر.
+    يرجع: (جاهز؟, مسار_التوكن, سبب_الفشل)
+    """
     try:
-        from src.bot.channel_manager import resolve_youtube_token_path
-        path = await asyncio.to_thread(resolve_youtube_token_path, channel_id)
-        if path and os.path.exists(path):
-            return path
-    except Exception as e:
-        logger.error(f"Failed to get channel token: {e}")
+        from src.bot.channel_manager import ChannelManager, resolve_channel_token_path
 
+        manager = ChannelManager()
+        channel = await asyncio.to_thread(manager.get_channel, channel_id)
+        if channel is None:
+            return False, "", "القناة غير موجودة محلياً"
+
+        token_path = resolve_channel_token_path(channel)
+        if not token_path or not os.path.exists(token_path):
+            tp = channel.token_path
+            if tp and os.path.exists(tp):
+                token_path = tp
+        if not token_path or not os.path.exists(token_path):
+            return False, "", "ملف التوكن غير موجود لهذه القناة"
+
+        try:
+            from src.agent.uploader import _creds_from_token_file
+            creds = _creds_from_token_file(token_path)
+        except Exception as e:
+            return False, token_path, f"تعذّر قراءة التوكن: {e}"
+
+        # محاولة تجديد التوكن إذا انتهت صلاحيته
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                from google.auth.transport.requests import Request
+                creds.refresh(Request())
+            except Exception:
+                pass
+
+        if creds and creds.valid:
+            return True, token_path, ""
+        return False, token_path, "التوكن منتهٍ الصلاحية أو غير صالح"
+    except Exception as e:
+        logger.error(f"Failed to check channel token: {e}")
+        return False, "", str(e)
+
+
+async def _get_channel_token_path(channel_id: str) -> str:
+    """الحصول على مسار توكن القناة (مع التحقق من صلاحيته)"""
+    ready, path, _reason = await _check_channel_token_ready(channel_id)
+    if ready and path:
+        return path
+
+    # احتياطي: أي ملف توكن متاح في مجلد youtube_tokens
     data_dir = os.path.join(os.getcwd(), ".data", "youtube_tokens")
     if os.path.exists(data_dir):
         for f in os.listdir(data_dir):
